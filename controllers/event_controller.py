@@ -2,8 +2,7 @@ import asyncio
 import functools
 import logging
 
-# TODO: Remove this import
-from keep.common.event_management.process_event_task import process_event
+from event_managment.process_event_task import process_event
 
 from models.event_dto import EventDTO
 

@@ -5,8 +5,7 @@ from dotenv import find_dotenv, load_dotenv
 from prometheus_fastapi_instrumentator import Instrumentator
 
 import logging_conf
-# TODO: remove 
-import keep.common.observability
+import observability
 from config.consts import KEEP_OTEL_ENABLED
 from api.routes.v1 import health, metrics
 from core.lifespan import lifespan
@@ -29,7 +28,7 @@ app.include_router(metrics.router, prefix="/v1", tags=["metrics"])
 app.include_router(health.router, tags=["root"])
 
 if bool(KEEP_OTEL_ENABLED):
-    keep.common.observability.setup(app)
+    observability.setup(app)
 
 Instrumentator(
     excluded_handlers=["/metrics", "/health"],

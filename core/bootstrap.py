@@ -11,10 +11,8 @@ from config.consts import
     AUTH_TYPE,
     LOG_LEVEL
 
-from core.redis_worker import get_arq_worker, safe_run_worker
 
-# TODO: no import
-from keep.workflowmanager.workflowmanager import WorkflowManager
+from core.init import init_services
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +26,6 @@ class Bootstrap:
         """Runs the legacy on_starting hooks in a separate thread."""
         try:
             # TODO: get rid of import
-            from keep.common.core.init import init_services
             # Default to noauth if not specified
             auth_type = A
 
@@ -52,11 +49,7 @@ class Bootstrap:
             # Review plan suggested crashing if vital, but lets stick to current behavior + cleanup
             raise e
 
-    async def start_workflow_manager(self):
-        logger.info("Starting Workflow Manager")
-        wf_manager = WorkflowManager.get_instance()
-        await wf_manager.start()
-        logger.info("Workflow Manager started")
+   
 
     async def run_arq_worker(self, worker_id, number_of_errors_before_restart=0):
         print(f"DEBUG: run_arq_worker started for {worker_id}")
@@ -68,7 +61,6 @@ class Bootstrap:
             sys.exit(1)
 
         self._apply_debug_patches()
-        await self.start_workflow_manager()
 
         # Get and run the ARQ worker
         logger.info(f"Getting ARQ worker for queue {queue_name}")
@@ -94,4 +86,3 @@ class Bootstrap:
         if LOG_LEVEL == "DEBUG":
             logger.info("Applying ARQ debug patches")
             # Legacy logic placeholder
-            pass
