@@ -15,6 +15,84 @@ class AlertStatus(Enum):
     # Affected by Maintenance Windows
     MAINTENANCE = "maintenance"
 
+class DeduplicationRuleRequestDto(BaseModel):
+    name: str
+    description: Optional[str] = None
+    provider_type: str
+    provider_id: Optional[str] = None
+    fingerprint_fields: list[str]
+    full_deduplication: bool = False
+    ignore_fields: Optional[list[str]] = None
+
+class DeduplicationRuleDto(BaseModel):
+    id: str | None  # UUID
+    name: str
+    description: str
+    default: bool
+    distribution: list[dict]  # list of {hour: int, count: int}
+    provider_id: str | None  # None for default rules
+    provider_type: str
+    last_updated: str | None
+    last_updated_by: str | None
+    created_at: str | None
+    created_by: str | None
+    ingested: int
+    dedup_ratio: float
+    enabled: bool
+    fingerprint_fields: list[str]
+    full_deduplication: bool
+    ignore_fields: list[str]
+    is_provisioned: bool
+
+class SeverityBaseInterface(Enum):
+    def __new__(cls, severity_name, severity_order):
+        obj = object.__new__(cls)
+        obj._value_ = severity_name
+        obj.severity_order = severity_order
+        return obj
+
+    @property
+    def order(self):
+        return self.severity_order
+
+    def __str__(self):
+        return self._value_
+
+    @classmethod
+    def from_number(cls, n):
+        for severity in cls:
+            if severity.order == n:
+                return severity
+        raise ValueError(f"No AlertSeverity with order {n}")
+
+    def __lt__(self, other):
+        if isinstance(other, SeverityBaseInterface):
+            return self.order < other.order
+        return NotImplemented
+
+    def __le__(self, other):
+        if isinstance(other, SeverityBaseInterface):
+            return self.order <= other.order
+        return NotImplemented
+
+    def __gt__(self, other):
+        if isinstance(other, SeverityBaseInterface):
+            return self.order > other.order
+        return NotImplemented
+
+    def __ge__(self, other):
+        if isinstance(other, SeverityBaseInterface):
+            return self.order >= other.order
+        return NotImplemented
+
+
+class AlertSeverity(SeverityBaseInterface):
+    CRITICAL = ("critical", 5)
+    HIGH = ("high", 4)
+    WARNING = ("warning", 3)
+    INFO = ("info", 2)
+    LOW = ("low", 1)
+
 
 
 class AlertDto(BaseModel):
@@ -281,3 +359,12 @@ class AlertDto(BaseModel):
             Enum: lambda v: v.value,
         }
 
+class AlertWithIncidentLinkMetadataDto(AlertDto):
+    is_created_by_ai: bool = False
+
+    @classmethod
+    def from_db_instance(cls, db_alert, db_alert_to_incident):
+        return cls(
+            is_created_by_ai=db_alert_to_incident.is_created_by_ai,
+            **db_alert.event,
+        )

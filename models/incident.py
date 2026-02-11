@@ -1,5 +1,8 @@
 from db.incident import Incident
 
+from core.db.db import get_incident_alerts_by_incident_id
+from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
+
 class IncidentDtoIn(BaseModel):
     user_generated_name: str | None
     assignee: str | None
@@ -19,6 +22,30 @@ class IncidentDtoIn(BaseModel):
                 }
             ]
         }
+
+
+
+class IncidentSorting(Enum):
+    creation_time = "creation_time"
+    start_time = "start_time"
+    last_seen_time = "last_seen_time"
+    severity = "severity"
+    status = "status"
+    alerts_count = "alerts_count"
+
+    creation_time_desc = "-creation_time"
+    start_time_desc = "-start_time"
+    last_seen_time_desc = "-last_seen_time"
+    severity_desc = "-severity"
+    status_desc = "-status"
+    alerts_count_desc = "-alerts_count"
+
+    def get_order_by(self, model):
+        if self.value.startswith("-"):
+            return desc(col(getattr(model, self.value[1:])))
+
+        return col(getattr(model, self.value))
+
 
 class IncidentDto(IncidentDtoIn):
     id: UUID
@@ -98,9 +125,6 @@ class IncidentDto(IncidentDtoIn):
     def alerts(self) -> List:
         if self._alerts is not None:
             return self._alerts
-
-        from keep.common.core.db import get_incident_alerts_by_incident_id
-        from keep.common.utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
 
         try:
             if not self._tenant_id:

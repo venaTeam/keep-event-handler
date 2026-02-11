@@ -1,0 +1,377 @@
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Tuple
+
+from sqlalchemy import String, and_, case, cast, func, select
+from sqlalchemy.orm import aliased, foreign
+from sqlmodel import Session, col, text
+
+from core.cel_to_sql.properties_mapper import (
+    PropertiesMappingException,
+)
+from core.cel_to_sql.sql_providers.base import CelToSqlException
+from core.cel_to_sql.sql_providers.get_cel_to_sql_provider_for_dialect import (
+    get_cel_to_sql_provider,
+)
+from core.db.db import engine, enrich_incidents_with_alerts
+from models.db.alert import (
+    Alert,
+    AlertEnrichment,
+    LastAlert,
+    LastAlertToIncident,
+)
+
+from models.db.incident import Incident
+from models.incident import IncidentSorting
+from models.query import SortOptionsDto
+
+logger = logging.getLogger(__name__)
+
+
+incident_enrichment = aliased(AlertEnrichment, name="incidentenrichment")
+
+
+def __build_base_incident_query(
+    tenant_id: str,
+    select_args: list,
+    cel=None,
+    force_fetch_alerts=False,
+    force_fetch_has_linked_incident=False,
+):
+    fetch_alerts = False
+    fetch_has_linked_incident = False
+    cel_to_sql_instance = get_cel_to_sql_provider(properties_metadata)
+    sql_filter = None
+    involved_fields = []
+
+    if cel:
+        cel_to_sql_result = cel_to_sql_instance.convert_to_sql_str_v2(cel)
+        sql_filter = cel_to_sql_result.sql
+        involved_fields = cel_to_sql_result.involved_fields
+        fetch_alerts = next(
+            (
+                True
+                for field in involved_fields
+                if field.field_name.startswith("alert.")
+            ),
+            False,
+        )
+        fetch_has_linked_incident = next(
+            (
+                True
+                for field in involved_fields
+                if field.field_name == "hasLinkedIncident"
+            ),
+            False,
+        )
+
+    sql_query = select(*select_args).select_from(Incident)
+
+    if fetch_alerts or force_fetch_alerts:
+        sql_query = (
+            sql_query.outerjoin(
+                LastAlertToIncident,
+                and_(
+                    LastAlertToIncident.incident_id == Incident.id,
+                    LastAlertToIncident.tenant_id == tenant_id,
+                ),
+            )
+            .outerjoin(
+                LastAlert,
+                and_(
+                    LastAlert.tenant_id == tenant_id,
+                    LastAlert.fingerprint == LastAlertToIncident.fingerprint,
+                ),
+            )
+            .outerjoin(
+                Alert,
+                and_(LastAlert.alert_id == Alert.id, LastAlert.tenant_id == tenant_id),
+            )
+            .outerjoin(
+                AlertEnrichment,
+                and_(
+                    AlertEnrichment.alert_fingerprint == Alert.fingerprint,
+                    AlertEnrichment.tenant_id == tenant_id,
+                ),
+            )
+        )
+
+    sql_query = sql_query.outerjoin(
+        incident_enrichment,
+        and_(
+            Incident.tenant_id == incident_enrichment.tenant_id,
+            cast(col(Incident.id), String)
+            == foreign(incident_enrichment.alert_fingerprint),
+        ),
+    )
+
+    if fetch_has_linked_incident or force_fetch_has_linked_incident:
+        additional_incident_fields = (
+            select(
+                Incident.id,
+                case(
+                    (
+                        Incident.same_incident_in_the_past_id.isnot(None),
+                        True,
+                    ),
+                    else_=False,
+                ).label("incident_has_linked_incident"),
+            )
+            .select_from(Incident)
+            .subquery("addional_incident_fields")
+        )
+        sql_query = sql_query.join(
+            additional_incident_fields, Incident.id == additional_incident_fields.c.id
+        )
+
+    sql_query = sql_query.filter(Incident.tenant_id == tenant_id).filter(
+        Incident.is_visible == True
+    )
+    if sql_filter:
+        sql_query = sql_query.where(text(sql_filter))
+
+    return {
+        "query": sql_query,
+        "involved_fields": involved_fields,
+        "fetch_alerts": fetch_alerts,
+    }
+
+
+def __build_last_incidents_total_count_query(
+    tenant_id: str,
+    timeframe: int = None,
+    upper_timestamp: datetime = None,
+    lower_timestamp: datetime = None,
+    is_candidate: bool = False,
+    is_predicted: bool = None,
+    cel: str = None,
+    allowed_incident_ids: Optional[List[str]] = None,
+):
+    """
+    Builds a SQL query to retrieve the last incidents based on various filters and sorting options.
+
+    Args:
+        dialect (str): The SQL dialect to use.
+        tenant_id (str): The tenant ID to filter incidents.
+        limit (int, optional): The maximum number of incidents to return. Defaults to 25.
+        offset (int, optional): The number of incidents to skip before starting to return results. Defaults to 0.
+        timeframe (int, optional): The number of days to look back from the current date for incidents. Defaults to None.
+        upper_timestamp (datetime, optional): The upper bound timestamp for filtering incidents. Defaults to None.
+        lower_timestamp (datetime, optional): The lower bound timestamp for filtering incidents. Defaults to None.
+        is_candidate (bool, optional): Filter for confirmed incidents. Defaults to False.
+        sorting (Optional[IncidentSorting], optional): The sorting criteria for the incidents. Defaults to IncidentSorting.creation_time.
+        is_predicted (bool, optional): Filter for predicted incidents. Defaults to None.
+        cel (str, optional): The CEL (Common Expression Language) string to convert to SQL. Defaults to None.
+        allowed_incident_ids (Optional[List[str]], optional): List of allowed incident IDs to filter. Defaults to None.
+
+    Returns:
+        sqlalchemy.sql.selectable.Select: The constructed SQL query.
+    """
+    fetch_alerts = cel and "alert." in cel
+
+    count_funct = (
+        func.count(func.distinct(Incident.id)) if fetch_alerts else func.count(1)
+    )
+
+    query = __build_base_incident_query(
+        tenant_id=tenant_id,
+        cel=cel,
+        select_args=[count_funct],
+    )["query"]
+
+    query = query.filter(Incident.is_candidate == is_candidate)
+
+    if allowed_incident_ids:
+        query = query.filter(Incident.id.in_(allowed_incident_ids))
+
+    if is_predicted is not None:
+        query = query.filter(Incident.is_predicted == is_predicted)
+
+    if timeframe:
+        query = query.filter(
+            Incident.start_time
+            >= datetime.now(tz=timezone.utc) - timedelta(days=timeframe)
+        )
+
+    if upper_timestamp and lower_timestamp:
+        query = query.filter(
+            col(Incident.last_seen_time).between(lower_timestamp, upper_timestamp)
+        )
+    elif upper_timestamp:
+        query = query.filter(Incident.last_seen_time <= upper_timestamp)
+    elif lower_timestamp:
+        query = query.filter(Incident.last_seen_time >= lower_timestamp)
+
+    return query
+
+
+def __build_last_incidents_query(
+    tenant_id: str,
+    limit: int = 25,
+    offset: int = 0,
+    timeframe: int = None,
+    upper_timestamp: datetime = None,
+    lower_timestamp: datetime = None,
+    is_candidate: bool = False,
+    sorting: Optional[IncidentSorting] = IncidentSorting.creation_time,
+    is_predicted: bool = None,
+    cel: str = None,
+    allowed_incident_ids: Optional[List[str]] = None,
+):
+    """
+    Builds a SQL query to retrieve the last incidents based on various filters and sorting options.
+
+    Args:
+        dialect (str): The SQL dialect to use.
+        tenant_id (str): The tenant ID to filter incidents.
+        limit (int, optional): The maximum number of incidents to return. Defaults to 25.
+        offset (int, optional): The number of incidents to skip before starting to return results. Defaults to 0.
+        timeframe (int, optional): The number of days to look back from the current date for incidents. Defaults to None.
+        upper_timestamp (datetime, optional): The upper bound timestamp for filtering incidents. Defaults to None.
+        lower_timestamp (datetime, optional): The lower bound timestamp for filtering incidents. Defaults to None.
+        is_candidate (bool, optional): Filter for confirmed incidents. Defaults to False.
+        sorting (Optional[IncidentSorting], optional): The sorting criteria for the incidents. Defaults to IncidentSorting.creation_time.
+        is_predicted (bool, optional): Filter for predicted incidents. Defaults to None.
+        cel (str, optional): The CEL (Common Expression Language) string to convert to SQL. Defaults to None.
+        allowed_incident_ids (Optional[List[str]], optional): List of allowed incident IDs to filter. Defaults to None.
+
+    Returns:
+        sqlalchemy.sql.selectable.Select: The constructed SQL query.
+    """
+    sort_dir = "DESC" if "-" in sorting.value else "ASC"
+    sort_by = sorting.value.replace("-", "")
+    sort_options: list[SortOptionsDto] = [
+        SortOptionsDto(sort_by=sort_by, sort_dir=sort_dir)
+    ]
+    cel_to_sql_instance = get_cel_to_sql_provider(properties_metadata)
+    sort_by_exp = cel_to_sql_instance.get_order_by_expression(
+        [(sort_option.sort_by, sort_option.sort_dir) for sort_option in sort_options]
+    )
+    distinct_columns = [
+        text(cel_to_sql_instance.get_field_expression(sort_option.sort_by))
+        for sort_option in sort_options
+    ]
+
+    built_query_result = __build_base_incident_query(
+        tenant_id=tenant_id,
+        cel=cel,
+        select_args=[Incident, incident_enrichment],
+    )
+    sql_query = built_query_result["query"]
+    fetch_alerts = built_query_result["fetch_alerts"]
+    sql_query = sql_query.order_by(text(sort_by_exp))
+
+    sql_query = sql_query.filter(Incident.is_candidate == is_candidate)
+
+    if allowed_incident_ids:
+        sql_query = sql_query.filter(Incident.id.in_(allowed_incident_ids))
+
+    if is_predicted is not None:
+        sql_query = sql_query.filter(Incident.is_predicted == is_predicted)
+
+    if timeframe:
+        sql_query = sql_query.filter(
+            Incident.start_time
+            >= datetime.now(tz=timezone.utc) - timedelta(days=timeframe)
+        )
+
+    if upper_timestamp and lower_timestamp:
+        sql_query = sql_query.filter(
+            col(Incident.last_seen_time).between(lower_timestamp, upper_timestamp)
+        )
+    elif upper_timestamp:
+        sql_query = sql_query.filter(Incident.last_seen_time <= upper_timestamp)
+    elif lower_timestamp:
+        sql_query = sql_query.filter(Incident.last_seen_time >= lower_timestamp)
+
+    if fetch_alerts:
+        sql_query = sql_query.distinct(*(distinct_columns + [Incident.id]))
+
+    # Order by start_time in descending order and limit the results
+    sql_query = sql_query.limit(limit).offset(offset)
+    return sql_query
+
+
+def get_last_incidents_by_cel(
+    tenant_id: str,
+    limit: int = 25,
+    offset: int = 0,
+    timeframe: int = None,
+    upper_timestamp: datetime = None,
+    lower_timestamp: datetime = None,
+    is_candidate: bool = False,
+    sorting: Optional[IncidentSorting] = IncidentSorting.creation_time,
+    with_alerts: bool = False,
+    is_predicted: bool = None,
+    cel: str = None,
+    allowed_incident_ids: Optional[List[str]] = None,
+) -> Tuple[list[Incident], int]:
+    """
+    Retrieve the last incidents for a given tenant based on various filters and criteria.
+    Args:
+        tenant_id (str): The ID of the tenant.
+        limit (int, optional): The maximum number of incidents to return. Defaults to 25.
+        offset (int, optional): The number of incidents to skip before starting to collect the result set. Defaults to 0.
+        timeframe (int, optional): The timeframe in which to look for incidents. Defaults to None.
+        upper_timestamp (datetime, optional): The upper bound timestamp for filtering incidents. Defaults to None.
+        lower_timestamp (datetime, optional): The lower bound timestamp for filtering incidents. Defaults to None.
+        is_candidate (bool, optional): Filter for confirmed incidents. Defaults to False.
+        sorting (Optional[IncidentSorting], optional): The sorting criteria for the incidents. Defaults to IncidentSorting.creation_time.
+        with_alerts (bool, optional): Whether to include alerts in the incidents. Defaults to False.
+        is_predicted (bool, optional): Filter for predicted incidents. Defaults to None.
+        cel (str, optional): The CEL (Common Event Language) filter. Defaults to None.
+        allowed_incident_ids (Optional[List[str]], optional): A list of allowed incident IDs to filter by. Defaults to None.
+    Returns:
+        Tuple[list[Incident], int]: A tuple containing a list of incidents and the total count of incidents.
+    """
+
+    with Session(engine) as session:
+        try:
+            total_count_query = __build_last_incidents_total_count_query(
+                tenant_id=tenant_id,
+                timeframe=timeframe,
+                upper_timestamp=upper_timestamp,
+                lower_timestamp=lower_timestamp,
+                is_candidate=is_candidate,
+                is_predicted=is_predicted,
+                cel=cel,
+                allowed_incident_ids=allowed_incident_ids,
+            )
+            sql_query = __build_last_incidents_query(
+                tenant_id=tenant_id,
+                limit=limit,
+                offset=offset,
+                timeframe=timeframe,
+                upper_timestamp=upper_timestamp,
+                lower_timestamp=lower_timestamp,
+                is_candidate=is_candidate,
+                sorting=sorting,
+                is_predicted=is_predicted,
+                cel=cel,
+                allowed_incident_ids=allowed_incident_ids,
+            )
+        except CelToSqlException as e:
+            if isinstance(e.__cause__, PropertiesMappingException):
+                # if there is an error in mapping properties, return empty list
+                logger.error(f"Error mapping properties: {str(e)}")
+                return [], 0
+            raise e
+
+        total_count = session.exec(total_count_query).one()[0]
+        all_records = session.exec(sql_query).all()
+
+        incidents = []
+
+        for row in all_records:
+            dict_row = row._asdict()
+            incident = dict_row.get("Incident")
+            enrichment = dict_row.get("incidentenrichment")
+
+            if enrichment:
+                incident.set_enrichments(enrichment.enrichments)
+            incidents.append(incident)
+
+        if with_alerts:
+            enrich_incidents_with_alerts(tenant_id, incidents, session)
+
+    return incidents, total_count

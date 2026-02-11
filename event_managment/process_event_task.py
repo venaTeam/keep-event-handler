@@ -18,12 +18,12 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
 # internals
-from keep.common.alert_deduplicator.alert_deduplicator import AlertDeduplicator
-from keep.common.bl.enrichments_bl import EnrichmentsBl
-from keep.common.bl.incidents_bl import IncidentBl
-from keep.common.bl.maintenance_windows_bl import MaintenanceWindowsBl
-from keep.common.consts import KEEP_CORRELATION_ENABLED, MAINTENANCE_WINDOW_ALERT_STRATEGY
-from core.db import (
+from alert_deduplicator.alert_deduplicator import AlertDeduplicator
+from bl.enrichments_bl import EnrichmentsBl
+from bl.incidents_bl import IncidentBl
+from bl.maintenance_windows_bl import MaintenanceWindowsBl
+from config.consts import KEEP_CORRELATION_ENABLED, MAINTENANCE_WINDOW_ALERT_STRATEGY
+from core.db.db import (
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
     get_alerts_by_fingerprint,
@@ -35,9 +35,9 @@ from core.db import (
     get_started_at_for_alerts,
     set_last_alert,
 )
-from keep.common.core.dependencies import get_pusher_client
-from keep.common.core.elastic import ElasticClient
-from keep.common.core.metrics import (
+from core.dependencies import get_pusher_client
+from core.elastic import ElasticClient
+from core.metrics import (
     events_error_counter,
     events_in_counter,
     events_out_counter,
@@ -53,16 +53,16 @@ from models.db.alert import Alert, AlertAudit, AlertRaw
 from models.db.incident import IncidentStatus
 from models.incident import IncidentDto
 from event_managment.notification_cache import get_notification_cache
-from keep.common.utils.alert_utils import sanitize_alert
-from keep.common.utils.enrichment_helpers import (
+from utils.alert_utils import sanitize_alert
+from utils.enrichment_helpers import (
     calculate_firing_time_since_last_resolved,
     calculated_firing_counter,
     calculated_start_firing_time,
     calculated_unresolved_counter,
     convert_db_alerts_to_dto_alerts,
 )
-from keep.providers.providers_factory import ProvidersFactory
-from keep.rulesengine.rulesengine import RulesEngine
+from providers.providers_factory import ProvidersFactory
+from rulesengine.rulesengine import RulesEngine
 
 TIMES_TO_RETRY_JOB = 5  # the number of times to retry the job in case of failure
 # Opt-outs/ins

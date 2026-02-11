@@ -20,7 +20,6 @@ class AlertRaw(SQLModel, table=True):
     class Config:
         arbitrary_types_allowed = True
 
-
 class AlertAudit(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     fingerprint: str
@@ -115,3 +114,90 @@ class Alert(SQLModel, table=True):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+class LastAlert(SQLModel, table=True):
+    tenant_id: str = Field(foreign_key="tenant.id", nullable=False, primary_key=True)
+    fingerprint: str = Field(primary_key=True, index=True)
+    alert_id: UUID = Field(foreign_key="alert.id")
+    timestamp: datetime = Field(nullable=False, index=True)
+    first_timestamp: datetime = Field(nullable=False, index=True)
+    alert_hash: str | None = Field(nullable=True, index=True)
+
+    __table_args__ = (
+        # Original indexes from MySQL
+        Index("idx_lastalert_tenant_timestamp", "tenant_id", "first_timestamp"),
+        Index("idx_lastalert_tenant_timestamp_new", "tenant_id", "timestamp"),
+        Index(
+            "idx_lastalert_tenant_ordering",
+            "tenant_id",
+            "first_timestamp",
+            "alert_id",
+            "fingerprint",
+        ),
+        {},
+    )
+
+class AlertEnrichment(SQLModel, table=True):
+    """
+    TODO: we need to rename this table to EntityEnrichment since it's not only for alerts anymore.
+    @tb: for example, we use it also for Incidents now.
+    """
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenant.id")
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    alert_fingerprint: str = Field(unique=True)
+    enrichments: dict = Field(sa_column=Column(JSON))
+
+    # @tb: we need to think what to do about this relationship.
+    alerts: list[Alert] = Relationship(
+        back_populates="alert_enrichment",
+        sa_relationship_kwargs={
+            "primaryjoin": "and_(Alert.fingerprint == AlertEnrichment.alert_fingerprint, Alert.tenant_id == AlertEnrichment.tenant_id)",
+            "foreign_keys": "[AlertEnrichment.alert_fingerprint, AlertEnrichment.tenant_id]",
+            "uselist": True,
+        },
+    )
+
+    class Config:
+        arbitrary_types_allowed = True
+
+class LastAlertToIncident(SQLModel, table=True):
+    tenant_id: str = Field(foreign_key="tenant.id", nullable=False, primary_key=True)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+    fingerprint: str = Field(primary_key=True)
+    incident_id: UUID = Field(
+        sa_column=Column(
+            UUIDType(binary=False),
+            ForeignKey("incident.id", ondelete="CASCADE"),
+            primary_key=True,
+        )
+    )
+
+    is_created_by_ai: bool = Field(default=False)
+
+    deleted_at: datetime = Field(
+        default_factory=None,
+        nullable=True,
+        primary_key=True,
+        default=NULL_FOR_DELETED_AT,
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "fingerprint"],
+            ["lastalert.tenant_id", "lastalert.fingerprint"],
+        ),
+        Index(
+            "idx_lastalerttoincident_tenant_fingerprint",
+            "tenant_id",
+            "fingerprint",
+            "deleted_at",
+        ),
+        Index(
+            "idx_tenant_deleted_fingerprint", "tenant_id", "deleted_at", "fingerprint"
+        ),
+        {},
+    )

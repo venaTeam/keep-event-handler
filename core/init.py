@@ -1,15 +1,15 @@
 import logging
 import os
 
-from keep.common.alert_deduplicator.deduplication_rules_provisioning import (
+from alert_deduplicator.deduplication_rules_provisioning import (
     provision_deduplication_rules_from_env,
 )
-from keep.common.core.db_on_start import migrate_db, try_create_single_tenant
-from keep.common.core.dependencies import SINGLE_TENANT_UUID
-from keep.common.core.tenant_configuration import TenantConfiguration
-from keep.identitymanager.identitymanagerfactory import IdentityManagerTypes
-from keep.providers.providers_factory import ProvidersFactory
-from keep.providers.providers_service import ProvidersService
+from core.db.db_on_start import migrate_db, try_create_single_tenant
+from dependencies import SINGLE_TENANT_UUID
+from core.tenant_configuration import TenantConfiguration
+from identitymanager.identitymanagerfactory import IdentityManagerTypes
+from providers.providers_factory import ProvidersFactory
+from providers.providers_service import ProvidersService
 
 logger = logging.getLogger(__name__)
 

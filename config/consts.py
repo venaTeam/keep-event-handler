@@ -23,6 +23,9 @@ ARQ_EXPIRES = 3600
 
 KEEP_OTEL_ENABLED= True
 
+ENV_VAR_KEY = "KEEP_PROVIDERS"
+
+
 
 # TODO: all for now deal with later
 WATCHER_LAPSED_TIME = int(os.environ.get("KEEP_WATCHER_LAPSED_TIME", 60))
@@ -39,3 +42,57 @@ KEEP_DB_PRE_PING_ENABLED = config("KEEP_DB_PRE_PING_ENABLED", default=False, cas
 
 
 KEEP_AUDIT_EVENTS_ENABLED = config("KEEP_AUDIT_EVENTS_ENABLED", cast=bool, default=True)
+
+KEEP_FORCE_RESET_DEFAULT_PASSWORD = config(
+    "KEEP_FORCE_RESET_DEFAULT_PASSWORD", default="false", cast=bool
+)
+DEFAULT_USERNAME = config("KEEP_DEFAULT_USERNAME", default="keep")
+DEFAULT_PASSWORD = config("KEEP_DEFAULT_PASSWORD", default="keep")
+
+TENANT_CONFIGURATION_RELOAD_TIME = config(
+                "TENANT_CONFIGURATION_RELOAD_TIME", default=5, cast=int
+            )
+
+KEEP_CORRELATION_ENABLED = os.environ.get("KEEP_CORRELATION_ENABLED", "true") == "true"
+MAINTENANCE_WINDOW_ALERT_STRATEGY = os.environ.get(
+    "MAINTENANCE_WINDOW_STRATEGY", "default"
+)  # recover_previous_status or default
+
+
+ENRICHMENT_DISABLED = config("KEEP_ENRICHMENT_DISABLED", default="false", cast=bool)
+
+KEEP_API_URL = config("KEEP_API_URL")
+
+SECRET_MANAGER_TYPE = SecretManagerTypes[
+                config("SECRET_MANAGER_TYPE", default="FILE").upper()
+            ]
+
+PROVIDERS_CACHE_FILE = os.environ.get("PROVIDERS_CACHE_FILE", "providers_cache.json")
+READ_ONLY_MODE = config("KEEP_READ_ONLY", default="false") == "true"
+
+VERIFY_SSL_CERT = config.get("K8S_VERIFY_SSL_CERT", cast=bool, default=True)
+KEEP_READ_ONLY_BYPASS_KEY = config("KEEP_READ_ONLY_BYPASS_KEY", default="")
+
+KEEP_STORE_PROVIDER_LOGS = config("KEEP_STORE_PROVIDER_LOGS", cast=bool, default=False)
+
+KEEP_IMPERSONATION_ENABLED = (
+            config("KEEP_IMPERSONATION_ENABLED", default="false") == "true"
+        )
+KEEP_IMPERSONATION_USER_HEADER = config(
+            "KEEP_IMPERSONATION_USER_HEADER", default="X-KEEP-USER"
+        )
+KEEP_IMPERSONATION_ROLE_HEADER = config(
+            "KEEP_IMPERSONATION_ROLE_HEADER", default="X-KEEP-ROLE"
+        )
+KEEP_IMPERSONATION_AUTO_PROVISION = (
+            config("KEEP_IMPERSONATION_AUTO_PROVISION", default="false") == "true"
+        )
+KEEP_UPDATE_KEY_INTERVAL = config("KEEP_UPDATE_KEY_INTERVAL", default=60)
+KEEP_READ_ONLY_BYPASS_KEY = config("KEEP_READ_ONLY_BYPASS_KEY", default="")
+KEEP_CLOUDWATCH_DISABLE_API_KEY = config("KEEP_CLOUDWATCH_DISABLE_API_KEY", default=False)
+
+KEEP_DEDUPLICATION_DISTRIBUTION_ENABLED = config("KEEP_DEDUPLICATION_DISTRIBUTION_ENABLED", default=True)
+KEEP_CUSTOM_DEDUPLICATION_DISTRIBUTION_ENABLED = config("KEEP_CUSTOM_DEDUPLICATION_DISTRIBUTION_ENABLED", default=True)
+KEEP_USE_PROVIDER_CACHE = config(
+            "KEEP_USE_PROVIDER_CACHE", default=False
+        )

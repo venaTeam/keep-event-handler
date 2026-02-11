@@ -1,4 +1,19 @@
 from enum import Enum
+from models.alert import SeverityBaseInterface
+
+
+class IncidentSeverity(SeverityBaseInterface):
+    CRITICAL = ("critical", 5)
+    HIGH = ("high", 4)
+    WARNING = ("warning", 3)
+    INFO = ("info", 2)
+    LOW = ("low", 1)
+
+    def from_number(n):
+        for severity in IncidentSeverity:
+            if severity.order == n:
+                return severity
+        raise ValueError(f"No IncidentSeverity with order {n}")
 
 class IncidentStatus(Enum):
     # Active incident
