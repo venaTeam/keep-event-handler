@@ -137,7 +137,6 @@ class ProvidersService:
             logger.warning("Secret deleted")
         except Exception:
             logger.exception("Failed to delete the secret")
-            pass
 
         return provider
 
@@ -227,7 +226,6 @@ class ProvidersService:
                     logger.warning("Secret deleted")
                 except Exception:
                     logger.exception("Failed to delete the secret")
-                    pass
                 raise HTTPException(
                     status_code=409, detail="Provider already installed"
                 )

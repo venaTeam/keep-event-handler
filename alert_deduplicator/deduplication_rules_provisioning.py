@@ -182,7 +182,7 @@ def get_deduplication_rules_to_provision() -> dict[str, dict]:
             )
         except json.JSONDecodeError as e:
             raise Exception(
-                f"Error parsing deduplication rules from env var {env_var_key}: {e}"
+                f"Error parsing deduplication rules from env var {deduplication_rules_from_env_var}: {e}"
             ) from e
 
     deduplication_rules_dict: dict[str, dict] = {}

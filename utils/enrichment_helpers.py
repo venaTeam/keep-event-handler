@@ -4,16 +4,12 @@ from typing import Optional
 
 from opentelemetry import trace
 from sqlmodel import Session
-
-from core.db.db import existed_or_new_session
 from models.alert import (
     AlertDto,
     AlertStatus,
     AlertWithIncidentLinkMetadataDto,
-    Alert,
-    LastAlertToIncident
 )
-from models.incident import IncidentDto
+from models.db.alert import Alert, LastAlertToIncident
 
 tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
@@ -194,6 +190,10 @@ def convert_db_alerts_to_dto_alerts(
     Returns:
         list[AlertDto | AlertWithIncidentLinkMetadataDto]: The enriched alerts.
     """
+    # Lazy import to avoid circular dependency
+    from core.db.db import existed_or_new_session
+    from models.incident import IncidentDto
+    
     with existed_or_new_session(session) as session:
         alerts_dto = []
         with tracer.start_as_current_span("alerts_enrichment"):

@@ -8,7 +8,6 @@ import typing
 from config.consts import KEEP_USE_PROVIDER_CACHE
 from contextmanager.contextmanager import ContextManager
 from functions import cyaml
-from providers.providers_factory import ProvidersFactory
 
 class Parser:
     def __init__(self):

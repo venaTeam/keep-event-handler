@@ -1,4 +1,37 @@
 from sqlmodel import JSON, TEXT, Column, Field, Index, Relationship, SQLModel
+from sqlalchemy import ForeignKey, ForeignKeyConstraint, UniqueConstraint
+from uuid import UUID, uuid4
+from sqlalchemy_utils import UUIDType
+from datetime import datetime
+from pydantic import PrivateAttr
+from typing import List, TYPE_CHECKING
+from models.db.tenant import Tenant
+from core.db.helpers import NULL_FOR_DELETED_AT, DATETIME_COLUMN_TYPE
+
+if TYPE_CHECKING:
+    from models.db.incident import Incident
+
+
+
+class AlertField(SQLModel, table=True):
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenant.id", index=True)
+    field_name: str = Field(index=True)
+    provider_id: str | None = Field(index=True)
+    provider_type: str | None = Field(index=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "field_name", name="uq_tenant_field"),
+        Index("ix_alert_field_tenant_id", "tenant_id"),
+        Index("ix_alert_field_tenant_id_field_name", "tenant_id", "field_name"),
+        Index(
+            "ix_alert_field_provider_id_provider_type", "provider_id", "provider_type"
+        ),
+    )
+
+    class Config:
+        arbitrary_types_allowed = True
+
 
 class AlertRaw(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -43,6 +76,80 @@ class AlertAudit(SQLModel, table=True):
         Index("ix_alert_audit_timestamp", "timestamp"),
     )
 
+class CommentMention(SQLModel, table=True):
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    alert_audit_id: UUID = Field(foreign_key="alertaudit.id")
+    alert_audit: "AlertAudit" = Relationship(back_populates="mentions")
+    user_id: str = Field(nullable=False)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class AlertDeduplicationRule(SQLModel, table=True):
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenant.id")
+    name: str = Field(index=True)
+    description: str
+    provider_id: str | None = Field(default=None)  # None for default rules
+    provider_type: str
+    last_updated: datetime = Field(default_factory=datetime.utcnow)
+    last_updated_by: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_by: str
+    enabled: bool = Field(default=True)
+    fingerprint_fields: list[str] = Field(sa_column=Column(JSON), default=[])
+    full_deduplication: bool = Field(default=False)
+    ignore_fields: list[str] = Field(sa_column=Column(JSON), default=[])
+    priority: int = Field(default=0)  # for future use
+    is_provisioned: bool = Field(default=False)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class AlertDeduplicationEvent(SQLModel, table=True):
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenant.id", index=True)
+    timestamp: datetime = Field(
+        sa_column=Column(DATETIME_COLUMN_TYPE, nullable=False),
+        default_factory=datetime.utcnow,
+    )
+    deduplication_rule_id: UUID  # TODO: currently rules can also be implicit (like default) so they won't exists on db Field(foreign_key="alertdeduplicationrule.id", index=True)
+    deduplication_type: str = Field()  # 'full' or 'partial'
+    date_hour: datetime = Field(
+        sa_column=Column(DATETIME_COLUMN_TYPE),
+        default_factory=lambda: datetime.utcnow().replace(
+            minute=0, second=0, microsecond=0
+        ),
+    )
+    # these are only soft reference since it could be linked provider
+    provider_id: str | None = Field()
+    provider_type: str | None = Field()
+
+    __table_args__ = (
+        Index(
+            "ix_alert_deduplication_event_provider_id",
+            "provider_id",
+        ),
+        Index(
+            "ix_alert_deduplication_event_provider_type",
+            "provider_type",
+        ),
+        Index(
+            "ix_alert_deduplication_event_provider_id_date_hour",
+            "provider_id",
+            "date_hour",
+        ),
+        Index(
+            "ix_alert_deduplication_event_provider_type_date_hour",
+            "provider_type",
+            "date_hour",
+        ),
+    )
+
+    class Config:
+        arbitrary_types_allowed = True
 
 class Alert(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -84,7 +191,7 @@ class Alert(SQLModel, table=True):
         },
     )
 
-    _incidents: List[Incident] = PrivateAttr(default_factory=list)
+    _incidents: List["Incident"] = PrivateAttr(default_factory=list)
 
     __table_args__ = (
         Index(

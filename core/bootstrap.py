@@ -3,13 +3,14 @@ import logging
 import os
 import sys
 
-from config.consts import 
+from config.consts import (
     KEEP_ARQ_QUEUE_BASIC,
     KEEP_ARQ_TASK_POOL,
     KEEP_ARQ_TASK_POOL_ALL,
     KEEP_ARQ_TASK_POOL_BASIC_PROCESSING,
     AUTH_TYPE,
-    LOG_LEVEL
+    LOG_LEVEL,
+)
 
 
 from core.init import init_services
@@ -27,7 +28,7 @@ class Bootstrap:
         try:
             # TODO: get rid of import
             # Default to noauth if not specified
-            auth_type = A
+            auth_type = AUTH_TYPE
 
             def on_starting_helper():
                 # Create a new event loop for this thread
@@ -61,15 +62,6 @@ class Bootstrap:
             sys.exit(1)
 
         self._apply_debug_patches()
-
-        # Get and run the ARQ worker
-        logger.info(f"Getting ARQ worker for queue {queue_name}")
-        worker = get_arq_worker(queue_name)
-        logger.info("Starting safe_run_worker")
-        await safe_run_worker(
-            worker, number_of_errors_before_restart=number_of_errors_before_restart
-        )
-        logger.info(f"ARQ Worker {worker_id} finished")
 
     def _determine_queue_name(self):
         if not KEEP_ARQ_TASK_POOL:

@@ -415,28 +415,12 @@ CONFIG = {
             "class": "logging.StreamHandler",
             "stream": "ext://sys.stdout",
         },
-        "workflowhandler": {
-            "level": "DEBUG",
-            "formatter": (
-                "json" if LOG_FORMAT == LOG_FORMAT_OPEN_TELEMETRY else "dev_terminal"
-            ),
-            "class": "keep.common.logging.WorkflowDBHandler",
-            "filters": ["thread_context"],  # Add filter here
-        },
         "uvicorn_access": {  # Add new handler for uvicorn.access
             "class": "logging.StreamHandler",
             "formatter": "uvicorn_access",
         },
     },
-    "filters": {  # Add filters section
-        "thread_context": {"()": "keep.common.logging.WorkflowContextFilter"}
-    },
     "loggers": {
-        "": {
-            "handlers": ["workflowhandler", "default"],
-            "level": "DEBUG",
-            "propagate": False,
-        },
         "slowapi": {
             "handlers": ["default"],
             "level": LOG_LEVEL,
@@ -590,7 +574,7 @@ def setup_logging():
         CONFIG["handlers"]["fluentbit"] = {
             "level": "DEBUG",
             "formatter": ("json"),
-            "class": "keep.common.logging.FluentBitHandler",
+            "class": "logging.FluentBitHandler",
             "host": KEEP_FLUENTBIT_HOST,
             "port": int(KEEP_FLUENTBIT_PORT),
         }

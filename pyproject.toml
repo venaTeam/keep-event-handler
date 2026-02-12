@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Event Handler service for Keep"
 authors = ["Keep Authors"]
 readme = "README.md"
-packages = [{include = "keep-event-handler"}]
+packages = [{include = "__init__.py"}]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
@@ -15,6 +15,38 @@ aiokafka = "^0.11.0"
 arq = "^0.26.3"
 pydantic = "^1.10.4"
 prometheus-fastapi-instrumentator = "^7.0.0"
+alembic = "*"
+celpy = "*"
+chevron = "*"
+click = "*"
+json5 = "*"
+kubernetes = "*"
+lark = "*"
+opentelemetry-api = "*"
+opentelemetry-sdk = "*"
+opentelemetry-instrumentation-fastapi = "*"
+pymysql = "*"
+requests = "*"
+urllib3 = "*"
+PyYAML = "*"
+python-dateutil = "*"
+opentelemetry-instrumentation-sqlalchemy = "*"
+psycopg2 = "*"
+gunicorn = "^25.0.3"
+opentelemetry-exporter-otlp = "^1.25.0"
+opentelemetry-instrumentation-logging = "*"
+opentelemetry-instrumentation-requests = "*"
+opentelemetry-semantic-conventions = "*"
+sqlmodel = "0.0.8"
+python-json-logger = "^2.0.7"
+retry = "^0.9.2"
+pytz = "*"
+cloud-sql-python-connector = "*"
+google-auth = "*"
+sqlalchemy-utils = "*"
+
+[tool.poetry.group.dev.dependencies]
+vulture = "^2.14"
 
 [build-system]
 requires = ["poetry-core"]

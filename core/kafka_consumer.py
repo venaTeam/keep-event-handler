@@ -6,7 +6,7 @@ import logging
 from aiokafka import AIOKafkaConsumer
 
 from config.consts import MAX_PROCESSING_RETRIES, KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_CONSUMER_GROUP, KAFKA_SECURITY_PROTOCOL, KAFKA_SASL_MECHANISM, KAFKA_SASL_USERNAME, KAFKA_SASL_PASSWORD, KAFKA_SSL_CAFILE, KAFKA_SSL_CERTFILE, KAFKA_SSL_KEYFILE
-from core.event_controller import process_event_wrapper
+from controllers.event_controller import process_event_wrapper
 from models.event_dto import EventDTO
 
 

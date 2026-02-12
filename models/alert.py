@@ -1,6 +1,31 @@
 from enum import Enum
+import uuid
+import json
+import hashlib
+import urllib
+import logging
+import datetime
+from typing import Any, Dict, Optional
+import pytz
+from pydantic import AnyHttpUrl, BaseModel, Extra, root_validator, validator
 
+logger = logging.getLogger(__name__)
 
+def get_fingerprint(fingerprint, values):
+    # if its none, use the name
+    if fingerprint is None:
+        fingerprint_payload = values.get("name")
+        # if the alert name is None, than use the entire payload
+        if not fingerprint_payload:
+            logger.warning("No name to alert, using the entire payload")
+            fingerprint_payload = json.dumps(values)
+        fingerprint = hashlib.sha256(fingerprint_payload.encode()).hexdigest()
+    # take only the first 255 characters
+    else:
+        fingerprint = fingerprint[:255]
+    return fingerprint
+
+    
 class AlertStatus(Enum):
     # Active alert
     FIRING = "firing"
@@ -25,7 +50,7 @@ class DeduplicationRuleRequestDto(BaseModel):
     ignore_fields: Optional[list[str]] = None
 
 class DeduplicationRuleDto(BaseModel):
-    id: str | None  # UUID
+    id: str | None 
     name: str
     description: str
     default: bool

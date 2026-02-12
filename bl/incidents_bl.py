@@ -21,12 +21,11 @@ from core.db.db import (
     enrich_alerts_with_incidents,
     get_all_alerts_by_fingerprints,
     get_incident_by_id,
-    get_incident_unique_fingerprint_count,
     is_all_alerts_resolved,
     is_first_incident_alert_resolved,
     is_last_incident_alert_resolved,
     remove_alerts_to_incident_by_incident_id,
-    update_incident_from_dto_by_id, 
+    update_incident_from_dto_by_id,
     update_incident_severity,
 )
 from core.elastic import ElasticClient

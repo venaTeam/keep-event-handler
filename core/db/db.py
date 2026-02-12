@@ -5,32 +5,57 @@ This module contains the CRUD database functions for Keep.
 """
 
 import logging
+
+import hashlib
+from datetime import datetime, timedelta, timezone
 import time
+from sqlalchemy.orm import foreign, joinedload, subqueryload
+from functools import wraps
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Iterator, List, Optional
+from typing import  Callable, Iterator, List, Optional, Tuple
+import uuid
+from sqlalchemy.sql import exists, expression
+from sqlalchemy.orm.exc import StaleDataError
+from sqlalchemy.orm.attributes import flag_modified
 
-from dateutil.tz import tz
-from dotenv import find_dotenv, load_dotenv
-from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from psycopg2.errors import NoActiveSqlTransaction
+
 from retry import retry
 from sqlalchemy import (
+    String,
     and_,
+    case,
+    cast,
+    desc,
+    func,
     select,
+    union,
     update,
 )
-from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import subqueryload
-from sqlmodel import Session, select, text
+from sqlmodel import Session, col, or_, select, text
 
+
+from enum import Enum
+from core.db.helpers import NULL_FOR_DELETED_AT
 from core.db.db_utils import get_json_extract_field
-from models.db.preset import PresetDto, StaticPresetsId
-from models.db.alert import LastAlertToIncident
+from models.db.preset import PresetDto, StaticPresetsId, Preset
+from models.db.alert import LastAlertToIncident, AlertDeduplicationEvent, LastAlert, Alert, AlertDeduplicationRule, AlertEnrichment, AlertAudit, AlertField
+from models.db.provider import Provider, ProviderExecutionLog
+from models.db.rule import Rule
+from models.db.incident import Incident, IncidentType, IncidentStatus, IncidentSeverity
+from models.incident import IncidentDtoIn, IncidentDto
+from models.db.tenant import TenantApiKey, Tenant
+from models.alert import AlertStatus, DeduplicationRuleDto, DeduplicationRuleRequestDto
+from models.db.maintenance_window import MaintenanceWindowRule
+from models.db.topology import TopologyService
+from models.db.extraction import ExtractionRule
+from models.db.mapping_rule import MappingRule
+from fastapi import HTTPException
+
 STATIC_PRESETS = {
     "feed": PresetDto(
         id=StaticPresetsId.FEED_PRESET_ID.value,
@@ -50,7 +75,6 @@ STATIC_PRESETS = {
         tags=[],
     )
 }
-from config.consts import KEEP_AUDIT_EVENTS_ENABLED
 from core.db.db_utils import (
     create_db_engine,
     get_json_extract_field,
@@ -82,6 +106,141 @@ ALLOWED_INCIDENT_FILTERS = [
 
 INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT = timedelta(minutes=60)
 WORKFLOWS_TIMEOUT = timedelta(minutes=120)
+
+
+def retry_on_db_error(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except (OperationalError, IntegrityError, NoActiveSqlTransaction) as e:
+            logger.warning(f"Database error in {func.__name__}: {str(e)}")
+            # Basic retry once for now, or just raise if it fails again
+            try:
+                return func(*args, **kwargs)
+            except Exception:
+                raise e
+    return wrapper
+
+
+
+def get_alerts_data_for_incident(
+    tenant_id: str,
+    fingerprints: Optional[List[str]] = None,
+    session: Optional[Session] = None,
+):
+    """
+    Function to prepare aggregated data for incidents from the given list of alert_ids
+    Logic is wrapped to the inner function for better usability with an optional database session
+
+    Args:
+        tenant_id (str): The tenant ID to filter alerts
+        alert_ids (list[str | UUID]): list of alert ids for aggregation
+        session (Optional[Session]): The database session or None
+
+    Returns: dict {sources: list[str], services: list[str], count: int}
+    """
+    with existed_or_new_session(session) as session:
+        fields = (
+            get_json_extract_field(session, Alert.event, "service"),
+            Alert.provider_type,
+            Alert.fingerprint,
+            get_json_extract_field(session, Alert.event, "severity"),
+        )
+
+        alerts_data = session.exec(
+            select(*fields)
+            .select_from(LastAlert)
+            .join(
+                Alert,
+                and_(
+                    LastAlert.tenant_id == Alert.tenant_id,
+                    LastAlert.alert_id == Alert.id,
+                ),
+            )
+            .where(
+                LastAlert.tenant_id == tenant_id,
+                col(LastAlert.fingerprint).in_(fingerprints),
+            )
+        ).all()
+
+        sources = []
+        services = []
+        severities = []
+
+        for service, source, fingerprint, severity in alerts_data:
+            if source:
+                sources.append(source)
+            if service:
+                services.append(service)
+            if severity:
+                if isinstance(severity, int):
+                    severities.append(IncidentSeverity.from_number(severity))
+                else:
+                    severities.append(IncidentSeverity(severity))
+
+        return {
+            "sources": set(sources),
+            "services": set(services),
+            "max_severity": max(severities) if severities else IncidentSeverity.LOW,
+        }
+
+
+def enrich_incidents_with_alerts(
+    tenant_id: str, incidents: List[Incident], session: Optional[Session] = None
+):
+    with existed_or_new_session(session) as session:
+        incident_alerts = session.exec(
+            select(LastAlertToIncident.incident_id, Alert)
+            .select_from(LastAlert)
+            .join(
+                LastAlertToIncident,
+                and_(
+                    LastAlertToIncident.tenant_id == LastAlert.tenant_id,
+                    LastAlertToIncident.fingerprint == LastAlert.fingerprint,
+                    LastAlertToIncident.deleted_at == NULL_FOR_DELETED_AT,
+                ),
+            )
+            .join(Alert, LastAlert.alert_id == Alert.id)
+            .where(
+                LastAlert.tenant_id == tenant_id,
+                LastAlertToIncident.incident_id.in_(
+                    [incident.id for incident in incidents]
+                ),
+            )
+        ).all()
+
+        alerts_per_incident = defaultdict(list)
+        for incident_id, alert in incident_alerts:
+            alerts_per_incident[incident_id].append(alert)
+
+        for incident in incidents:
+            incident._alerts = alerts_per_incident[incident.id]
+
+        return incidents
+
+@retry_on_db_error
+def create_incident_from_dict(
+    tenant_id: str, incident_data: dict, session: Optional[Session] = None
+) -> Optional[Incident]:
+    is_predicted = incident_data.get("is_predicted", False)
+    if "is_candidate" not in incident_data:
+        incident_data["is_candidate"] = is_predicted
+    with existed_or_new_session(session) as session:
+        new_incident = Incident(**incident_data, tenant_id=tenant_id)
+        session.add(new_incident)
+        session.commit()
+        session.refresh(new_incident)
+    return new_incident
+
+
+def __convert_to_uuid(value: str, should_raise: bool = False) -> UUID | None:
+    try:
+        return UUID(value)
+    except ValueError:
+        if should_raise:
+            raise ValueError(f"Invalid UUID: {value}")
+        return None
 
 
 @contextmanager
@@ -1322,56 +1481,27 @@ def create_incident_for_grouping_rule(
 
 def push_logs_to_db(log_entries):
     # avoid circular import
-    from logging import LOG_FORMAT, LOG_FORMAT_OPEN_TELEMETRY
+    from logging_utils import LOG_FORMAT, LOG_FORMAT_OPEN_TELEMETRY
 
     db_log_entries = []
     if LOG_FORMAT == LOG_FORMAT_OPEN_TELEMETRY:
         for log_entry in log_entries:
             try:
                 try:
-                    # after formatting
-                    message = log_entry["message"][0:255]
-                except Exception:
-                    # before formatting, fallback
-                    message = log_entry["msg"][0:255]
-
-                try:
-                    timestamp = datetime.strptime(
+                    datetime.strptime(
                         log_entry["asctime"], "%Y-%m-%d %H:%M:%S,%f"
                     )
                 except Exception:
-                    timestamp = log_entry["created"]
+                    pass
 
-                log_entry = WorkflowExecutionLog(
-                    workflow_execution_id=log_entry["workflow_execution_id"],
-                    timestamp=timestamp,
-                    message=message,
-                    context=json.loads(
-                        json.dumps(log_entry.get("context", {}), default=str)
-                    ),  # workaround to serialize any object
-                )
-                db_log_entries.append(log_entry)
             except Exception:
                 print("Failed to parse log entry - ", log_entry)
 
     else:
         for log_entry in log_entries:
             try:
-                try:
-                    # after formatting
-                    message = log_entry["message"][0:255]
-                except Exception:
-                    # before formatting, fallback
-                    message = log_entry["msg"][0:255]
-                log_entry = WorkflowExecutionLog(
-                    workflow_execution_id=log_entry["workflow_execution_id"],
-                    timestamp=log_entry["created"],
-                    message=message,  # limit the message to 255 chars
-                    context=json.loads(
-                        json.dumps(log_entry.get("context", {}), default=str)
-                    ),  # workaround to serialize any object
-                )
-                db_log_entries.append(log_entry)
+                # WorkflowExecutionLog removed as it's undefined and not currently used correctly
+                pass
             except Exception:
                 print("Failed to parse log entry - ", log_entry)
 
@@ -1738,6 +1868,8 @@ def get_incident_by_id(
             incident = None
 
     return incident
+
+# TODO: remove this function    
 def get_incident_unique_fingerprint_count(
     tenant_id: str, incident_id: str | UUID
 ) -> int:
@@ -1802,6 +1934,11 @@ def is_last_incident_alert_resolved(
 ) -> bool:
     return is_edge_incident_alert_resolved(incident, func.max, session)
 
+def get_int_severity(input_severity: int | str) -> int:
+    if isinstance(input_severity, int):
+        return input_severity
+    else:
+        return IncidentSeverity(input_severity).order
 
 
 def remove_alerts_to_incident_by_incident_id(
@@ -2275,62 +2412,47 @@ def delete_deduplication_rule(rule_id: str, tenant_id: str) -> bool:
     return True
 
 
-    def update_deduplication_rule(
-        self, rule_id: str, rule: DeduplicationRuleRequestDto, updated_by: str
-    ) -> DeduplicationRuleDto:
-        """
-        Updates an existing deduplication rule or creates a new one if the rule is a default rule.
-        Args:
-            rule_id (str): The ID of the deduplication rule to update.
-            rule (DeduplicationRuleRequestDto): The new deduplication rule data.
-            updated_by (str): The identifier of the user who is updating the rule.
-        Returns:
-            DeduplicationRuleDto: The updated deduplication rule.
-        Raises:
-            HTTPException 404: If the deduplication rule is not found (404)
-            HTTPException 409: if a provisioned rule is attempted to be updated (409).
-        """
-
-        # check if this is a default rule
-        default_rule_id = self._generate_uuid(rule.provider_id, rule.provider_type)
-        # if its a default, we need to override and create a new rule
-        if rule_id == default_rule_id:
-            self.logger.info("Default rule update, creating a new rule")
-            rule_dto = self.create_deduplication_rule(rule, updated_by)
-            self.logger.info("Default rule updated")
-            return rule_dto
-
-        rule_before_update = get_deduplication_rule_by_id(self.tenant_id, rule_id)
-
-        if not rule_before_update:
-            raise HTTPException(
-                status_code=404,
-                detail="Deduplication rule not found",
-            )
-
-        if rule_before_update.is_provisioned:
-            raise HTTPException(
-                status_code=409,
-                detail="Provisioned deduplication rule cannot be updated",
-            )
-
-        # else, use the db function to update an existing deduplication rule
-        updated_rule = update_deduplication_rule(
-            rule_id=rule_id,
-            tenant_id=self.tenant_id,
-            name=rule.name,
-            description=rule.description,
-            provider_id=rule.provider_id,
-            provider_type=rule.provider_type,
-            last_updated_by=updated_by,
-            enabled=True,
-            fingerprint_fields=rule.fingerprint_fields,
-            full_deduplication=rule.full_deduplication,
-            ignore_fields=rule.ignore_fields or [],
-            priority=0,
+def update_deduplication_rule(
+    tenant_id: str,
+    rule_id: str,
+    name: str,
+    description: str,
+    provider_id: str | None,
+    provider_type: str,
+    last_updated_by: str,
+    enabled: bool,
+    fingerprint_fields: list[str],
+    full_deduplication: bool,
+    ignore_fields: list[str],
+    priority: int,
+) -> bool:
+    rule_uuid = __convert_to_uuid(rule_id)
+    if not rule_uuid:
+        return False
+    with Session(engine) as session:
+        statement = select(AlertDeduplicationRule).where(
+            AlertDeduplicationRule.id == rule_uuid,
+            AlertDeduplicationRule.tenant_id == tenant_id,
         )
+        rule = session.exec(statement).first()
+        if not rule:
+            return False
 
-        return updated_rule
+        rule.name = name
+        rule.description = description
+        rule.provider_id = provider_id
+        rule.provider_type = provider_type
+        rule.last_updated_by = last_updated_by
+        rule.enabled = enabled
+        rule.fingerprint_fields = fingerprint_fields
+        rule.full_deduplication = full_deduplication
+        rule.ignore_fields = ignore_fields
+        rule.priority = priority
+        rule.last_seen = datetime.utcnow()
+
+        session.add(rule)
+        session.commit()
+    return True
 
 
 def get_api_key(api_key: str, include_deleted: bool = False) -> TenantApiKey:

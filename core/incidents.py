@@ -24,6 +24,18 @@ from models.db.alert import (
 from models.db.incident import Incident
 from models.incident import IncidentSorting
 from models.query import SortOptionsDto
+from core.cel_to_sql.properties_metadata import (
+    FieldMappingConfiguration,
+    PropertiesMetadata,
+)
+
+properties_metadata = PropertiesMetadata(
+    # Basic properties metadata for incidents
+    entity_name="incident",
+    field_mapping_configuration=FieldMappingConfiguration(
+        field_mapping={},
+    )
+)
 
 logger = logging.getLogger(__name__)
 

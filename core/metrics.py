@@ -1,5 +1,5 @@
 import os
-from prometheus_client import Counter, Gauge, Histogram, Summary
+from prometheus_client import Counter, Histogram, Summary
 
 # This MUST be called before any prometheus_client import
 prom_multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR", "/tmp/prometheus")

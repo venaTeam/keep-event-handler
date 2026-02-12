@@ -68,7 +68,7 @@ class ProvidersFactory:
         ]  # provider type is always the first part
 
         module = importlib.import_module(
-            f"keep.providers.{actual_provider_type}_provider.{actual_provider_type}_provider"
+            f"providers.{actual_provider_type}_provider.{actual_provider_type}_provider"
         )
 
         # If the provider type doesn't include a sub-type, e.g. "cloudwatch.logs"
@@ -153,7 +153,7 @@ class ProvidersFactory:
         if "." in provider_type:
             provider_type = provider_type.split(".")[0]
         module = importlib.import_module(
-            f"keep.providers.{provider_type}_provider.{provider_type}_provider"
+            f"providers.{provider_type}_provider.{provider_type}_provider"
         )
         try:
             provider_auth_config_class = getattr(
@@ -304,7 +304,7 @@ class ProvidersFactory:
 
             try:
                 module = importlib.import_module(
-                    f"keep.providers.{provider_directory}.{provider_directory}"
+                    f"providers.{provider_directory}.{provider_directory}"
                 )
                 provider_auth_config_class = getattr(
                     module,

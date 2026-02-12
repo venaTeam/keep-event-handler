@@ -1,0 +1,61 @@
+version: "3"
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.4
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - 22181:2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.4
+    depends_on:
+      - zookeeper
+    ports:
+      - 29092:29092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_ZOOKEEPER_SESSION_TIMEOUT_MS: 60000
+      KAFKA_ZOOKEEPER_CONNECTION_TIMEOUT_MS: 60000
+    healthcheck:
+      test: nc -z localhost 9092 || exit 1
+      start_period: 20s
+      interval: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: keep
+      POSTGRES_USER: keep
+      POSTGRES_PASSWORD: keep
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U keep" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  websocket:
+    image: quay.io/soketi/soketi:1.4-16-debian
+    ports:
+      - "6001:6001"
+      - "9601:9601"
+    environment:
+      - SOKETI_USER_AUTHENTICATION_TIMEOUT=3000
+      - SOKETI_DEBUG=1
+      - SOKETI_DEFAULT_APP_ID=1
+      - SOKETI_DEFAULT_APP_KEY=keepappkey
+      - SOKETI_DEFAULT_APP_SECRET=keepappsecret
+
+volumes:
+  postgres_data:

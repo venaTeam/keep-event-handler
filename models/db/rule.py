@@ -1,4 +1,8 @@
 from enum import Enum
+from uuid import UUID, uuid4
+from datetime import datetime
+from sqlmodel import JSON, TEXT, Column, Field, SQLModel
+from sqlalchemy import CheckConstraint
 
 
 class ResolveOn(Enum):
@@ -7,6 +11,11 @@ class ResolveOn(Enum):
     LAST = "last_resolved"
     ALL = "all_resolved"
     NEVER = "never"
+
+class CreateIncidentOn(Enum):
+    # the alert was triggered
+    ANY = "any"
+    ALL = "all"
 
 
 

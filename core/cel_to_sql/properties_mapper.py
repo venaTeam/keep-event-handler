@@ -79,7 +79,6 @@ class PropertiesMappingException(Exception):
         message (str): Explanation of the error.
     """
 
-    pass
 
 
 class PropertiesMapper:
@@ -243,7 +242,6 @@ class PropertiesMapper:
             ),
         )
 
-        return member_access_node
 
     def _modify_comparison_node_based_on_mapping(
         self, comparison_node: ComparisonNode, mapping: PropertyMetadataInfo

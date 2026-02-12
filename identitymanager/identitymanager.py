@@ -39,7 +39,6 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
 
         Do all the necessary setup for the identity manager.
         """
-        pass
 
     # default identity manager does not support sso
     @property
@@ -147,7 +146,6 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
             scopes (list): A list of scopes associated with the resource,
                            defining the types of actions that can be performed.
         """
-        pass
 
     def delete_resource(self, resource_id: str) -> None:
         """
@@ -160,7 +158,6 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
         Args:
             resource_id (str): The unique identifier of the resource to be deleted.
         """
-        pass
 
     def check_permission(
         self, resource_id: str, scope: str, authenticated_entity: AuthenticatedEntity
@@ -183,7 +180,6 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
                            permission, an exception with a 403 status code should
                            be raised.
         """
-        pass
 
     def create_permissions(self, permissions: list[ResourcePermission]) -> None:
         """
@@ -197,7 +193,6 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
             permissions (list): A list of permission objects, each containing the
                                 resource, scope, and user or group information.
         """
-        pass
 
     def get_permissions(self) -> list[ResourcePermission]:
         """
@@ -229,7 +224,6 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
         Returns:
             list: A list of permission objects.
         """
-        pass
 
     def get_roles(self) -> list[Role]:
         """

@@ -28,7 +28,7 @@ from core.db.db import (
     get_provider_by_name,
     is_linked_provider,
 )
-from logging import ProviderLoggerAdapter
+from logging_utils import ProviderLoggerAdapter
 from models.action_type import ActionType
 from models.alert import AlertDto, AlertSeverity, AlertStatus
 from models.db.topology import TopologyServiceInDto

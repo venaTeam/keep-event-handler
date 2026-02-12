@@ -1,6 +1,36 @@
+import enum
 from enum import Enum
 from models.alert import SeverityBaseInterface
+from uuid import UUID, uuid4
+from sqlalchemy_utils import UUIDType
+from datetime import datetime
+from typing import Optional, List
+from sqlmodel import (
+    JSON,
+    TEXT,
+    Column,
+    Field,
+    Index,
+    Relationship,
+    SQLModel,
+    func,
+    select,
+    text,
+)
 
+from pydantic import PrivateAttr
+from retry import retry
+from sqlalchemy import ForeignKey
+from sqlalchemy.exc import IntegrityError
+from models.db.rule import ResolveOn
+from models.db.tenant import Tenant
+
+
+class IncidentType(str, enum.Enum):
+    MANUAL = "manual"  # Created manually by users
+    AI = "ai"  # Created by AI
+    RULE = "rule"  # Created by rules engine
+    TOPOLOGY = "topology"  # Created by topology processor
 
 class IncidentSeverity(SeverityBaseInterface):
     CRITICAL = ("critical", 5)

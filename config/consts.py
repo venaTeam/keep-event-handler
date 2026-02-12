@@ -1,3 +1,15 @@
+import os
+import enum
+from config.config import config
+
+class SecretManagerTypes(enum.Enum):
+    FILE = "file"
+    GCP = "gcp"
+    K8S = "k8s"
+    VAULT = "vault"
+    AWS = "aws"
+    DB = "db"
+
 KEEP_ARQ_TASK_POOL_ALL = "all"  # All arq workers enabled for this service
 KEEP_ARQ_TASK_POOL_BASIC_PROCESSING = "basic_processing"  # Everything except AI
 # Define queues for different task types
@@ -93,6 +105,3 @@ KEEP_CLOUDWATCH_DISABLE_API_KEY = config("KEEP_CLOUDWATCH_DISABLE_API_KEY", defa
 
 KEEP_DEDUPLICATION_DISTRIBUTION_ENABLED = config("KEEP_DEDUPLICATION_DISTRIBUTION_ENABLED", default=True)
 KEEP_CUSTOM_DEDUPLICATION_DISTRIBUTION_ENABLED = config("KEEP_CUSTOM_DEDUPLICATION_DISTRIBUTION_ENABLED", default=True)
-KEEP_USE_PROVIDER_CACHE = config(
-            "KEEP_USE_PROVIDER_CACHE", default=False
-        )

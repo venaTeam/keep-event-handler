@@ -1,10 +1,11 @@
 import enum
 from typing import Any, Dict, List, Optional
-from uuid import UUID, uuid4
-
+from uuid import UUID
 from pydantic import BaseModel, conint, constr
 from sqlalchemy import UniqueConstraint
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
+import uuid
+from uuid import uuid4
 
 
 class StaticPresetsId(enum.Enum):
@@ -17,7 +18,6 @@ class StaticPresetsId(enum.Enum):
 
 def generate_uuid():
     return str(uuid4())
-
 
 class PresetTagLink(SQLModel, table=True):
     tenant_id: str = Field(foreign_key="tenant.id", primary_key=True)
@@ -32,6 +32,29 @@ class Tag(SQLModel, table=True):
     presets: List["Preset"] = Relationship(
         back_populates="tags", link_model=PresetTagLink
     )
+
+
+class Preset(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("tenant_id", "name"),)
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenant.id", index=True)
+    created_by: Optional[str] = Field(index=True, nullable=False)
+    is_private: Optional[bool] = Field(default=False)
+    is_noisy: Optional[bool] = Field(default=False)
+    counter_shows_firing_only: Optional[bool] = Field(default=False)
+    name: str = Field(unique=True)
+    options: list = Field(sa_column=Column(JSON))  # [{"label": "", "value": ""}]
+    tags: List[Tag] = Relationship(
+        back_populates="presets",
+        link_model=PresetTagLink,
+        sa_relationship_kwargs={"lazy": "joined"},
+    )
+
+    def to_dict(self):
+        """Convert the model to a dictionary including relationships."""
+        preset_dict = self.dict()
+        preset_dict["tags"] = [tag.dict() for tag in self.tags]
+        return preset_dict
 
 
 class TagDto(BaseModel):

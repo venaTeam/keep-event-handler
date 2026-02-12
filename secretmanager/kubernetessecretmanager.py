@@ -39,7 +39,6 @@ class KubernetesSecretManager(BaseSecretManager):
                     self.logger.exception(
                         "Error disabling SSL verification in the connection pool"
                     )
-                    pass
                 self.logger.info("SSL verification disabled")
             except Exception:
                 self.logger.exception("Error disabling SSL verification")

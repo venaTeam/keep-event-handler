@@ -3,7 +3,6 @@ import logging
 from typing import Any, TypedDict
 
 import click
-import json5
 from pympler.asizeof import asizeof
 
 from config.consts import KEEP_API_URL
@@ -48,28 +47,10 @@ class ContextManager:
             self.click_context = click.get_current_context()
         except RuntimeError:
             self.click_context = {}
-        # last workflow context
-        self.last_workflow_execution_results = {}
-        self.last_workflow_run_time = None
-        if self.workflow_id and workflow:
-            try:
-                # @tb: try to understand if the workflow tries to use last_workflow_results
-                # if so, we need to get the last workflow execution and load it into the context
-                workflow_str = json5.dumps(workflow)
-                last_workflow_results_in_workflow = (
-                    "last_workflow_results" in workflow_str
-                    or "last_workflow_run_time" in workflow_str
-                )
-            except Exception:
-                self.logger.exception("Failed to get last workflow execution")
-                pass
-        self.aliases = {}
         # dependencies are used so iohandler will be able to use the output class of the providers
         # e.g. let's say bigquery_provider results are google.cloud.bigquery.Row
         #     and we want to use it in iohandler, we need to import it before the eval
         self.dependencies = set()
-        self.workflow_execution_id = None
-        self.workflow_inputs = None
         self._api_key = None
         self.__loggers = {}
 
@@ -78,7 +59,7 @@ class ContextManager:
         """
         The URL of the Keep API
         """
-        return config("KEEP_API_URL")
+        return KEEP_API_URL
 
     @property
     def api_key(self):

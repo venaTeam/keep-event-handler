@@ -1,18 +1,8 @@
-import enum
-
-from config.consts import SECRET_MANAGER_TYPE
+from config.config import config
+from config.consts import SecretManagerTypes, SECRET_MANAGER_TYPE
 from contextmanager.contextmanager import ContextManager
 from secretmanager.secretmanager import BaseSecretManager
 from secretmanager.kubernetessecretmanager import KubernetesSecretManager
-
-class SecretManagerTypes(enum.Enum):
-    FILE = "file"
-    GCP = "gcp"
-    K8S = "k8s"
-    VAULT = "vault"
-    AWS = "aws"
-    DB = "db"
-
 
 class SecretManagerFactory:
     @staticmethod

@@ -32,7 +32,8 @@ from models.db.user import User  # pylint: disable=import-outside-toplevel
 
 from contextmanager.contextmanager import ContextManager
 from secretmanager.secretmanagerfactory import SecretManagerFactory
-
+from models.db.tenant import TenantApiKey, Tenant
+from config.consts import DEFAULT_PASSWORD, DEFAULT_USERNAME, KEEP_FORCE_RESET_DEFAULT_PASSWORD
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,6 @@ def try_create_single_tenant(tenant_id: str, create_default_user=True) -> None:
                         logger.exception(
                             f"Failed to write secret for api key {api_key_name}"
                         )
-                        pass
                     logger.info(f"Api key {api_key_name} provisioned")
                 logger.info("Api keys provisioned")
 
@@ -150,7 +150,6 @@ def try_create_single_tenant(tenant_id: str, create_default_user=True) -> None:
             raise
         except Exception:
             logger.exception("Failed to create single tenant")
-            pass
 
 
 def migrate_db():

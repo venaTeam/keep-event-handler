@@ -7,20 +7,12 @@ Mainly, it creates the database engine based on the environment variables.
 import json
 import logging
 import os
-from enum import Enum
-from typing import Any, Dict, Optional, Tuple, Type, TypeVar
 
 import pymysql
 from dotenv import find_dotenv, load_dotenv
-from fastapi.encoders import jsonable_encoder
 from google.cloud.sql.connector import Connector
-from pydantic import BaseModel
 from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.sql.ddl import CreateColumn
-from sqlalchemy.sql.functions import GenericFunction
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import create_engine
 
 # This import is required to create the tables
 from config.consts import RUNNING_IN_CLOUD_RUN, DB_CONNECTION_STRING, DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_ECHO, KEEP_FORCE_CONNECTION_STRING, KEEP_DB_PRE_PING_ENABLED
