@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import os
 
 from core.db.db import get_all_deduplication_rules, delete_deduplication_rule, update_deduplication_rule, create_deduplication_rule
 from config.consts import ENV_VAR_KEY
@@ -157,7 +158,7 @@ def get_deduplication_rules_to_provision() -> dict[str, dict]:
 
     # TODO: change to get from config MAYBE
 
-    deduplication_rules_from_env_var = ENV_VAR_KEY
+    deduplication_rules_from_env_var = os.environ.get("KEEP_DEDUPLICATION_RULES")
 
     if not deduplication_rules_from_env_var:
         return None

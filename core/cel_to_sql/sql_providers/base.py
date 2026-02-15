@@ -1,7 +1,7 @@
 from typing import Any, List
 
 from celpy import CELParseError
-from sqlalchemy import Dialect, String
+from sqlalchemy import String
 
 from core.cel_to_sql.ast_nodes import (
     ComparisonNode,
@@ -99,7 +99,7 @@ class BaseCelToSqlProvider:
             Converts a NOT operation to an SQL string.
     """
 
-    def __init__(self, dialect: Dialect, properties_metadata: PropertiesMetadata):
+    def __init__(self, dialect, properties_metadata: PropertiesMetadata):
         super().__init__()
         self.__literal_proc = String("").literal_processor(dialect=dialect)
         self.properties_metadata = properties_metadata

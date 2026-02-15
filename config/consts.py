@@ -10,6 +10,10 @@ class SecretManagerTypes(enum.Enum):
     AWS = "aws"
     DB = "db"
 
+
+# TODO: check
+KEEP_ARQ_TASK_POOL = config("KEEP_ARQ_TASK_POOL", default="all")
+
 KEEP_ARQ_TASK_POOL_ALL = "all"  # All arq workers enabled for this service
 KEEP_ARQ_TASK_POOL_BASIC_PROCESSING = "basic_processing"  # Everything except AI
 # Define queues for different task types
@@ -19,7 +23,7 @@ AUTH_TYPE = "KEYCLOAK"
 LOG_LEVEL = "DEBUG"
 MAX_PROCESSING_RETRIES = 3
 
-KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
+KAFKA_BOOTSTRAP_SERVERS = "localhost:29092"
 KAFKA_TOPIC = "keep-events"
 KAFKA_CONSUMER_GROUP = "keep-event-handler"
 KAFKA_SECURITY_PROTOCOL = "PLAINTEXT"

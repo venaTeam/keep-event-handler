@@ -36,7 +36,7 @@ from models.db.rule import ResolveOn
 from models.incident import IncidentDto, IncidentDtoIn, IncidentSorting
 from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
 from utils.pagination import IncidentsPaginatedResultsDto
-from core.authenticatedentity import AuthenticatedEntity
+from identitymanager.authenticatedidentity import AuthenticatedEntity
 
 MIN_INCIDENT_ALERTS_FOR_SUMMARY_GENERATION = int(
     os.environ.get("MIN_INCIDENT_ALERTS_FOR_SUMMARY_GENERATION", 5)

@@ -33,6 +33,17 @@ from models.db.user import User  # pylint: disable=import-outside-toplevel
 from contextmanager.contextmanager import ContextManager
 from secretmanager.secretmanagerfactory import SecretManagerFactory
 from models.db.tenant import TenantApiKey, Tenant
+from models.db.alert import Alert, AlertField, AlertRaw, AlertAudit, CommentMention, AlertDeduplicationRule, AlertDeduplicationEvent, LastAlert, AlertEnrichment, LastAlertToIncident
+from models.db.enrichment_event import EnrichmentEvent, EnrichmentLog
+from models.db.extraction import ExtractionRule
+from models.db.incident import Incident
+from models.db.maintenance_window import MaintenanceWindowRule
+from models.db.mapping import MappingRule
+from models.db.preset import Preset, Tag, PresetTagLink
+from models.db.provider import Provider, ProviderExecutionLog
+from models.db.rule import Rule
+from models.db.topology import TopologyService, TopologyApplication, TopologyServiceApplication, TopologyServiceDependency
+from sqlmodel import SQLModel
 from config.consts import DEFAULT_PASSWORD, DEFAULT_USERNAME, KEEP_FORCE_RESET_DEFAULT_PASSWORD
 
 logger = logging.getLogger(__name__)
@@ -161,13 +172,14 @@ def migrate_db():
         return None
 
     logger.info("Running migrations...")
-    config_path = os.path.dirname(os.path.abspath(__file__)) + "/../../" + "alembic.ini"
-    config = alembic.config.Config(file_=config_path)
-    # Re-defined because alembic.ini uses relative paths which doesn't work
-    # when running the app as a pyhton pakage (could happen form any path)
-    config.set_main_option(
-        "script_location",
-        os.path.dirname(os.path.abspath(__file__)) + "/../models/db/migrations",
-    )
-    alembic.command.upgrade(config, "head")
+    # config_path = os.path.dirname(os.path.abspath(__file__)) + "/../../" + "alembic.ini"
+    # config = alembic.config.Config(file_=config_path)
+    # # Re-defined because alembic.ini uses relative paths which doesn't work
+    # # when running the app as a pyhton pakage (could happen form any path)
+    # config.set_main_option(
+    #     "script_location",
+    #     os.path.dirname(os.path.abspath(__file__)) + "/../models/db/migrations",
+    # )
+    # alembic.command.upgrade(config, "head")
+    SQLModel.metadata.create_all(engine)
     logger.info("Finished migrations")

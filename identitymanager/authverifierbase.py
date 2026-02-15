@@ -14,7 +14,7 @@ from starlette.datastructures import FormData
 from config.consts import KEEP_CLOUDWATCH_DISABLE_API_KEY, KEEP_IMPERSONATION_ENABLED, KEEP_IMPERSONATION_ROLE_HEADER, KEEP_IMPERSONATION_USER_HEADER, KEEP_READ_ONLY_BYPASS_KEY, KEEP_UPDATE_KEY_INTERVAL, KEEP_IMPERSONATION_AUTO_PROVISION, KEEP_READ_ONLY
 from core.db.db import get_api_key, update_key_last_used
 from core.dependencies import extract_generic_body
-from identitymanager.authenticatedentity import AuthenticatedEntity
+from identitymanager.authenticatedidentity import AuthenticatedEntity
 from identitymanager.rbac import Admin as AdminRole
 from identitymanager.rbac import get_role_by_role_name
 

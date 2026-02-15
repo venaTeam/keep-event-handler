@@ -5,7 +5,7 @@ import logging
 
 from models.user import ResourcePermission, Role, User
 from contextmanager.contextmanager import ContextManager
-from identitymanager.authenticatedentity import AuthenticatedEntity
+from identitymanager.authenticatedidentity import AuthenticatedEntity
 from identitymanager.authverifierbase import ALL_RESOURCES, AuthVerifierBase
 from identitymanager.rbac import get_role_by_role_name
 

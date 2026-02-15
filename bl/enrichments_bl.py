@@ -43,7 +43,7 @@ from models.db.extraction import ExtractionRule
 from models.db.incident import IncidentStatus
 from models.db.mapping import MappingRule
 from models.db.rule import ResolveOn
-from core.authenticatedentity import AuthenticatedEntity
+from identitymanager.authenticatedidentity import AuthenticatedEntity
 
 
 def is_valid_uuid(uuid_str):

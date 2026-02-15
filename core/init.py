@@ -5,7 +5,7 @@ from alert_deduplicator.deduplication_rules_provisioning import (
     provision_deduplication_rules_from_env,
 )
 from core.db.db_on_start import migrate_db, try_create_single_tenant
-from dependencies import SINGLE_TENANT_UUID
+from core.dependencies import SINGLE_TENANT_UUID
 from core.tenant_configuration import TenantConfiguration
 from identitymanager.identitymanagerfactory import IdentityManagerTypes
 from providers.providers_factory import ProvidersFactory
