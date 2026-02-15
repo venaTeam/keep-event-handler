@@ -259,6 +259,22 @@ def existed_or_new_session(session: Optional[Session] = None) -> Iterator[Sessio
         raise e
 
 
+def get_session() -> Session:
+    """
+    Creates a database session.
+
+    Yields:
+        Session: A database session
+    """
+    from opentelemetry import trace  # pylint: disable=import-outside-toplevel
+
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("get_session"):
+        with Session(engine) as session:
+            yield session
+
+
+
 def get_session_sync() -> Session:
     """
     Creates a database session.
