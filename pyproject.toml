@@ -43,7 +43,11 @@ retry = "^0.9.2"
 pytz = "*"
 cloud-sql-python-connector = "*"
 google-auth = "*"
+google-api-core = "*"
 sqlalchemy-utils = "*"
+python-multipart = "*"
+ujson = "*"
+pympler = "*"
 
 [tool.poetry.group.dev.dependencies]
 vulture = "^2.14"

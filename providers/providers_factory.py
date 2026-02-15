@@ -15,7 +15,7 @@ import typing
 from dataclasses import _MISSING_TYPE, fields
 from typing import get_args
 
-from config import PROVIDERS_CACHE_FILE, READ_ONLY_MODE
+from config.consts import PROVIDERS_CACHE_FILE, READ_ONLY_MODE
 from core.db.db import (
     get_consumer_providers,
     get_installed_providers,

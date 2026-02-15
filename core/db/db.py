@@ -5,6 +5,7 @@ This module contains the CRUD database functions for Keep.
 """
 
 import logging
+from dotenv import load_dotenv, find_dotenv
 
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -16,11 +17,13 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import  Callable, Iterator, List, Optional, Tuple
 import uuid
+from uuid import UUID
 from sqlalchemy.sql import exists, expression
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.orm.attributes import flag_modified
 
 
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from retry import retry
 from sqlalchemy import (
     String,
@@ -53,7 +56,7 @@ from models.alert import AlertStatus, DeduplicationRuleDto, DeduplicationRuleReq
 from models.db.maintenance_window import MaintenanceWindowRule
 from models.db.topology import TopologyService
 from models.db.extraction import ExtractionRule
-from models.db.mapping_rule import MappingRule
+from models.db.mapping import MappingRule
 from fastapi import HTTPException
 
 STATIC_PRESETS = {
