@@ -32,6 +32,8 @@ from sqlalchemy import (
     cast,
     desc,
     func,
+    literal,
+    null,
     select,
     union,
     update,
@@ -58,6 +60,13 @@ from models.db.topology import TopologyService
 from models.db.extraction import ExtractionRule
 from models.db.mapping import MappingRule
 from fastapi import HTTPException
+
+
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.sql.functions import count
+
 
 STATIC_PRESETS = {
     "feed": PresetDto(
