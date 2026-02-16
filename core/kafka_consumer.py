@@ -1,167 +1,293 @@
+"""
+Kafka consumer for the event handler service using confluent-kafka.
+Runs a synchronous consumer loop - designed to run standalone without gunicorn.
+"""
 import abc
-import asyncio
 import json
 import logging
+import signal
+import threading
+import time
+from typing import Optional
 
-from aiokafka import AIOKafkaConsumer
+from confluent_kafka import Consumer, KafkaError, KafkaException
 
-from config.consts import MAX_PROCESSING_RETRIES, KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_CONSUMER_GROUP, KAFKA_SECURITY_PROTOCOL, KAFKA_SASL_MECHANISM, KAFKA_SASL_USERNAME, KAFKA_SASL_PASSWORD, KAFKA_SSL_CAFILE, KAFKA_SSL_CERTFILE, KAFKA_SSL_KEYFILE
-from controllers.event_controller import process_event_wrapper
+from config.consts import MAX_PROCESSING_RETRIES
+from config.config import config
+from core.metrics import (
+    events_in_counter,
+    events_out_counter,
+    events_error_counter,
+    processing_time_summary,
+)
+from controllers.event_controller import process_event_sync
 from models.event_dto import EventDTO
+
+
+logger = logging.getLogger(__name__)
 
 
 class EventConsumer(abc.ABC):
     @abc.abstractmethod
-    async def start(self):
+    def start(self):
         pass
 
     @abc.abstractmethod
-    async def stop(self):
+    def stop(self):
         pass
 
 
 class KafkaEventConsumer(EventConsumer):
+    """
+    Synchronous Kafka consumer using confluent-kafka.
+    Runs in a blocking loop, suitable for standalone process execution.
+    """
+
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-        bootstrap_servers = KAFKA_BOOTSTRAP_SERVERS
-        try:
-            self.bootstrap_servers = json.loads(bootstrap_servers)
-            if not isinstance(self.bootstrap_servers, list):
-                self.bootstrap_servers = str(self.bootstrap_servers).split(",")
-        except json.JSONDecodeError:
-            self.bootstrap_servers = bootstrap_servers.split(",")
-        self.topic = KAFKA_TOPIC
-        self.group_id = KAFKA_CONSUMER_GROUP
+        self._running = False
+        self._consumer: Optional[Consumer] = None
+        self._shutdown_event = threading.Event()
 
-        # SASL config
-        self.security_protocol = KAFKA_SECURITY_PROTOCOL
-        self.sasl_mechanism = KAFKA_SASL_MECHANISM
-        # Handle None vs empty string vs missing config
-        self.sasl_plain_username = KAFKA_SASL_USERNAME
-        self.sasl_plain_password = KAFKA_SASL_PASSWORD
+        # Parse bootstrap servers
+        bootstrap_servers = config(
+            "KAFKA_BOOTSTRAP_SERVERS", default="localhost:9092"
+        )
+        try:
+            parsed = json.loads(bootstrap_servers)
+            if isinstance(parsed, list):
+                self.bootstrap_servers = ",".join(parsed)
+            else:
+                self.bootstrap_servers = str(parsed)
+        except json.JSONDecodeError:
+            self.bootstrap_servers = bootstrap_servers
+
+        self.topic = config("KAFKA_TOPIC", default="keep-events")
+        self.group_id = config("KAFKA_CONSUMER_GROUP", default="keep-event-handler")
+
+        # Consumer tuning
+        self._poll_timeout = float(config("KAFKA_POLL_TIMEOUT_SECONDS", default="1.0"))
+        self._session_timeout = int(config("KAFKA_SESSION_TIMEOUT_MS", default="45000"))
+        self._max_poll_interval = int(config("KAFKA_MAX_POLL_INTERVAL_MS", default="300000"))
+
+        # Security config
+        self.security_protocol = config("KAFKA_SECURITY_PROTOCOL", default="PLAINTEXT")
+        self.sasl_mechanism = config("KAFKA_SASL_MECHANISM", default="PLAIN")
+        self.sasl_plain_username = config("KAFKA_SASL_USERNAME", default=None)
+        self.sasl_plain_password = config("KAFKA_SASL_PASSWORD", default=None)
 
         # SSL config
-        self.ssl_cafile = KAFKA_SSL_CAFILE
-        self.ssl_certfile = KAFKA_SSL_CERTFILE
-        self.ssl_keyfile = KAFKA_SSL_KEYFILE
+        self.ssl_cafile = config("KAFKA_SSL_CAFILE", default=None)
+        self.ssl_certfile = config("KAFKA_SSL_CERTFILE", default=None)
+        self.ssl_keyfile = config("KAFKA_SSL_KEYFILE", default=None)
 
-        ssl_context = None
+    def _build_consumer_config(self) -> dict:
+        """Build confluent-kafka consumer configuration."""
+        conf = {
+            "bootstrap.servers": self.bootstrap_servers,
+            "group.id": self.group_id,
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,  # Manual commit after processing
+            "session.timeout.ms": self._session_timeout,
+            "max.poll.interval.ms": self._max_poll_interval,
+            "security.protocol": self.security_protocol,
+        }
+
+        # SASL configuration
+        if self.security_protocol in ["SASL_PLAINTEXT", "SASL_SSL"]:
+            conf["sasl.mechanism"] = self.sasl_mechanism
+            if self.sasl_plain_username:
+                conf["sasl.username"] = self.sasl_plain_username
+            if self.sasl_plain_password:
+                conf["sasl.password"] = self.sasl_plain_password
+
+        # SSL configuration
         if self.security_protocol in ["SSL", "SASL_SSL"]:
-            import ssl
-            ssl_context = ssl.create_default_context(cafile=self.ssl_cafile)
-            if self.ssl_certfile and self.ssl_keyfile:
-                ssl_context.load_cert_chain(
-                    certfile=self.ssl_certfile, keyfile=self.ssl_keyfile
-                )
+            if self.ssl_cafile:
+                conf["ssl.ca.location"] = self.ssl_cafile
+            if self.ssl_certfile:
+                conf["ssl.certificate.location"] = self.ssl_certfile
+            if self.ssl_keyfile:
+                conf["ssl.key.location"] = self.ssl_keyfile
 
-        self.consumer = AIOKafkaConsumer(
-            self.topic,
-            bootstrap_servers=self.bootstrap_servers,
-            group_id=self.group_id,
-            # auto_offset_reset="earliest", # or latest? Default is latest.
-            enable_auto_commit=False,
-            security_protocol=self.security_protocol,
-            sasl_mechanism=self.sasl_mechanism,
-            sasl_plain_username=self.sasl_plain_username,
-            sasl_plain_password=self.sasl_plain_password,
-            ssl_context=ssl_context,
-            api_version="auto",
-        )
-        self._running = False
-        self._task = None
+        return conf
 
-    async def start(self):
+    def _redact_config(self, conf: dict) -> dict:
+        """Redact sensitive values from config for logging."""
+        redacted = conf.copy()
+        for key in ["sasl.password", "ssl.key.password"]:
+            if key in redacted:
+                redacted[key] = "***REDACTED***"
+        return redacted
+
+    def start(self):
+        """Start the consumer loop. This is blocking."""
         if self._running:
+            self.logger.warning("Consumer already running")
             return
 
-        self.logger.info(f"Starting Kafka Consumer on topic {self.topic}")
-        await self.consumer.start()
+        conf = self._build_consumer_config()
+        self.logger.info(f"Starting Kafka Consumer on topic '{self.topic}' with config: {self._redact_config(conf)}")
+
+        self._consumer = Consumer(conf)
+        self._consumer.subscribe(
+            [self.topic],
+            on_assign=self._on_assign,
+            on_revoke=self._on_revoke
+        )
         self._running = True
 
-        # Create a background task to consume messages
-        loop = asyncio.get_running_loop()
-        self._task = loop.create_task(self._consume_loop())
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
 
-    async def stop(self):
-        if not self._running:
-            return
-
-        self.logger.info("Stopping Kafka Consumer")
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-
-        await self.consumer.stop()
-        self.logger.info("Kafka Consumer stopped")
-
-    async def _consume_loop(self):
         try:
-            async for msg in self.consumer:
+            self._consume_loop()
+        finally:
+            self._cleanup()
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully."""
+        self.logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        self._running = False
+        self._shutdown_event.set()
+
+    def _on_assign(self, consumer, partitions):
+        """Callback when partitions are assigned."""
+        self.logger.info(f"Partitions assigned: {[p.partition for p in partitions]}")
+
+    def _on_revoke(self, consumer, partitions):
+        """Callback when partitions are revoked (rebalance)."""
+        self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
+        # Commit any pending offsets before rebalance
+        try:
+            consumer.commit(asynchronous=False)
+        except KafkaException as e:
+            self.logger.warning(f"Failed to commit during rebalance: {e}")
+
+    def _consume_loop(self):
+        """Main consumption loop - blocking and synchronous."""
+        self.logger.info("Entering consume loop...")
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+
+        while self._running:
+            try:
+                msg = self._consumer.poll(timeout=self._poll_timeout)
+
+                if msg is None:
+                    # No message available, continue polling
+                    consecutive_errors = 0
+                    continue
+
+                if msg.error():
+                    if msg.error().code() == KafkaError._PARTITION_EOF:
+                        # End of partition - not an error
+                        self.logger.debug(f"Reached end of partition {msg.partition()}")
+                    else:
+                        self.logger.error(f"Consumer error: {msg.error()}")
+                        consecutive_errors += 1
+                        if consecutive_errors >= max_consecutive_errors:
+                            raise KafkaException(msg.error())
+                    continue
+
+                # Reset error counter on successful poll
+                consecutive_errors = 0
+
+                # Process the message
+                self._process_message(msg)
+
+                # Commit offset after successful processing
+                self._consumer.commit(msg, asynchronous=False)
+
+            except KeyboardInterrupt:
+                self.logger.info("KeyboardInterrupt received, shutting down...")
+                break
+            except KafkaException as e:
+                self.logger.exception(f"Kafka exception in consume loop: {e}")
                 if not self._running:
                     break
+                # Brief backoff before retrying
+                self._shutdown_event.wait(timeout=1.0)
+            except Exception as e:
+                self.logger.exception(f"Unexpected error in consume loop: {e}")
+                events_error_counter.inc()
+                # Don't crash on individual message errors, continue processing
+                continue
 
-                try:
-                    payload = json.loads(msg.value.decode("utf-8"))
-                    self.logger.debug(
-                        f"Received event from Kafka: {payload.get('trace_id')}"
-                    )
+        self.logger.info("Exited consume loop")
 
-                    # Construct DTO
-                    event_dto = EventDTO(
-                        tenant_id=payload.get("tenant_id"),
-                        trace_id=payload.get("trace_id"),
-                        event=payload.get("event"),
-                        provider_type=payload.get("provider_type"),
-                        provider_id=payload.get("provider_id"),
-                        fingerprint=payload.get("fingerprint"),
-                        api_key_name=payload.get("api_key_name"),
-                        provider_name=payload.get("provider_name"),
-                    )
+    def _process_message(self, msg):
+        """Process a single Kafka message."""
+        events_in_counter.inc()
+        payload = None
 
-                    # Run logic via controller with retries
-                    # We pass an empty dict as ctx since we are not in ARQ
-                    # Retry using config
-                    for i in range(MAX_PROCESSING_RETRIES):
-                        try:
-                            await process_event_wrapper(
-                                ctx={},
-                                event_dto=event_dto,
-                            )
-                            # If successful, break retry loop
-                            break
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Error processing Kafka message (attempt {i+1}/{MAX_PROCESSING_RETRIES}): {e}"
-                            )
-                            if i == MAX_PROCESSING_RETRIES - 1:
-                                # if this was the last attempt, re-raise
-                                raise e
-                            # otherwise wait a bit
-                            await asyncio.sleep(1)
+        try:
+            payload = json.loads(msg.value().decode("utf-8"))
+            trace_id = payload.get("trace_id", "unknown")
+            self.logger.debug(f"Processing message: {trace_id}")
 
-                    # Manually commit offset after successful processing
-                    await self.consumer.commit()
+            # Construct DTO
+            event_dto = EventDTO(
+                tenant_id=payload.get("tenant_id"),
+                trace_id=trace_id,
+                event=payload.get("event"),
+                provider_type=payload.get("provider_type"),
+                provider_id=payload.get("provider_id"),
+                fingerprint=payload.get("fingerprint"),
+                api_key_name=payload.get("api_key_name"),
+                provider_name=payload.get("provider_name"),
+            )
 
-                except Exception as e:
-                    # Critical: Do NOT commit. Log exception.
-                    # TODO: this should trigger a DLQ.
-                    # For now, we ensure we don't lose the message by not committing.
-                    self.logger.exception(f"Error processing Kafka message (trace_id={payload.get('trace_id', 'unknown')}): {e} - Message will be reprocessed on restart.")
-                    # CRITICAL: We want to crash the loop so the pod restarts or alerts trigger
-                    # rather than skipping the message silently.
-                    raise e
+            # Process with retries and timing
+            with processing_time_summary.time():
+                self._process_with_retries(event_dto)
 
+            events_out_counter.inc()
+            self.logger.debug(f"Successfully processed message: {trace_id}")
 
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to decode message: {e}")
+            events_error_counter.inc()
+            # Still allow commit to avoid getting stuck on malformed messages
+            # In production, consider sending to DLQ instead
         except Exception as e:
-            self.logger.exception(f"Kafka consumer loop crashed: {e}")
-            # Ensure we mark as not running so we know it stopped
-            self._running = False
-            # Re-raising might not crash the whole app because it's in a background task,
-            # but it will stop consumption.
-            # In a real K8s scenario, liveness probe should fail or we should explicitly exit.
-            # For now, logging exception and stopping loop is what we requested.
-            raise e
+            trace_id = payload.get("trace_id", "unknown") if payload else "unknown"
+            self.logger.exception(
+                f"Error processing Kafka message (trace_id={trace_id}): {e}"
+            )
+            events_error_counter.inc()
+            # Re-raise to prevent commit - message will be reprocessed
+            raise
+
+    def _process_with_retries(self, event_dto: EventDTO):
+        """Process event with retry logic."""
+        for attempt in range(MAX_PROCESSING_RETRIES):
+            try:
+                process_event_sync(event_dto)
+                return
+            except Exception as e:
+                self.logger.warning(
+                    f"Error processing event (attempt {attempt + 1}/{MAX_PROCESSING_RETRIES}): {e}"
+                )
+                if attempt == MAX_PROCESSING_RETRIES - 1:
+                    raise
+                # Exponential backoff, max 10s
+                time.sleep(min(2 ** attempt, 10))
+
+    def stop(self):
+        """Stop the consumer gracefully."""
+        self.logger.info("Stopping Kafka consumer...")
+        self._running = False
+        self._shutdown_event.set()
+
+    def _cleanup(self):
+        """Cleanup resources."""
+        if self._consumer:
+            self.logger.info("Closing Kafka consumer...")
+            try:
+                self._consumer.close()
+            except Exception as e:
+                self.logger.error(f"Error closing consumer: {e}")
+            self._consumer = None
+        self.logger.info("Kafka consumer stopped")
