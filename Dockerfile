@@ -1,4 +1,4 @@
-FROM python:3.11.6-slim as base
+FROM python:3.11.6-slim AS base
 
 ENV PYTHONFAULTHANDLER=1 \
     PYTHONHASHSEED=random \
@@ -26,7 +26,7 @@ COPY pyproject.toml poetry.lock ./
 RUN . /venv/bin/activate && poetry install --no-root
 
 # Setting the virtual environment path
-ENV PYTHONPATH="/app:${PYTHONPATH}"
+ENV PYTHONPATH="/app"
 ENV PATH="/venv/bin:${PATH}"
 ENV VIRTUAL_ENV="/venv"
 
