@@ -32,47 +32,21 @@ ENV VIRTUAL_ENV="/venv"
 
 
 # Copy application code
-# Common and Shared Modules
-COPY keep/common /app/keep/common
-COPY keep/providers /app/keep/providers
-COPY keep/workflowmanager /app/keep/workflowmanager
-COPY keep/secretmanager /app/keep/secretmanager
-COPY keep/rulesengine /app/keep/rulesengine
-COPY keep/identitymanager /app/keep/identitymanager
-COPY keep/contextmanager /app/keep/contextmanager
-COPY keep/actions /app/keep/actions
-COPY keep/step /app/keep/step
-COPY keep/functions /app/keep/functions
-COPY keep/exceptions /app/keep/exceptions
-COPY keep/validation /app/keep/validation
-COPY keep/throttles /app/keep/throttles
-COPY keep/topologies /app/keep/topologies
-COPY keep/conditions /app/keep/conditions
-COPY keep/iohandler /app/keep/iohandler
-COPY keep/searchengine /app/keep/searchengine
-COPY keep/parser /app/keep/parser
-COPY keep/event_subscriber /app/keep/event_subscriber
-COPY keep/alembic.ini /app/keep/alembic.ini
-
-# Service Specific
-COPY keep/event_handler /app/keep/event_handler
-
-# Enterprise Edition
-COPY ee /app/ee
+COPY . /app
 
 # Expose ports
-# 8080 - Health check endpoint
-# 8081 - Prometheus metrics
-EXPOSE 8080 8081
+# 8082 - Health check endpoint
+# 8083 - Prometheus metrics
+EXPOSE 8082 8083
 
 # Default environment variables
 ENV MESSAGING_TYPE=KAFKA \
-    PROMETHEUS_METRICS_PORT=8081 \
-    HEALTH_CHECK_PORT=8080
+    PROMETHEUS_METRICS_PORT=8083 \
+    HEALTH_CHECK_PORT=8082
 
 # Health check
-# HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-#     CMD curl -f http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8082/health || exit 1
 
 # Run the standalone consumer (no gunicorn)
-CMD ["python", "-m", "keep.event_handler.consumer_main"]
+CMD ["python", "consumer_main.py"]
