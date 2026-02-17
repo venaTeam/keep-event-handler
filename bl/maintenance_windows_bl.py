@@ -24,7 +24,7 @@ from models.action_type import ActionType
 from models.alert import AlertDto, AlertStatus
 from models.db.alert import Alert, AlertAudit
 from models.db.maintenance_window import MaintenanceWindowRule
-from event_managment.notification_cache import get_notification_cache
+from event_management.notification_cache import get_notification_cache
 from utils.cel_utils import preprocess_cel_expression
 from rulesengine.rulesengine import RulesEngine
 

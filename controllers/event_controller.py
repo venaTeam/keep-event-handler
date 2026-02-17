@@ -2,11 +2,52 @@ import asyncio
 import functools
 import logging
 
-from event_managment.process_event_task import process_event
+from event_management.process_event_task import process_event
 
 from models.event_dto import EventDTO
 
 logger = logging.getLogger(__name__)
+
+
+def process_event_sync(event_dto: EventDTO):
+    """
+    Synchronous wrapper for processing events.
+    Used by the confluent-kafka consumer which runs in a synchronous context.
+    """
+    logger.info(
+        f"Processing event: {event_dto.trace_id}",
+        extra={
+            "tenant_id": event_dto.tenant_id,
+            "provider_type": event_dto.provider_type,
+            "provider_id": event_dto.provider_id,
+            "fingerprint": event_dto.fingerprint,
+            "trace_id": event_dto.trace_id,
+        },
+    )
+
+    # Call process_event directly (it's synchronous)
+    resp = process_event(
+        ctx={},  # No ARQ context in standalone mode
+        tenant_id=event_dto.tenant_id,
+        provider_type=event_dto.provider_type,
+        provider_id=event_dto.provider_id,
+        fingerprint=event_dto.fingerprint,
+        api_key_name=event_dto.api_key_name,
+        trace_id=event_dto.trace_id,
+        event=event_dto.event,
+        notify_client=event_dto.notify_client,
+        timestamp_forced=event_dto.timestamp_forced,
+        provider_name=event_dto.provider_name,
+    )
+
+    logger.info(
+        "Event processed successfully",
+        extra={
+            "tenant_id": event_dto.tenant_id,
+            "trace_id": event_dto.trace_id,
+        },
+    )
+    return resp
 
 async def process_event_wrapper(
     ctx: dict,

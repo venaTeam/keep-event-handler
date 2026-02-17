@@ -52,7 +52,7 @@ from models.alert import AlertDto, AlertStatus
 from models.db.alert import Alert, AlertAudit, AlertRaw
 from models.db.incident import IncidentStatus
 from models.incident import IncidentDto
-from event_managment.notification_cache import get_notification_cache
+from event_management.notification_cache import get_notification_cache
 from utils.alert_utils import sanitize_alert
 from utils.enrichment_helpers import (
     calculate_firing_time_since_last_resolved,
