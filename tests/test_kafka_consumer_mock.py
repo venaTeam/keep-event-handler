@@ -32,8 +32,8 @@ def test_consume_loop_success_commits():
     mock_consumer_instance.poll.side_effect = poll_side_effect
     mock_consumer_instance.commit = MagicMock()
 
-    with patch("keep.event_handler.core.kafka_consumer.Consumer", return_value=mock_consumer_instance):
-        with patch("keep.event_handler.core.kafka_consumer.process_event_sync") as mock_process:
+    with patch("core.kafka_consumer.Consumer", return_value=mock_consumer_instance):
+        with patch("core.kafka_consumer.process_event_sync") as mock_process:
             consumer = KafkaEventConsumer()
             consumer._consumer = mock_consumer_instance
             consumer._running = True
@@ -75,12 +75,12 @@ def test_consume_loop_retries_and_raises():
     mock_consumer_instance.poll.side_effect = poll_side_effect
     mock_consumer_instance.commit = MagicMock()
 
-    with patch("keep.event_handler.core.kafka_consumer.Consumer", return_value=mock_consumer_instance):
-        with patch("keep.event_handler.core.kafka_consumer.process_event_sync") as mock_process:
+    with patch("core.kafka_consumer.Consumer", return_value=mock_consumer_instance):
+        with patch("core.kafka_consumer.process_event_sync") as mock_process:
             # Configure process_event_sync to always fail
             mock_process.side_effect = Exception("Processing Error")
 
-            with patch("keep.event_handler.core.kafka_consumer.MAX_PROCESSING_RETRIES", 3):
+            with patch("core.kafka_consumer.MAX_PROCESSING_RETRIES", 3):
                 consumer = KafkaEventConsumer()
                 consumer._consumer = mock_consumer_instance
                 consumer._running = True
@@ -100,8 +100,8 @@ def test_process_with_retries_success_on_second_attempt():
     """
     Verify that _process_with_retries succeeds if processing succeeds on retry.
     """
-    with patch("keep.event_handler.core.kafka_consumer.process_event_sync") as mock_process:
-        with patch("keep.event_handler.core.kafka_consumer.time.sleep"):  # Speed up test
+    with patch("core.kafka_consumer.process_event_sync") as mock_process:
+        with patch("core.kafka_consumer.time.sleep"):  # Speed up test
             # Fail first, succeed second
             mock_process.side_effect = [Exception("Transient Error"), None]
 
@@ -124,7 +124,7 @@ def test_process_message_json_decode_error():
 
     consumer = KafkaEventConsumer()
 
-    with patch("keep.event_handler.core.kafka_consumer.events_error_counter") as mock_error_counter:
+    with patch("core.kafka_consumer.events_error_counter") as mock_error_counter:
         # Should not raise - allows commit to avoid getting stuck
         consumer._process_message(mock_msg)
         mock_error_counter.inc.assert_called_once()

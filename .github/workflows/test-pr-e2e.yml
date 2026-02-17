@@ -62,6 +62,8 @@ jobs:
       
       - name: Run Tests
         run: poetry run pytest tests/
+        env:
+          PYTHONPATH: .
 
   build-backend:
     needs: unit-tests
