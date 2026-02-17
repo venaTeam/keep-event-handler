@@ -132,11 +132,7 @@ jobs:
           tags: |
             ghcr.io/${{ steps.repo-owner.outputs.owner }}/keep-event-handler:${{ github.sha }}
             ghcr.io/${{ steps.repo-owner.outputs.owner }}/keep-event-handler:${{ steps.get-version.outputs.version }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ steps.repo-owner.outputs.owner }}/keep-event-handler:cache-${{ steps.cache-keys.outputs.DEPS_HASH }}
-            type=registry,ref=ghcr.io/${{ steps.repo-owner.outputs.owner }}/keep-event-handler:cache-${{ steps.cache-keys.outputs.SAFE_BRANCH_NAME }}
-          cache-to: |
-            type=registry,ref=ghcr.io/${{ steps.repo-owner.outputs.owner }}/keep-event-handler:cache-${{ steps.cache-keys.outputs.DEPS_HASH }},mode=max
-            type=registry,ref=ghcr.io/${{ steps.repo-owner.outputs.owner }}/keep-event-handler:cache-${{ steps.cache-keys.outputs.SAFE_BRANCH_NAME }},mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1
