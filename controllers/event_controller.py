@@ -8,7 +8,6 @@ from models.event_dto import EventDTO
 from enum import Enum
 
 logger = logging.getLogger(__name__)
-logger = logging.getLogger(__name__)
 
 class EventType(str, Enum):
     ALERT = "alert"

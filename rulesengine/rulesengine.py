@@ -162,8 +162,7 @@ class RulesEngine:
                                     ]
                                 )
                                 alerts_count = max(incident.alerts_count, firing_count)
-                                print(alerts_count)
-                                print(rule.threshold)
+
                                 if alerts_count >= rule.threshold:
                                     if not rule.require_approve:
                                         if rule.create_on == "any" or (
