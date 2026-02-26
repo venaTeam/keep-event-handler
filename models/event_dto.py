@@ -1,5 +1,10 @@
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
+from enum import Enum
+
+class EventType(str, Enum):
+    ALERT = "alert"
+    INCIDENT = "incident"
 
 class EventDTO(BaseModel):
     tenant_id: str
@@ -12,3 +17,4 @@ class EventDTO(BaseModel):
     provider_name: Optional[str] = None
     timestamp_forced: Optional[str] = None
     notify_client: bool = True
+    event_type: Optional[EventType] = EventType.ALERT

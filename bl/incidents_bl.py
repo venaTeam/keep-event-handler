@@ -107,11 +107,7 @@ class IncidentBl:
             "Client updated on incident change",
             extra={"incident_id": new_incident_dto.id, "tenant_id": self.tenant_id},
         )
-        self.send_workflow_event(new_incident_dto, "created")
-        self.logger.info(
-            "Workflows run on incident",
-            extra={"incident_id": new_incident_dto.id, "tenant_id": self.tenant_id},
-        )
+
         return new_incident_dto
 
     def sync_add_alerts_to_incident(self, *args, **kwargs) -> None:
@@ -247,7 +243,6 @@ class IncidentBl:
             raise HTTPException(status_code=404, detail="Incident not found")
 
         self.update_client_on_incident_change()
-        self.send_workflow_event(incident_dto, "deleted")
 
     def bulk_delete_incidents(self, incident_ids: List[UUID]) -> None:
         for incident_id in incident_ids:
@@ -283,15 +278,6 @@ class IncidentBl:
         self.update_client_on_incident_change(incident.id)
         self.logger.info(
             "Client updated on incident change",
-            extra={
-                "incident_id": incident.id,
-                "alert_fingerprints": alert_fingerprints,
-            },
-        )
-        incident_dto = IncidentDto.from_db_incident(incident)
-        self.send_workflow_event(incident_dto, "updated")
-        self.logger.info(
-            "Workflows run on incident",
             extra={
                 "incident_id": incident.id,
                 "alert_fingerprints": alert_fingerprints,
@@ -339,11 +325,7 @@ class IncidentBl:
             "Client updated on incident change",
             extra={"incident_id": incident.id},
         )
-        self.send_workflow_event(new_incident_dto, "updated")
-        self.logger.info(
-            "Workflows run on incident",
-            extra={"incident_id": incident.id},
-        )
+
         return new_incident_dto
 
     @staticmethod
