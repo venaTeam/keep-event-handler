@@ -39,7 +39,7 @@ from sqlalchemy import (
     update,
 )
 
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, InternalError, OperationalError
 from sqlalchemy.orm import subqueryload
 from sqlmodel import Session, col, or_, select, text
 
@@ -898,8 +898,8 @@ def set_last_alert(
                 # For example if older alert failed to process
                 # and retried after new one
                 if last_alert and last_alert.timestamp.replace(
-                    tzinfo=tz.UTC
-                ) < alert.timestamp.replace(tzinfo=tz.UTC):
+                    tzinfo=timezone.utc
+                ) < alert.timestamp.replace(tzinfo=timezone.utc):
                     logger.info(
                         f"Update last alert for `{fingerprint}`: {last_alert.alert_id} -> {alert.id}",
                         extra={
@@ -969,7 +969,7 @@ def set_last_alert(
                 # Small delay before retry to avoid hammering the database
                 time.sleep(0.1 * attempt)
                 continue
-            except NoActiveSqlTransaction as ex:
+            except InternalError as ex:
                 session.rollback()
                 logger.exception(
                     f"No active sql transaction while updating lastalert for `{fingerprint}`, retry #{attempt}",
