@@ -12,6 +12,7 @@ from typing import List
 # third-parties
 import dateutil
 from arq import Retry
+import requests
 from fastapi.datastructures import FormData
 from opentelemetry import trace
 from sqlalchemy.orm.attributes import flag_modified
@@ -35,7 +36,6 @@ from core.db.db import (
     get_started_at_for_alerts,
     set_last_alert,
 )
-from core.dependencies import get_pusher_client
 from core.elastic import ElasticClient
 from core.metrics import (
     events_error_counter,
@@ -146,7 +146,7 @@ def _serialize_event_for_logging(event, max_size: int = 1000):
         return str(type(event))
 
 
-def __internal_preparation(
+def __internal_prepartion(
     alerts: list[AlertDto], fingerprint: str | None, api_key_name: str | None
 ):
     """
@@ -1238,36 +1238,56 @@ def __handle_formatted_events(
         enriched_formatted_events.extend(ignored_events)
 
     with tracer.start_as_current_span("process_event_notify_client"):
-        pusher_client = get_pusher_client() if notify_client else None
-        if not pusher_client:
+        if not notify_client:
             return
         # Get the notification cache
-        pusher_cache = get_notification_cache()
+        notification_cache = get_notification_cache()
 
-        # Tell the client to poll alerts
-        if pusher_cache.should_notify(tenant_id, "poll-alerts"):
-            try:
-                pusher_client.trigger(
-                    f"private-{tenant_id}",
-                    "poll-alerts",
-                    "{}",
-                )
-                logger.info("Told client to poll alerts")
-            except Exception:
-                logger.exception("Failed to tell client to poll alerts")
+        # Tell the client to poll alerts via API (since event handler runs in a separate process)
 
-        if incidents and pusher_cache.should_notify(tenant_id, "incident-change"):
+        # Tell the client to poll alerts via API (since event handler runs in a separate process)
+        # We don't use throttling here to ensure real-time updates (client will append instead of full refresh)
+        try:
+            api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
+            logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
+            
+            # Serialize alerts to dicts
+            alerts_payload = [alert.dict() for alert in enriched_formatted_events]
+            
+            response = requests.post(
+                f"{api_url}/sse/notify",
+                json={
+                    "tenant_id": tenant_id,
+                    "event": "poll-alerts",
+                    "data": {"alerts": alerts_payload}
+                },
+                timeout=5
+            )
+            response.raise_for_status()
+            logger.info(f"Successfully told client to poll alerts via API ({response.status_code})")
+        except Exception as e:
+            logger.warning(f"Failed to tell client to poll alerts: {e}")
+            pass
+
+        if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
             try:
-                pusher_client.trigger(
-                    f"private-{tenant_id}",
-                    "incident-change",
-                    {},
+                api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
+                incident_ids = [str(inc.id) for inc in incidents]
+                response = requests.post(
+                    f"{api_url}/sse/notify",
+                    json={
+                        "tenant_id": tenant_id,
+                        "event": "incident-change",
+                        "data": {"incident_ids": incident_ids}
+                    },
+                    timeout=5
                 )
+                response.raise_for_status()
             except Exception:
                 logger.exception("Failed to tell the client to pull incidents")
 
         # Now we need to update the presets
-        # send with pusher
+        # send with SSE
 
         try:
             presets = get_all_presets_dtos(tenant_id)
@@ -1282,20 +1302,24 @@ def __handle_formatted_events(
                 if not filtered_alerts:
                     continue
                 presets_do_update.append(preset_dto)
-            if pusher_cache.should_notify(tenant_id, "poll-presets"):
+            if notification_cache.should_notify(tenant_id, "poll-presets"):
                 try:
-                    pusher_client.trigger(
-                        f"private-{tenant_id}",
-                        "poll-presets",
-                        json.dumps(
-                            [p.name.lower() for p in presets_do_update], default=str
-                        ),
+                    api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
+                    response = requests.post(
+                        f"{api_url}/sse/notify",
+                        json={
+                            "tenant_id": tenant_id,
+                            "event": "poll-presets",
+                            "data": {"preset_names": [p.name.lower() for p in presets_do_update]},
+                        },
+                        timeout=5
                     )
+                    response.raise_for_status()
                 except Exception:
-                    logger.exception("Failed to send presets via pusher")
+                    logger.exception("Failed to send presets via SSE")
         except Exception:
             logger.exception(
-                "Failed to send presets via pusher",
+                "Failed to send presets via SSE",
                 extra={
                     "provider_type": provider_type,
                     "num_of_alerts": len(formatted_events),
@@ -1678,7 +1702,7 @@ def process_event(
                         "api_key_name": api_key_name,
                     },
                 )
-                __internal_preparation(event, fingerprint, api_key_name)
+                __internal_prepartion(event, fingerprint, api_key_name)
                 logger.debug(
                     "Internal preparation completed",
                     extra={
@@ -1932,3 +1956,5 @@ def __save_error_alerts(
         session.close()
 
 
+async def async_process_event(*args, **kwargs):
+    return process_event(*args, **kwargs)

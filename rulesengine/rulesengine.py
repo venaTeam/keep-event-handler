@@ -22,7 +22,6 @@ from core.db.db import (
     is_all_alerts_in_status,
 )
 from core.db.db import get_rules as get_rules_db
-from core.dependencies import get_pusher_client
 from core.metrics import incidents_opened_total
 from models.alert import AlertDto, AlertSeverity, AlertStatus
 from models.db.incident import Incident
@@ -162,7 +161,6 @@ class RulesEngine:
                                     ]
                                 )
                                 alerts_count = max(incident.alerts_count, firing_count)
-
                                 if alerts_count >= rule.threshold:
                                     if not rule.require_approve:
                                         if rule.create_on == "any" or (

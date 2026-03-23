@@ -13,6 +13,28 @@ from enum import Enum
 import json
 
 
+class IncidentStatusChangeDto(BaseModel):
+    status: IncidentStatus
+    comment: str | None
+    dispose_on_new_alert: bool = False
+    tagged_users: list[str] = []
+
+    @validator("tagged_users")
+    @classmethod
+    def validate_no_duplicate_users(cls, value):
+        """Ensure there are no duplicate users in the tagged_users list."""
+        if len(value) != len(set(value)):
+            unique_users = list(
+                dict.fromkeys(value)
+            )  # Preserves order while removing duplicates
+            return unique_users
+        return value
+
+
+class IncidentSeverityChangeDto(BaseModel):
+    severity: IncidentSeverity
+    comment: str | None
+
 class IncidentDtoIn(BaseModel):
     user_generated_name: str | None
     assignee: str | None
@@ -34,36 +56,13 @@ class IncidentDtoIn(BaseModel):
         }
 
 
-
-class IncidentSorting(Enum):
-    creation_time = "creation_time"
-    start_time = "start_time"
-    last_seen_time = "last_seen_time"
-    severity = "severity"
-    status = "status"
-    alerts_count = "alerts_count"
-
-    creation_time_desc = "-creation_time"
-    start_time_desc = "-start_time"
-    last_seen_time_desc = "-last_seen_time"
-    severity_desc = "-severity"
-    status_desc = "-status"
-    alerts_count_desc = "-alerts_count"
-
-    def get_order_by(self, model):
-        if self.value.startswith("-"):
-            return desc(getattr(model, self.value[1:]))
-
-        return getattr(model, self.value)
-
-
 class IncidentDto(IncidentDtoIn):
     id: UUID
 
-    start_time: datetime | None
-    last_seen_time: datetime | None
-    end_time: datetime | None
-    creation_time: datetime | None
+    start_time: datetime.datetime | None
+    last_seen_time: datetime.datetime | None
+    end_time: datetime.datetime | None
+    creation_time: datetime.datetime | None
 
     alerts_count: int
     alert_sources: list[str]
@@ -86,7 +85,7 @@ class IncidentDto(IncidentDtoIn):
 
     merged_into_incident_id: UUID | None
     merged_by: str | None
-    merged_at: datetime | None
+    merged_at: datetime.datetime | None
 
     enrichments: dict | None = {}
     incident_type: str | None
@@ -128,7 +127,7 @@ class IncidentDto(IncidentDtoIn):
         }
 
     @property
-    def name(self): 
+    def name(self):
         return self.user_generated_name or self.ai_generated_name
 
     @property
@@ -147,6 +146,7 @@ class IncidentDto(IncidentDtoIn):
             return []
         # Lazy import to avoid circular dependency
         from core.db.db import get_incident_alerts_by_incident_id
+        from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
         alerts, _ = get_incident_alerts_by_incident_id(self._tenant_id, str(self.id))
         return convert_db_alerts_to_dto_alerts(alerts)
 
@@ -219,6 +219,7 @@ class IncidentDto(IncidentDtoIn):
 
     def to_db_incident(self) -> "Incident":
         """Converts an IncidentDto instance to an Incident database model."""
+        from models.db.alert import Incident
 
         db_incident = Incident(
             id=self.id,
@@ -229,7 +230,7 @@ class IncidentDto(IncidentDtoIn):
             assignee=self.assignee,
             severity=self.severity.order,
             status=self.status.value,
-            creation_time=self.creation_time or datetime.utcnow(),
+            creation_time=self.creation_time or datetime.datetime.utcnow(),
             start_time=self.start_time,
             end_time=self.end_time,
             last_seen_time=self.last_seen_time,
@@ -248,3 +249,89 @@ class IncidentDto(IncidentDtoIn):
 
         return db_incident
 
+
+class SplitIncidentRequestDto(BaseModel):
+    alert_fingerprints: list[str]
+    destination_incident_id: UUID
+
+
+class SplitIncidentResponseDto(BaseModel):
+    destination_incident_id: UUID
+    moved_alert_fingerprints: list[str]
+
+
+class MergeIncidentsRequestDto(BaseModel):
+    source_incident_ids: list[UUID]
+    destination_incident_id: UUID
+
+
+class MergeIncidentsResponseDto(BaseModel):
+    merged_incident_ids: list[UUID]
+    failed_incident_ids: list[UUID]
+    destination_incident_id: UUID
+    message: str
+
+
+class IncidentSorting(Enum):
+    creation_time = "creation_time"
+    start_time = "start_time"
+    last_seen_time = "last_seen_time"
+    severity = "severity"
+    status = "status"
+    alerts_count = "alerts_count"
+
+    creation_time_desc = "-creation_time"
+    start_time_desc = "-start_time"
+    last_seen_time_desc = "-last_seen_time"
+    severity_desc = "-severity"
+    status_desc = "-status"
+    alerts_count_desc = "-alerts_count"
+
+    def get_order_by(self, model):
+        if self.value.startswith("-"):
+            return desc(col(getattr(model, self.value[1:])))
+
+        return col(getattr(model, self.value))
+
+
+class IncidentListFilterParamsDto(BaseModel):
+    statuses: List[IncidentStatus] = [s.value for s in IncidentStatus]
+    severities: List[IncidentSeverity] = [s.value for s in IncidentSeverity]
+    assignees: List[str]
+    services: List[str]
+    sources: List[str]
+
+
+class IncidentCandidate(BaseModel):
+    incident_name: str
+    alerts: List[int] = Field(
+        description="List of alert numbers (1-based index) included in this incident"
+    )
+    reasoning: str
+    severity: str = Field(
+        description="Assessed severity level",
+        enum=["Low", "Medium", "High", "Critical"],
+    )
+    recommended_actions: List[str]
+    confidence_score: float = Field(
+        description="Confidence score of the incident clustering (0.0 to 1.0)"
+    )
+    confidence_explanation: str = Field(
+        description="Explanation of how the confidence score was calculated"
+    )
+
+
+class IncidentClustering(BaseModel):
+    incidents: List[IncidentCandidate]
+
+
+class IncidentCommit(BaseModel):
+    accepted: bool
+    original_suggestion: dict
+    changes: dict = Field(default_factory=dict)
+    incident: IncidentDto
+
+
+class IncidentsClusteringSuggestion(BaseModel):
+    incident_suggestion: list[IncidentDto]
+    suggestion_id: str
