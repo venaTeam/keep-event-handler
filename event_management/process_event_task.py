@@ -295,7 +295,17 @@ def __save_to_db(
                     action_description="Alert lastReceived enriched on deduplication",
                 )
                 try:
-                    enrichments_bl.dispose_enrichments(event.fingerprint)
+                    if event.status == AlertStatus.RESOLVED.value:
+                        # Resolved alerts should clear "kept" enrichments
+                        # (e.g., acknowledged/suppressed status) to honor
+                        # the alert lifecycle even when the user chose
+                        # "keep on new alerts".
+                        enrichments_bl.make_enrichments_permanent(
+                            event.fingerprint,
+                            dispose_keys=["assignees", "status", "dismissed", "dismissUntil"],
+                        )
+                    else:
+                        enrichments_bl.dispose_enrichments(event.fingerprint)
                 except Exception:
                     logger.exception(
                         "Failed to dispose enrichments for deduplicated alert",

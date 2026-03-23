@@ -8,10 +8,11 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from pusher import Pusher
 from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import Session
 
+from arq_pool import get_pool
+# TODO: make sure
 from bl.enrichments_bl import EnrichmentsBl
 from core.db.db import (
     add_alerts_to_incident,
@@ -21,6 +22,8 @@ from core.db.db import (
     enrich_alerts_with_incidents,
     get_all_alerts_by_fingerprints,
     get_incident_by_id,
+    # TODO: make sure
+    get_incident_unique_fingerprint_count,
     is_all_alerts_resolved,
     is_first_incident_alert_resolved,
     is_last_incident_alert_resolved,
@@ -28,6 +31,8 @@ from core.db.db import (
     update_incident_from_dto_by_id,
     update_incident_severity,
 )
+
+from keep.common.core.sse import notify_sse
 from core.elastic import ElasticClient
 from core.incidents import get_last_incidents_by_cel
 from models.action_type import ActionType
@@ -57,13 +62,11 @@ class IncidentBl:
         self,
         tenant_id: str,
         session: Session,
-        pusher_client: Optional[Pusher] = None,
         user: str = None,
     ):
         self.tenant_id = tenant_id
         self.user = user
         self.session = session
-        self.pusher_client = pusher_client
         self.logger = logging.getLogger(__name__)
         self.ee_enabled = os.environ.get("EE_ENABLED", "false").lower() == "true"
         self.redis = os.environ.get("REDIS", "false") == "true"
@@ -181,26 +184,25 @@ class IncidentBl:
             raise
 
     def update_client_on_incident_change(self, incident_id: Optional[UUID] = None):
-        if self.pusher_client is not None:
+        self.logger.info(
+            "Pushing incident change to client",
+            extra={"incident_id": incident_id, "tenant_id": self.tenant_id},
+        )
+        try:
+            notify_sse(
+                self.tenant_id,
+                "incident-change",
+                {"incident_id": str(incident_id) if incident_id else None},
+            )
             self.logger.info(
-                "Pushing incident change to client",
+                "Incident change pushed to client",
                 extra={"incident_id": incident_id, "tenant_id": self.tenant_id},
             )
-            try:
-                self.pusher_client.trigger(
-                    f"private-{self.tenant_id}",
-                    "incident-change",
-                    {"incident_id": str(incident_id) if incident_id else None},
-                )
-                self.logger.info(
-                    "Incident change pushed to client",
-                    extra={"incident_id": incident_id, "tenant_id": self.tenant_id},
-                )
-            except Exception:
-                self.logger.exception(
-                    "Failed to push incident change to client",
-                    extra={"incident_id": incident_id, "tenant_id": self.tenant_id},
-                )
+        except Exception:
+            self.logger.exception(
+                "Failed to push incident change to client",
+                extra={"incident_id": incident_id, "tenant_id": self.tenant_id},
+            )
 
     def delete_alerts_from_incident(
         self, incident_id: UUID, alert_fingerprints: List[str]
@@ -411,6 +413,7 @@ class IncidentBl:
         incident_id: UUID | str,
         new_status: IncidentStatus,
         change_by: AuthenticatedEntity,
+        dispose_on_new_alert: bool = False,
     ) -> IncidentDto:
         self.logger.info(
             "Fetching incident",
@@ -447,7 +450,7 @@ class IncidentBl:
                 action_type,
                 change_by.email,
                 action_description,
-                dispose_on_new_alert=True,
+                dispose_on_new_alert=dispose_on_new_alert,
             )
 
         if new_status == IncidentStatus.RESOLVED:

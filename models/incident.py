@@ -128,7 +128,7 @@ class IncidentDto(IncidentDtoIn):
         }
 
     @property
-    def name(self):
+    def name(self): 
         return self.user_generated_name or self.ai_generated_name
 
     @property
