@@ -9,8 +9,6 @@ from sqlalchemy_utils import UUIDType
 from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlmodel import JSON, TEXT, Column, Field, Index, Relationship, SQLModel
 
-
-# TODO: check
 from core.config import config
 from models.db.helpers import DATETIME_COLUMN_TYPE, NULL_FOR_DELETED_AT
 from db.incident import Incident

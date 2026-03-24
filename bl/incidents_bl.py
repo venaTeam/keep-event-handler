@@ -11,8 +11,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import Session
 
-from arq_pool import get_pool
-# TODO: make sure
 from bl.enrichments_bl import EnrichmentsBl
 from core.db.db import (
     add_alerts_to_incident,
@@ -22,7 +20,6 @@ from core.db.db import (
     enrich_alerts_with_incidents,
     get_all_alerts_by_fingerprints,
     get_incident_by_id,
-    # TODO: make sure
     get_incident_unique_fingerprint_count,
     is_all_alerts_resolved,
     is_first_incident_alert_resolved,
@@ -32,7 +29,7 @@ from core.db.db import (
     update_incident_severity,
 )
 
-from keep.common.core.sse import notify_sse
+from core.sse import notify_sse
 from core.elastic import ElasticClient
 from core.incidents import get_last_incidents_by_cel
 from models.action_type import ActionType

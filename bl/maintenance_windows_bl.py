@@ -19,7 +19,6 @@ from core.db.db import (
     set_maintenance_windows_trace, 
 )
 from core.sse import notify_sse
-# TODO: add sse
 from core.metrics import alerts_maintenance_silenced_total
 from models.action_type import ActionType
 from models.alert import AlertDto, AlertStatus
