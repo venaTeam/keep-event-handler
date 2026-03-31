@@ -7,10 +7,11 @@ from models.db.rule import Rule, ResolveOn
 from models.db.incident import IncidentSeverity, IncidentStatus
 from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
 from sqlalchemy import desc
-from pydantic import BaseModel, Extra, Field
+from pydantic import BaseModel, Extra, Field, validator
 import logging
 from enum import Enum
 import json
+from sqlmodel import col
 
 
 class IncidentStatusChangeDto(BaseModel):
@@ -59,10 +60,10 @@ class IncidentDtoIn(BaseModel):
 class IncidentDto(IncidentDtoIn):
     id: UUID
 
-    start_time: datetime.datetime | None
-    last_seen_time: datetime.datetime | None
-    end_time: datetime.datetime | None
-    creation_time: datetime.datetime | None
+    start_time: datetime | None
+    last_seen_time: datetime | None
+    end_time: datetime | None
+    creation_time: datetime | None
 
     alerts_count: int
     alert_sources: list[str]
@@ -85,7 +86,7 @@ class IncidentDto(IncidentDtoIn):
 
     merged_into_incident_id: UUID | None
     merged_by: str | None
-    merged_at: datetime.datetime | None
+    merged_at: datetime | None
 
     enrichments: dict | None = {}
     incident_type: str | None
@@ -230,7 +231,7 @@ class IncidentDto(IncidentDtoIn):
             assignee=self.assignee,
             severity=self.severity.order,
             status=self.status.value,
-            creation_time=self.creation_time or datetime.datetime.utcnow(),
+            creation_time=self.creation_time or datetime.utcnow(),
             start_time=self.start_time,
             end_time=self.end_time,
             last_seen_time=self.last_seen_time,
