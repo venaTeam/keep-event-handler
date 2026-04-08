@@ -21,7 +21,6 @@ from sqlalchemy import event, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
-from starlette_context import context, request_cycle_context
 import tempfile
 
 # Ensure PROMETHEUS_MULTIPROC_DIR is set before any keep imports
@@ -139,20 +138,6 @@ class ElasticClientMock:
 
     def index_alerts(self, alerts):
         self.alerts.append((self.tenant_id, alerts))
-
-
-@pytest.fixture
-def ctx_store() -> dict:
-    """
-    Create a context store
-    """
-    return {"X-Request-ID": random.randint(10000, 90000)}
-
-
-@pytest.fixture(autouse=True)
-def mocked_context(ctx_store) -> None:
-    with request_cycle_context(ctx_store):
-        yield context
 
 
 @pytest.fixture
