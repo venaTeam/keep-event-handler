@@ -9,9 +9,9 @@ from sqlalchemy_utils import UUIDType
 from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlmodel import JSON, TEXT, Column, Field, Index, Relationship, SQLModel
 
-from core.config import config
-from models.db.helpers import DATETIME_COLUMN_TYPE, NULL_FOR_DELETED_AT
-from db.incident import Incident
+from config.config import config
+from core.db.helpers import DATETIME_COLUMN_TYPE, NULL_FOR_DELETED_AT
+from models.db.incident import Incident
 from models.db.tenant import Tenant
 
 db_connection_string = config("DATABASE_CONNECTION_STRING", default=None)
