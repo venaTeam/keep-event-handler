@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
             "Use consumer_main.py for consumption."
         )
         # Don't start the blocking consumer here - it would block the FastAPI app
-
+        
     yield
 
     # Shutdown

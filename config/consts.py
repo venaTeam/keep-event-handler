@@ -11,7 +11,6 @@ class SecretManagerTypes(enum.Enum):
     DB = "db"
 
 
-# TODO: check
 KEEP_ARQ_TASK_POOL = config("KEEP_ARQ_TASK_POOL", default="all")
 
 KEEP_ARQ_TASK_POOL_ALL = "all"  # All arq workers enabled for this service
