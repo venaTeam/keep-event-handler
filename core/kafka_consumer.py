@@ -237,6 +237,7 @@ class KafkaEventConsumer(EventConsumer):
                 fingerprint=payload.get("fingerprint"),
                 api_key_name=payload.get("api_key_name"),
                 provider_name=payload.get("provider_name"),
+                event_type=payload.get("event_type"),
             )
 
             # Process with retries and timing

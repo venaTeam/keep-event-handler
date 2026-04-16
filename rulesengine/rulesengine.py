@@ -22,7 +22,6 @@ from core.db.db import (
     is_all_alerts_in_status,
 )
 from core.db.db import get_rules as get_rules_db
-from core.dependencies import get_pusher_client
 from core.metrics import incidents_opened_total
 from models.alert import AlertDto, AlertSeverity, AlertStatus
 from models.db.incident import Incident
@@ -208,14 +207,6 @@ class RulesEngine:
                             ).resolve_incident_if_require(incident)
 
                             incident_dto = IncidentDto.from_db_incident(incident)
-                            if send_created_event:
-                                RulesEngine.send_workflow_event(
-                                    self.tenant_id, session, incident_dto, "created"
-                                )
-                            elif incident.is_visible:
-                                RulesEngine.send_workflow_event(
-                                    self.tenant_id, session, incident_dto, "updated"
-                                )
 
                             incidents_dto[incident.id] = incident_dto
                             
@@ -760,16 +751,3 @@ class RulesEngine:
                 filtered_alerts.append(alert)
 
         return filtered_alerts
-
-    @staticmethod
-    def send_workflow_event(
-        tenant_id: str, session: Session, incident_dto: IncidentDto, action: str
-    ):
-        logger = logging.getLogger(__name__)
-        logger.info(f"Sending workflow event {action} for incident {incident_dto.id}")
-        pusher_client = get_pusher_client()
-        incident_bl = IncidentBl(tenant_id, session, pusher_client)
-
-        incident_bl.send_workflow_event(incident_dto, action)
-        incident_bl.update_client_on_incident_change(incident_dto.id)
-        logger.info(f"Workflow event {action} for incident {incident_dto.id} sent")

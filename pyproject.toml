@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "keep-event-handler"
-version = "0.1.0"
+version = "0.50.0.0"
 description = "Event Handler service for Keep"
 authors = ["Keep Authors"]
 readme = "README.md"
@@ -56,6 +56,9 @@ prometheus-client = "*"
 [tool.poetry.group.dev.dependencies]
 vulture = "^2.14"
 pytest = "^7.0"
+freezegun = "^1.5.5"
+tenacity = "^9.1.4"
+pytest-asyncio = "^0.23.0"
 
 [build-system]
 requires = ["poetry-core"]
