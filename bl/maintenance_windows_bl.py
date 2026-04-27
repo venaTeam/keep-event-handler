@@ -277,25 +277,6 @@ class MaintenanceWindowsBl:
             if not isinstance(alert.event.get("source"), list):
                 alert.event["source"] = [alert.event["source"]]
             alert_dto = AlertDto(**alert.event)
-            with tracer.start_as_current_span("mw_recover_strategy_push_to_workflows"):
-                try:
-                    # Now run any workflow that should run based on this alert
-                    # TODO: this should publish event
-                    workflow_manager = WorkflowManager.get_instance()
-                    # insert the events to the workflow manager process queue
-                    logger.info("Adding event to the workflow manager queue")
-                    workflow_manager.insert_events(tenant, [alert_dto])
-                    logger.info("Added event to the workflow manager queue")
-                except Exception:
-                    logger.exception(
-                        "Failed to run workflows based on alerts",
-                        extra={
-                            "provider_type": alert_dto.providerType,
-                            "provider_id": alert_dto.providerId,
-                            "tenant_id": tenant,
-                        },
-                    )
-
             with tracer.start_as_current_span("mw_recover_strategy_run_rules_engine"):
                 # Now we need to run the rules engine
                 if KEEP_CORRELATION_ENABLED:
