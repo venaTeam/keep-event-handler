@@ -6,7 +6,7 @@ This module contains the CRUD database functions for Keep.
 
 import logging
 from dotenv import load_dotenv, find_dotenv
-
+from dateutil.parser import parse
 import hashlib
 from datetime import datetime, timedelta, timezone
 import time
@@ -39,7 +39,7 @@ from sqlalchemy import (
     update,
 )
 
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, InternalError, OperationalError
 from sqlalchemy.orm import subqueryload
 from sqlmodel import Session, col, or_, select, text
 
@@ -323,13 +323,17 @@ def _enrich_entity(
         else:
             new_enrichment_data = {**enrichment.enrichments, **enrichments}
         # Preserve existing note if incoming note is empty/None/not provided
-        incoming_note = enrichments.get("note")
-        if not incoming_note or (
-            isinstance(incoming_note, str) and not incoming_note.strip()
-        ):
-            existing_note = enrichment.enrichments.get("note")
-            if existing_note:
-                new_enrichment_data["note"] = existing_note
+
+        # BUT only when NOT forcing — force=True means the caller (e.g. unenrich)
+        # explicitly wants to replace all enrichments, including removing the note.
+        if not force:
+            incoming_note = enrichments.get("note")
+            if not incoming_note or (
+                isinstance(incoming_note, str) and not incoming_note.strip()
+            ):
+                existing_note = enrichment.enrichments.get("note")
+                if existing_note:
+                    new_enrichment_data["note"] = existing_note
         # Remove keys with None values (e.g., status=None when undismissing)
         # This allows the alert to revert to its original value from event data
         for key, value in list(enrichments.items()):
@@ -898,8 +902,8 @@ def set_last_alert(
                 # For example if older alert failed to process
                 # and retried after new one
                 if last_alert and last_alert.timestamp.replace(
-                    tzinfo=tz.UTC
-                ) < alert.timestamp.replace(tzinfo=tz.UTC):
+                    tzinfo=timezone.utc
+                ) < alert.timestamp.replace(tzinfo=timezone.utc):
                     logger.info(
                         f"Update last alert for `{fingerprint}`: {last_alert.alert_id} -> {alert.id}",
                         extra={
@@ -969,7 +973,7 @@ def set_last_alert(
                 # Small delay before retry to avoid hammering the database
                 time.sleep(0.1 * attempt)
                 continue
-            except NoActiveSqlTransaction as ex:
+            except InternalError as ex:
                 session.rollback()
                 logger.exception(
                     f"No active sql transaction while updating lastalert for `{fingerprint}`, retry #{attempt}",

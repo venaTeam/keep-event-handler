@@ -5,69 +5,13 @@ import hashlib
 import urllib
 import logging
 import datetime
-from typing import Any, Dict, Optional
+from typing import Any, TYPE_CHECKING, Dict, Optional
 import pytz
 from pydantic import AnyHttpUrl, BaseModel, Extra, root_validator, validator
 
-logger = logging.getLogger(__name__)
 
-def get_fingerprint(fingerprint, values):
-    # if its none, use the name
-    if fingerprint is None:
-        fingerprint_payload = values.get("name")
-        # if the alert name is None, than use the entire payload
-        if not fingerprint_payload:
-            logger.warning("No name to alert, using the entire payload")
-            fingerprint_payload = json.dumps(values)
-        fingerprint = hashlib.sha256(fingerprint_payload.encode()).hexdigest()
-    # take only the first 255 characters
-    else:
-        fingerprint = fingerprint[:255]
-    return fingerprint
+from enum import Enum
 
-    
-class AlertStatus(Enum):
-    # Active alert
-    FIRING = "firing"
-    # Alert has been resolved
-    RESOLVED = "resolved"
-    # Alert has been acknowledged but not resolved
-    ACKNOWLEDGED = "acknowledged"
-    # Alert is suppressed due to various reasons
-    SUPPRESSED = "suppressed"
-    # No Data
-    PENDING = "pending"
-    # Affected by Maintenance Windows
-    MAINTENANCE = "maintenance"
-
-class DeduplicationRuleRequestDto(BaseModel):
-    name: str
-    description: Optional[str] = None
-    provider_type: str
-    provider_id: Optional[str] = None
-    fingerprint_fields: list[str]
-    full_deduplication: bool = False
-    ignore_fields: Optional[list[str]] = None
-
-class DeduplicationRuleDto(BaseModel):
-    id: str | None 
-    name: str
-    description: str
-    default: bool
-    distribution: list[dict]  # list of {hour: int, count: int}
-    provider_id: str | None  # None for default rules
-    provider_type: str
-    last_updated: str | None
-    last_updated_by: str | None
-    created_at: str | None
-    created_by: str | None
-    ingested: int
-    dedup_ratio: float
-    enabled: bool
-    fingerprint_fields: list[str]
-    full_deduplication: bool
-    ignore_fields: list[str]
-    is_provisioned: bool
 
 class SeverityBaseInterface(Enum):
     def __new__(cls, severity_name, severity_order):
@@ -110,6 +54,25 @@ class SeverityBaseInterface(Enum):
             return self.order >= other.order
         return NotImplemented
 
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
+
+def get_fingerprint(fingerprint, values):
+    # if its none, use the name
+    if fingerprint is None:
+        fingerprint_payload = values.get("name")
+        # if the alert name is None, than use the entire payload
+        if not fingerprint_payload:
+            logger.warning("No name to alert, using the entire payload")
+            fingerprint_payload = json.dumps(values, sort_keys=True)
+        fingerprint = hashlib.sha256(fingerprint_payload.encode()).hexdigest()
+    # take only the first 255 characters
+    else:
+        fingerprint = fingerprint[:255]
+    return fingerprint
+
 
 class AlertSeverity(SeverityBaseInterface):
     CRITICAL = ("critical", 5)
@@ -118,6 +81,32 @@ class AlertSeverity(SeverityBaseInterface):
     INFO = ("info", 2)
     LOW = ("low", 1)
 
+
+class AlertStatus(Enum):
+    # Active alert
+    FIRING = "firing"
+    # Alert has been resolved
+    RESOLVED = "resolved"
+    # Alert has been acknowledged but not resolved
+    ACKNOWLEDGED = "acknowledged"
+    # Alert is suppressed due to various reasons
+    SUPPRESSED = "suppressed"
+    # No Data
+    PENDING = "pending"
+    # Affected by Maintenance Windows
+    MAINTENANCE = "maintenance"
+
+
+class DismissAlertRequest(BaseModel):
+    alert_id: Optional[str] = None
+
+
+class AlertErrorDto(BaseModel):
+    id: str
+    provider_type: str
+    event: dict
+    error_message: Optional[str] = None
+    timestamp: datetime.datetime
 
 
 class AlertDto(BaseModel):
@@ -384,6 +373,7 @@ class AlertDto(BaseModel):
             Enum: lambda v: v.value,
         }
 
+
 class AlertWithIncidentLinkMetadataDto(AlertDto):
     is_created_by_ai: bool = False
 
@@ -393,3 +383,83 @@ class AlertWithIncidentLinkMetadataDto(AlertDto):
             is_created_by_ai=db_alert_to_incident.is_created_by_ai,
             **db_alert.event,
         )
+
+
+class DeleteRequestBody(BaseModel):
+    fingerprint: str
+    lastReceived: str
+    restore: bool = False
+
+
+class DismissRequestBody(BaseModel):
+    fingerprint: str
+    dismissUntil: str
+    dismissComment: str
+    restore: bool = False
+
+
+class AssignAlertRequestBody(BaseModel):
+    dispose_on_new_alert: bool = True
+    note: Optional[str] = None
+
+
+class EnrichAlertNoteRequestBody(BaseModel):
+    note: str
+    fingerprint: str
+
+
+class EnrichAlertRequestBody(BaseModel):
+    enrichments: dict[str, str]
+    fingerprint: str
+
+
+class BatchEnrichAlertRequestBody(BaseModel):
+    enrichments: dict[str, str]
+    fingerprints: Optional[list[str]] = None
+    cel: Optional[str] = None
+
+
+class UnEnrichAlertRequestBody(BaseModel):
+    enrichments: list[str]
+    fingerprint: str
+
+
+class DeduplicationRuleDto(BaseModel):
+    id: str | None  # UUID
+    name: str
+    description: str
+    default: bool
+    distribution: list[dict]  # list of {hour: int, count: int}
+    provider_id: str | None  # None for default rules
+    provider_type: str
+    last_updated: str | None
+    last_updated_by: str | None
+    created_at: str | None
+    created_by: str | None
+    ingested: int
+    dedup_ratio: float
+    enabled: bool
+    fingerprint_fields: list[str]
+    full_deduplication: bool
+    ignore_fields: list[str]
+    is_provisioned: bool
+
+
+class DeduplicationRuleRequestDto(BaseModel):
+    name: str
+    description: Optional[str] = None
+    provider_type: str
+    provider_id: Optional[str] = None
+    fingerprint_fields: list[str]
+    full_deduplication: bool = False
+    ignore_fields: Optional[list[str]] = None
+
+
+class EnrichIncidentRequestBody(BaseModel):
+    enrichments: Dict[str, Any]
+    force: bool = False
+
+
+class UnEnrichIncidentRequestBody(BaseModel):
+    enrichments: list[str]
+    fingerprint: str

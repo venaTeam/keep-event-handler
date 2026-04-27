@@ -523,7 +523,7 @@ class BaseProvider(metaclass=abc.ABCMeta):
                     fingerprint_field_value = None
                     break
             if isinstance(fingerprint_field_value, (list, dict)):
-                fingerprint_field_value = json.dumps(fingerprint_field_value)
+                fingerprint_field_value = json.dumps(fingerprint_field_value, sort_keys=True)
             if fingerprint_field_value is not None:
                 fingerprint.update(str(fingerprint_field_value).encode())
         return fingerprint.hexdigest()

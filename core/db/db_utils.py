@@ -7,12 +7,21 @@ Mainly, it creates the database engine based on the environment variables.
 import json
 import logging
 import os
+from enum import Enum
+from typing import Any, Dict, Optional, Tuple, Type, TypeVar
 
 import pymysql
 from dotenv import find_dotenv, load_dotenv
+from fastapi.encoders import jsonable_encoder
 from google.cloud.sql.connector import Connector
-from sqlalchemy import func
-from sqlmodel import create_engine
+from pydantic import BaseModel
+from sqlalchemy import func, type_coerce
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql.ddl import CreateColumn
+from sqlalchemy.sql.functions import GenericFunction
+from sqlmodel import Session, SQLModel, create_engine, select
 
 # This import is required to create the tables
 from config.consts import RUNNING_IN_CLOUD_RUN, DB_CONNECTION_STRING, DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_ECHO, KEEP_FORCE_CONNECTION_STRING, KEEP_DB_PRE_PING_ENABLED
@@ -150,8 +159,119 @@ def create_db_engine():
 
 def get_json_extract_field(session, base_field, key):
     if session.bind.dialect.name == "postgresql":
-        return func.json_extract_path_text(base_field, key)
+        return type_coerce(base_field, PG_JSONB)[key].astext  # Generates: column ->> 'key'
     elif session.bind.dialect.name == "mysql":
         return func.json_unquote(func.json_extract(base_field, "$.{}".format(key)))
     else:
         return func.json_extract(base_field, "$.{}".format(key))
+
+
+def get_aggreated_field(session: Session, column_name: str, alias: str):
+    if session.bind is None:
+        raise ValueError("Session is not bound to a database")
+
+    if session.bind.dialect.name == "postgresql":
+        return func.array_agg(column_name).label(alias)
+    elif session.bind.dialect.name == "mysql":
+        return func.json_arrayagg(column_name).label(alias)
+    elif session.bind.dialect.name == "sqlite":
+        return func.group_concat(column_name).label(alias)
+    else:
+        return func.array_agg(column_name).label(alias)
+
+
+class json_table(GenericFunction):
+    inherit_cache = True
+
+
+@compiles(json_table, "mysql")
+def _compile_json_table(element, compiler, **kw):
+    ddl_compiler = compiler.dialect.ddl_compiler(compiler.dialect, None)
+    return "JSON_TABLE({}, '$[*]' COLUMNS({} PATH '$'))".format(
+        compiler.process(element.clauses.clauses[0], **kw),
+        ",".join(
+            ddl_compiler.process(CreateColumn(clause), **kw)
+            for clause in element.clauses.clauses[1:]
+        ),
+    )
+
+
+T = TypeVar("T", bound=SQLModel)
+
+
+def get_or_create(
+    session: Session,
+    model: Type[T],
+    defaults: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Tuple[T, bool]:
+    """
+    Get an instance by filter kwargs, or create one with those filters plus any defaults.
+
+    Args:
+        session: SQLModel session
+        model: Model class
+        defaults: Dict of default values for creation (not used for lookup)
+        **kwargs: Filter parameters used both for lookup and creation
+
+    Returns:
+        tuple: (instance, created) where created is a boolean indicating if a new instance was created
+    """
+    # Build query with all filter conditions
+    query = select(model)
+    for key, value in kwargs.items():
+        query = query.where(getattr(model, key) == value)
+
+    # Execute the query
+    instance = session.exec(query).first()
+
+    if instance:
+        return instance, False
+
+    # Prepare creation attributes
+    create_attrs = kwargs.copy()
+    if defaults:
+        create_attrs.update(defaults)
+
+    instance = model(**create_attrs)
+    session.add(instance)
+
+    try:
+        # Try to flush without committing to detect any integrity errors
+        session.flush()
+        return instance, True
+    except IntegrityError:
+        # If there's a conflict, roll back and try to fetch again (another process might have created it)
+        session.rollback()
+
+        # Try to fetch again with the same query
+        instance = session.exec(query).first()
+        if instance:
+            return instance, False
+        # If we still can't find it, something else is wrong, re-raise
+        raise
+
+
+def custom_serialize(obj: Any) -> Any:
+    """
+    Custom serializer that handles Pydantic models (like AlertDto) and other complex types.
+    """
+    if isinstance(obj, dict):
+        return {k: custom_serialize(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [custom_serialize(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(custom_serialize(item) for item in obj)
+    elif isinstance(obj, BaseModel):
+        # For Pydantic models like AlertDto
+        return obj.dict()
+    elif isinstance(obj, Enum):
+        # For enum values
+        return obj.value
+    else:
+        # For other objects, try jsonable_encoder, which handles many edge cases
+        try:
+            return jsonable_encoder(obj)
+        except Exception:
+            # If even jsonable_encoder fails, convert to string as a last resort
+            return str(obj)

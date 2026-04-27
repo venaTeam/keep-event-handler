@@ -11,7 +11,6 @@ class SecretManagerTypes(enum.Enum):
     DB = "db"
 
 
-# TODO: check
 KEEP_ARQ_TASK_POOL = config("KEEP_ARQ_TASK_POOL", default="all")
 
 KEEP_ARQ_TASK_POOL_ALL = "all"  # All arq workers enabled for this service
@@ -47,7 +46,7 @@ ENV_VAR_KEY = "KEEP_PROVIDERS"
 WATCHER_LAPSED_TIME = int(os.environ.get("KEEP_WATCHER_LAPSED_TIME", 60))
 
 RUNNING_IN_CLOUD_RUN = os.environ.get("K_SERVICE") is not None
-DB_CONNECTION_STRING = config("DATABASE_CONNECTION_STRING", default=None)  # pylint: disable=invalid-name
+DB_CONNECTION_STRING = config("DATABASE_CONNECTION_STRING", default="postgresql://keep:keep@localhost:5432/keep")  # pylint: disable=invalid-name
 DB_POOL_SIZE = config("DATABASE_POOL_SIZE", default=5, cast=int)  # pylint: disable=invalid-name
 DB_MAX_OVERFLOW = config("DATABASE_MAX_OVERFLOW", default=10, cast=int)  # pylint: disable=invalid-name
 DB_ECHO = config("DATABASE_ECHO", default=False, cast=bool)  # pylint: disable=invalid-name
