@@ -11,6 +11,7 @@ from pydantic import BaseModel, Extra, Field, validator
 import logging
 from enum import Enum
 import json
+from sqlmodel import col
 
 
 class IncidentStatusChangeDto(BaseModel):

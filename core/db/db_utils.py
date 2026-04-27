@@ -15,7 +15,8 @@ from dotenv import find_dotenv, load_dotenv
 from fastapi.encoders import jsonable_encoder
 from google.cloud.sql.connector import Connector
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, type_coerce
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql.ddl import CreateColumn
@@ -158,7 +159,7 @@ def create_db_engine():
 
 def get_json_extract_field(session, base_field, key):
     if session.bind.dialect.name == "postgresql":
-        return func.jsonb_extract_path_text(base_field, key)
+        return type_coerce(base_field, PG_JSONB)[key].astext  # Generates: column ->> 'key'
     elif session.bind.dialect.name == "mysql":
         return func.json_unquote(func.json_extract(base_field, "$.{}".format(key)))
     else:

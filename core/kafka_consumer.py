@@ -51,7 +51,7 @@ class KafkaEventConsumer(EventConsumer):
 
         # Parse bootstrap servers
         bootstrap_servers = config(
-            "KAFKA_BOOTSTRAP_SERVERS", default="localhost:9092"
+            "KAFKA_BOOTSTRAP_SERVERS", default="localhost:29092"
         )
         try:
             parsed = json.loads(bootstrap_servers)
