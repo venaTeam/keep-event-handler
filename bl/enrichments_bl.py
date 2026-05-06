@@ -121,10 +121,13 @@ class EnrichmentsBl:
         )
 
         # so we can track the enrichment event
-        alert.event["event_id"] = alert.id
+        alert_payload = alert.dict()
+        if alert.extra_data:
+            alert_payload.update(alert.extra_data)
+        alert_payload["event_id"] = alert.id
         if not rule:
             raise HTTPException(status_code=404, detail="Extraction rule not found")
-        return self.run_extraction_rules(alert.event, pre=False, rules=[rule])
+        return self.run_extraction_rules(alert_payload, pre=False, rules=[rule])
 
     def run_extraction_rules(
         self, event: AlertDto | dict, pre=False, rules: list[ExtractionRule] = None
@@ -916,7 +919,9 @@ class EnrichmentsBl:
                     ).first()
 
                     if latest_alert:
-                        alert_data = latest_alert.event.copy()
+                        alert_data = latest_alert.dict()
+                        if latest_alert.extra_data:
+                            alert_data.update(latest_alert.extra_data)
                         alert_data.update(
                             {
                                 key: value
@@ -1006,7 +1011,9 @@ class EnrichmentsBl:
                     ).first()
 
                     if latest_alert:
-                        alert_data = latest_alert.event.copy()
+                        alert_data = latest_alert.dict()
+                        if latest_alert.extra_data:
+                            alert_data.update(latest_alert.extra_data)
                         alert_data.update(new_enrichments)
                         alert_dto = AlertDto(**alert_data)
                         self.elastic_client.index_alert(alert_dto)

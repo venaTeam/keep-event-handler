@@ -225,23 +225,29 @@ class KafkaEventConsumer(EventConsumer):
         try:
             payload = json.loads(msg.value().decode("utf-8"))
             trace_id = payload.get("trace_id", "unknown")
-            self.logger.debug(f"Processing message: {trace_id}")
+            event_type = payload.get("event_type", "alert")
+            self.logger.debug(f"Processing message: {trace_id}, event_type: {event_type}")
 
-            # Construct DTO
-            event_dto = EventDTO(
-                tenant_id=payload.get("tenant_id"),
-                trace_id=trace_id,
-                event=payload.get("event"),
-                provider_type=payload.get("provider_type"),
-                provider_id=payload.get("provider_id"),
-                fingerprint=payload.get("fingerprint"),
-                api_key_name=payload.get("api_key_name"),
-                provider_name=payload.get("provider_name"),
-            )
+            # Route based on event_type
+            if event_type == "enrich":
+                with processing_time_summary.time():
+                    self._process_enrich_event(payload)
+            else:
+                # Construct DTO for alert processing
+                event_dto = EventDTO(
+                    tenant_id=payload.get("tenant_id"),
+                    trace_id=trace_id,
+                    event=payload.get("event"),
+                    provider_type=payload.get("provider_type"),
+                    provider_id=payload.get("provider_id"),
+                    fingerprint=payload.get("fingerprint"),
+                    api_key_name=payload.get("api_key_name"),
+                    provider_name=payload.get("provider_name"),
+                )
 
-            # Process with retries and timing
-            with processing_time_summary.time():
-                self._process_with_retries(event_dto)
+                # Process with retries and timing
+                with processing_time_summary.time():
+                    self._process_with_retries(event_dto)
 
             events_out_counter.inc()
             self.logger.debug(f"Successfully processed message: {trace_id}")
@@ -259,6 +265,26 @@ class KafkaEventConsumer(EventConsumer):
             events_error_counter.inc()
             # Re-raise to prevent commit - message will be reprocessed
             raise
+
+    def _process_enrich_event(self, payload: dict):
+        """
+        Handle an enrichment event from Kafka.
+        The API gateway already writes enrichments to the DB and Elastic directly,
+        so we just acknowledge the event here to prevent it from being processed
+        as a new alert.
+        """
+        tenant_id = payload.get("tenant_id")
+        fingerprint = payload.get("fingerprint")
+        trace_id = payload.get("trace_id", "unknown")
+
+        self.logger.info(
+            f"Acknowledged enrich event for fingerprint {fingerprint}",
+            extra={
+                "tenant_id": tenant_id,
+                "fingerprint": fingerprint,
+                "trace_id": trace_id,
+            },
+        )
 
     def _process_with_retries(self, event_dto: EventDTO):
         """Process event with retry logic."""

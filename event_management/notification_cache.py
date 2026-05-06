@@ -2,8 +2,8 @@ import os
 import time
 from typing import Dict, Tuple
 
-# Get polling interval from env
-POLLING_INTERVAL = int(os.getenv("PUSHER_POLLING_INTERVAL", "15"))
+# Get polling interval from env. Default to 1 second to prevent dropping SSE notifications.
+POLLING_INTERVAL = int(os.getenv("PUSHER_POLLING_INTERVAL", "1"))
 
 
 class NotificationCache:

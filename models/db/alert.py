@@ -1,4 +1,5 @@
-from sqlmodel import JSON, TEXT, Column, Field, Index, Relationship, SQLModel
+from sqlmodel import JSON, TEXT, Column, Field, Index, Relationship, SQLModel, String, Integer, Boolean
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlalchemy import ForeignKey, ForeignKeyConstraint, UniqueConstraint
 from uuid import UUID, uuid4
 from sqlalchemy_utils import UUIDType
@@ -167,7 +168,45 @@ class Alert(SQLModel, table=True):
     )
     provider_type: str
     provider_id: str | None
-    event: dict = Field(sa_column=Column(JSON))
+    # === Source 1: External User Fields (11) ===
+    application: str | None = Field(sa_column=Column(String(200), nullable=True))
+    object: str | None = Field(sa_column=Column(String(200), nullable=True))
+    node_name: str | None = Field(sa_column=Column(String(200), nullable=True))
+    severity: str | None = Field(sa_column=Column(String(50), nullable=True))
+    message: str | None = Field(sa_column=Column(String(800), nullable=True))
+    operator: str | None = Field(sa_column=Column(String(100), nullable=True))
+    time_created: str | None = Field(sa_column=Column(String(50), nullable=True))
+    network: str | None = Field(default="nh", sa_column=Column(String(50), nullable=True, default="nh"))
+    timezone: str | None = Field(default="Asia/Jerusalem", sa_column=Column(String(50), nullable=True, default="Asia/Jerusalem"))
+    custom_key: str | None = Field(sa_column=Column(String(255), nullable=True))
+    expiry_in_minutes: int | None = Field(sa_column=Column(Integer, nullable=True))
+
+    # === Source 2: Appchi System Fields (5) ===
+    source: str | None = Field(sa_column=Column(String(255), nullable=True))
+    key_field: str | None = Field(sa_column=Column(String(255), nullable=True))
+    name: str | None = Field(sa_column=Column(String(255), nullable=True))
+    status: str | None = Field(sa_column=Column(String(50), nullable=True))
+    description: str | None = Field(sa_column=Column(TEXT, nullable=True))
+
+    # === Source 3: Keep Platform Fields (14) ===
+    lastReceived: str | None = Field(sa_column=Column(String(255), nullable=True))
+    isFullDuplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
+    isPartialDuplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
+    duplicateReason: str | None = Field(sa_column=Column(String(255), nullable=True))
+    note: str | None = Field(sa_column=Column(TEXT, nullable=True))
+    assignee: str | None = Field(sa_column=Column(String(255), nullable=True))
+    incident: str | None = Field(sa_column=Column(String(255), nullable=True))
+    dismissUntil: str | None = Field(sa_column=Column(String(255), nullable=True))
+    dismissed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
+    enriched_fields: dict | None = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql"), nullable=True))
+    startedAt: str | None = Field(sa_column=Column(String(255), nullable=True))
+    firingCounter: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
+    unresolvedCounter: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
+    firingStartTime: str | None = Field(sa_column=Column(String(255), nullable=True))
+    firingStartTimeSinceLastResolved: str | None = Field(sa_column=Column(String(255), nullable=True))
+
+    # === Overflow ===
+    extra_data: dict | None = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql"), nullable=True))
     fingerprint: str = Field(index=True)  # Add the fingerprint field with an index
 
     # alert_hash is different than fingerprint, it is a hash of the alert itself

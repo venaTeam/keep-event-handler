@@ -39,7 +39,7 @@ from sqlalchemy import (
     update,
 )
 
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError, PendingRollbackError
 from sqlalchemy.orm import subqueryload
 from sqlmodel import Session, col, or_, select, text
 
@@ -125,7 +125,7 @@ def retry_on_db_error(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except (OperationalError, IntegrityError, NoActiveSqlTransaction) as e:
+        except (OperationalError, IntegrityError, PendingRollbackError) as e:
             logger.warning(f"Database error in {func.__name__}: {str(e)}")
             # Basic retry once for now, or just raise if it fails again
             try:
@@ -898,8 +898,8 @@ def set_last_alert(
                 # For example if older alert failed to process
                 # and retried after new one
                 if last_alert and last_alert.timestamp.replace(
-                    tzinfo=tz.UTC
-                ) < alert.timestamp.replace(tzinfo=tz.UTC):
+                    tzinfo=timezone.utc
+                ) < alert.timestamp.replace(tzinfo=timezone.utc):
                     logger.info(
                         f"Update last alert for `{fingerprint}`: {last_alert.alert_id} -> {alert.id}",
                         extra={
@@ -969,7 +969,7 @@ def set_last_alert(
                 # Small delay before retry to avoid hammering the database
                 time.sleep(0.1 * attempt)
                 continue
-            except NoActiveSqlTransaction as ex:
+            except PendingRollbackError as ex:
                 session.rollback()
                 logger.exception(
                     f"No active sql transaction while updating lastalert for `{fingerprint}`, retry #{attempt}",
@@ -2271,13 +2271,15 @@ def recover_prev_alert_status(alert: Alert, session: Optional[Session] = None):
     """
     with existed_or_new_session(session) as session:
         try:
-            status = alert.event.get("status")
-            prev_status = alert.event.get("previous_status")
-            alert.event["status"] = prev_status
-            alert.event["previous_status"] = status
+            status = alert.status
+            prev_status = alert.extra_data.get("previous_status") if alert.extra_data else None
+            alert.status = prev_status
+            if not alert.extra_data:
+                alert.extra_data = {}
+            alert.extra_data["previous_status"] = status
         except KeyError:
             logger.warning(f"Alert {alert.id} does not have previous status.")
-        query = update(Alert).where(Alert.id == alert.id).values(event=alert.event)
+        query = update(Alert).where(Alert.id == alert.id).values(status=alert.status, extra_data=alert.extra_data)
         session.exec(query)
         session.commit()
 
@@ -2289,15 +2291,17 @@ def set_maintenance_windows_trace(
     session: Optional[Session] = None,
 ):
     mw_id = str(maintenance_w.id)
-    if mw_id in alert.event.get("maintenance_windows_trace", []):
+    if not alert.extra_data:
+        alert.extra_data = {}
+    if mw_id in alert.extra_data.get("maintenance_windows_trace", []):
         return
     with existed_or_new_session(session) as session:
-        if "maintenance_windows_trace" in alert.event:
-            if mw_id not in alert.event["maintenance_windows_trace"]:
-                alert.event["maintenance_windows_trace"].append(mw_id)
+        if "maintenance_windows_trace" in alert.extra_data:
+            if mw_id not in alert.extra_data["maintenance_windows_trace"]:
+                alert.extra_data["maintenance_windows_trace"].append(mw_id)
         else:
-            alert.event["maintenance_windows_trace"] = [mw_id]
-        flag_modified(alert, "event")
+            alert.extra_data["maintenance_windows_trace"] = [mw_id]
+        flag_modified(alert, "extra_data")
         session.add(alert)
         session.commit()
 

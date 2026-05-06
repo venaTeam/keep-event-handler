@@ -1,6 +1,10 @@
 from pusher import Pusher
 import os
 import logging
+import requests
+from config.consts import KEEP_API_URL
+import os
+import logging
 
 from fastapi import Request
 from fastapi.datastructures import FormData
@@ -43,6 +47,25 @@ def get_pusher_client() -> Pusher | None:
     )
     logging.debug("Pusher client initialized")
     return pusher
+
+
+def notify_sse(tenant_id: str, event: str, data: dict | list) -> None:
+    """Send SSE notification to API gateway."""
+    try:
+        api_url = KEEP_API_URL or "http://localhost:8080"
+            
+        url = f"{api_url}/sse/notify"
+        payload = {
+            "tenant_id": tenant_id,
+            "event": event,
+            "data": data
+        }
+        
+        response = requests.post(url, json=payload, timeout=5)
+        if not response.ok:
+            logger.warning(f"Failed to send SSE notification. Status: {response.status_code}")
+    except Exception as e:
+        logger.warning(f"Error sending SSE notification: {str(e)}")
 
 
 async def extract_generic_body(request: Request) -> dict | bytes | FormData:

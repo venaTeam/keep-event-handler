@@ -469,14 +469,14 @@ class BaseProvider(metaclass=abc.ABCMeta):
         )
 
         if not isinstance(formatted_alert, list):
-            formatted_alert.providerId = provider_id
-            formatted_alert.providerType = provider_type
+            formatted_alert.provider_id = provider_id
+            formatted_alert.provider_type = provider_type
             formatted_alert = [formatted_alert]
 
         else:
             for alert in formatted_alert:
-                alert.providerId = provider_id
-                alert.providerType = provider_type
+                alert.provider_id = provider_id
+                alert.provider_type = provider_type
 
         # if there is no custom deduplication rule, return the formatted alert
         if not custom_deduplication_rule:
@@ -562,8 +562,8 @@ class BaseProvider(metaclass=abc.ABCMeta):
             alerts = self._get_alerts()
             # enrich alerts with provider id
             for alert in alerts:
-                alert.providerId = self.provider_id
-                alert.providerType = self.provider_type
+                alert.provider_id = self.provider_id
+                alert.provider_type = self.provider_type
             return alerts
 
     def get_alerts_by_fingerprint(self, tenant_id: str) -> dict[str, list[AlertDto]]:

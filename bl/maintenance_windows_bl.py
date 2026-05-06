@@ -18,7 +18,7 @@ from core.db.db import (
     recover_prev_alert_status, 
     set_maintenance_windows_trace, 
 )
-from core.dependencies import get_pusher_client
+from core.dependencies import get_pusher_client, notify_sse
 from core.metrics import alerts_maintenance_silenced_total
 from models.action_type import ActionType
 from models.alert import AlertDto, AlertStatus
@@ -143,9 +143,12 @@ class MaintenanceWindowsBl:
         if isinstance(alert, AlertDto):
             payload = alert.dict()
         else:
-            payload = alert.event
+            payload = alert.dict()
+            if alert.extra_data:
+                payload.update(alert.extra_data)
         # todo: fix this in the future
-        payload["source"] = payload["source"][0]
+        if payload.get("source") and isinstance(payload["source"], list):
+            payload["source"] = payload["source"][0]
 
         activation = celpy.json_to_cel(json.loads(json.dumps(payload, default=str)))
 
@@ -235,8 +238,8 @@ class MaintenanceWindowsBl:
                         {"tenant_id": alert.tenant_id, "alert_id": alert.id},
                     )
                     # Recover source structure
-                    if not isinstance(alert.event.get("source"), list):
-                        alert.event["source"] = [alert.event["source"]]
+                    if alert.source is not None and not isinstance(alert.source, list):
+                        alert.source = [alert.source]
                     if is_in_cel:
                         active = True
                         set_maintenance_windows_trace(alert, window, session)
@@ -256,27 +259,30 @@ class MaintenanceWindowsBl:
                     action=ActionType.MAINTENANCE_EXPIRED,
                     description=(
                         f"Alert {alert.id} has recover its previous status, "
-                        f"from {alert.event.get('previous_status')} to {alert.event.get('status')}"
+                        f"from {alert.extra_data.get('previous_status') if alert.extra_data else 'unknown'} to {alert.status}"
                     ),
                 )
 
         for tenant, fp in fingerprints_to_check:
             last_alert = get_last_alert_by_fingerprint(tenant, fp, session)
             alert = get_alert_by_event_id(tenant, str(last_alert.alert_id), session)
-            if "previous_status" not in alert.event:
+            if not alert.extra_data or "previous_status" not in alert.extra_data:
                 logger.info(
                     f"Alert {alert.id} does not have previous status, cannot proceed with recover strategy",
                     extra={
                         "tenant_id": tenant,
                         "fingerprint": fp,
                         "alert_id": alert.id,
-                        "alert.status": alert.event.get("status"),
+                        "alert.status": alert.status,
                     },
                 )
                 continue
-            if not isinstance(alert.event.get("source"), list):
-                alert.event["source"] = [alert.event["source"]]
-            alert_dto = AlertDto(**alert.event)
+            if alert.source is not None and not isinstance(alert.source, list):
+                alert.source = [alert.source]
+            alert_payload = alert.dict()
+            if alert.extra_data:
+                alert_payload.update(alert.extra_data)
+            alert_dto = AlertDto(**alert_payload)
             with tracer.start_as_current_span("mw_recover_strategy_run_rules_engine"):
                 # Now we need to run the rules engine
                 if KEEP_CORRELATION_ENABLED:
@@ -289,8 +295,8 @@ class MaintenanceWindowsBl:
                         logger.exception(
                             "Failed to run rules engine",
                             extra={
-                                "provider_type": alert_dto.providerType,
-                                "provider_id": alert_dto.providerId,
+                                "provider_type": alert_dto.provider_type,
+                                "provider_id": alert_dto.provider_id,
                                 "tenant_id": tenant,
                             },
                         )
@@ -298,17 +304,19 @@ class MaintenanceWindowsBl:
                     if incidents and pusher_cache.should_notify(
                         tenant, "incident-change"
                     ):
+                        notify_sse(tenant, "incident-change", {})
                         pusher_client = get_pusher_client()
-                        try:
-                            pusher_client.trigger(
-                                f"private-{tenant}",
-                                "incident-change",
-                                {},
-                            )
-                        except Exception:
-                            logger.exception(
-                                "Failed to tell the client to pull incidents"
-                            )
+                        if pusher_client:
+                            try:
+                                pusher_client.trigger(
+                                    f"private-{tenant}",
+                                    "incident-change",
+                                    {},
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Failed to tell the client to pull incidents via Pusher"
+                                )
 
                 try:
                     presets = get_all_presets_dtos(tenant)
@@ -324,23 +332,24 @@ class MaintenanceWindowsBl:
                             continue
                         presets_do_update.append(preset_dto)
                     if pusher_cache.should_notify(tenant, "poll-presets"):
-                        try:
-                            pusher_client.trigger(
-                                f"private-{tenant}",
-                                "poll-presets",
-                                json.dumps(
-                                    [p.name.lower() for p in presets_do_update],
-                                    default=str,
-                                ),
-                            )
-                        except Exception:
-                            logger.exception("Failed to send presets via pusher")
+                        preset_names = [p.name.lower() for p in presets_do_update]
+                        notify_sse(tenant, "poll-presets", preset_names)
+                        pusher_client = get_pusher_client()
+                        if pusher_client:
+                            try:
+                                pusher_client.trigger(
+                                    f"private-{tenant}",
+                                    "poll-presets",
+                                    json.dumps(preset_names, default=str),
+                                )
+                            except Exception:
+                                logger.exception("Failed to send presets via pusher")
                 except Exception:
                     logger.exception(
                         "Failed to send presets via pusher",
                         extra={
-                            "provider_type": alert_dto.providerType,
-                            "provider_id": alert_dto.providerId,
+                            "provider_type": alert_dto.provider_type,
+                            "provider_id": alert_dto.provider_id,
                             "tenant_id": tenant,
                         },
                     )

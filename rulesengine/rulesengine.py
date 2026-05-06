@@ -128,7 +128,7 @@ class RulesEngine:
                                 status=AlertStatus.RESOLVED.value,
                             )
                             if alerts_solved and any(
-                                event.lastReceived < solved_alert.event["lastReceived"]
+                                event.lastReceived < solved_alert.lastReceived
                                 for solved_alert in alerts_solved
                             ):
                                 creation_allowed = False
@@ -157,7 +157,7 @@ class RulesEngine:
                                 )
                                 firing_count = sum(
                                     [
-                                        alert.event.get("unresolvedCounter", 1)
+                                        alert.unresolvedCounter if getattr(alert, "unresolvedCounter", None) is not None else 1
                                         for alert in incident.alerts
                                     ]
                                 )
@@ -385,8 +385,11 @@ class RulesEngine:
         matched_sub_rules = set()
 
         for alert in incident.alerts:
+            alert_payload = alert.dict()
+            if alert.extra_data:
+                alert_payload.update(alert.extra_data)
             matched_sub_rules = matched_sub_rules.union(
-                self._check_if_rule_apply(rule, AlertDto(**alert.event))
+                self._check_if_rule_apply(rule, AlertDto(**alert_payload))
             )
             if all_sub_rules == matched_sub_rules:
                 is_all_conditions_met = True
