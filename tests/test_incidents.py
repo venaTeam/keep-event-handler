@@ -31,9 +31,9 @@ from models.alert import AlertSeverity, AlertStatus
 from models.db.alert import (
     NULL_FOR_DELETED_AT,
     Alert,
-    Incident,
     LastAlertToIncident,
 )
+from models.db.incident import Incident
 from models.db.incident import IncidentSeverity, IncidentStatus
 from models.db.mapping import MappingRule
 from models.db.rule import CreateIncidentOn, ResolveOn, Rule

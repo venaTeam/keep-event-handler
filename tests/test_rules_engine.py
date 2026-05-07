@@ -57,7 +57,8 @@ from core.db.db import (
 from core.db.db import get_rules as get_rules_db
 from core.dependencies import SINGLE_TENANT_UUID
 from models.alert import AlertDto, AlertSeverity, AlertStatus
-from models.db.alert import Alert, Incident
+from models.db.alert import Alert
+from models.db.incident import Incident
 from models.db.incident import IncidentSeverity, IncidentStatus
 from models.db.rule import CreateIncidentOn, ResolveOn
 from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
@@ -104,8 +105,13 @@ def test_sanity(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
 
     db_session.add(alert)
@@ -154,8 +160,13 @@ def test_sanity_2(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -203,8 +214,13 @@ def test_sanity_3(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -252,8 +268,13 @@ def test_sanity_4(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -303,8 +324,13 @@ def test_incident_attributes(db_session):
             tenant_id=SINGLE_TENANT_UUID,
             provider_type="test",
             provider_id="test",
-            event=alert.dict(),
+            extra_data=alert.dict(),
             fingerprint=alert.fingerprint,
+            lastReceived=alert.lastReceived,
+            source=alert.source[0] if alert.source else None,
+            severity=alert.severity if alert.severity else None,
+            status=alert.status if alert.status else None,
+            name=alert.name,
             timestamp=alert.lastReceived,
         )
         for alert in alerts_dto
@@ -365,8 +391,13 @@ def test_incident_severity(db_session):
             tenant_id=SINGLE_TENANT_UUID,
             provider_type="test",
             provider_id="test",
-            event=alert.dict(),
+            extra_data=alert.dict(),
             fingerprint=alert.fingerprint,
+            lastReceived=alert.lastReceived,
+            source=alert.source[0] if alert.source else None,
+            severity=alert.severity if alert.severity else None,
+            status=alert.status if alert.status else None,
+            name=alert.name,
             timestamp=alert.lastReceived,
         )
         for alert in alerts_dto
@@ -921,8 +952,13 @@ def test_at_sign(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
 
     db_session.add(alert)
@@ -975,8 +1011,13 @@ def test_incident_name_template_simple(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1024,8 +1065,13 @@ def test_incident_name_template_nested(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1068,8 +1114,13 @@ def test_incident_name_template_fallback(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1113,8 +1164,13 @@ def test_incident_name_template_multiple_alerts(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert1.dict(),
+        extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
+        lastReceived=alert1.lastReceived,
+        source=alert1.source[0] if alert1.source else None,
+        severity=alert1.severity if alert1.severity else None,
+        status=alert1.status if alert1.status else None,
+        name=alert1.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1140,8 +1196,13 @@ def test_incident_name_template_multiple_alerts(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert2.dict(),
+        extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
+        lastReceived=alert2.lastReceived,
+        source=alert2.source[0] if alert2.source else None,
+        severity=alert2.severity if alert2.severity else None,
+        status=alert2.status if alert2.status else None,
+        name=alert2.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1183,8 +1244,13 @@ def test_incident_name_template_partial_fields(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1235,8 +1301,13 @@ def test_incident_name_template_complex_fields(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alerts[0].dict(),
+        extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
+        lastReceived=alerts[0].lastReceived,
+        source=alerts[0].source[0] if alerts[0].source else None,
+        severity=alerts[0].severity if alerts[0].severity else None,
+        status=alerts[0].status if alerts[0].status else None,
+        name=alerts[0].name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1283,8 +1354,13 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert1.dict(),
+        extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
+        lastReceived=alert1.lastReceived,
+        source=alert1.source[0] if alert1.source else None,
+        severity=alert1.severity if alert1.severity else None,
+        status=alert1.status if alert1.status else None,
+        name=alert1.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1309,8 +1385,13 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert2.dict(),
+        extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
+        lastReceived=alert2.lastReceived,
+        source=alert2.source[0] if alert2.source else None,
+        severity=alert2.severity if alert2.severity else None,
+        status=alert2.status if alert2.status else None,
+        name=alert2.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1353,8 +1434,13 @@ def test_multiple_incidents_name_template(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert1.dict(),
+        extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
+        lastReceived=alert1.lastReceived,
+        source=alert1.source[0] if alert1.source else None,
+        severity=alert1.severity if alert1.severity else None,
+        status=alert1.status if alert1.status else None,
+        name=alert1.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1381,8 +1467,13 @@ def test_multiple_incidents_name_template(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert2.dict(),
+        extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
+        lastReceived=alert2.lastReceived,
+        source=alert2.source[0] if alert2.source else None,
+        severity=alert2.severity if alert2.severity else None,
+        status=alert2.status if alert2.status else None,
+        name=alert2.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1410,8 +1501,13 @@ def test_multiple_incidents_name_template(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert3.dict(),
+        extra_data=alert3.dict(),
         fingerprint=alert3.fingerprint,
+        lastReceived=alert3.lastReceived,
+        source=alert3.source[0] if alert3.source else None,
+        severity=alert3.severity if alert3.severity else None,
+        status=alert3.status if alert3.status else None,
+        name=alert3.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1484,8 +1580,13 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert1.dict(),
+        extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
+        lastReceived=alert1.lastReceived,
+        source=alert1.source[0] if alert1.source else None,
+        severity=alert1.severity if alert1.severity else None,
+        status=alert1.status if alert1.status else None,
+        name=alert1.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1511,8 +1612,13 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert2.dict(),
+        extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
+        lastReceived=alert2.lastReceived,
+        source=alert2.source[0] if alert2.source else None,
+        severity=alert2.severity if alert2.severity else None,
+        status=alert2.status if alert2.status else None,
+        name=alert2.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1537,8 +1643,13 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert3.dict(),
+        extra_data=alert3.dict(),
         fingerprint=alert3.fingerprint,
+        lastReceived=alert3.lastReceived,
+        source=alert3.source[0] if alert3.source else None,
+        severity=alert3.severity if alert3.severity else None,
+        status=alert3.status if alert3.status else None,
+        name=alert3.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1562,8 +1673,13 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert4.dict(),
+        extra_data=alert4.dict(),
         fingerprint=alert4.fingerprint,
+        lastReceived=alert4.lastReceived,
+        source=alert4.source[0] if alert4.source else None,
+        severity=alert4.severity if alert4.severity else None,
+        status=alert4.status if alert4.status else None,
+        name=alert4.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1639,8 +1755,13 @@ def test_incident_created_only_for_firing_alerts(db_session):
             tenant_id=SINGLE_TENANT_UUID,
             provider_type="test",
             provider_id="test",
-            event=alert.dict(),
+            extra_data=alert.dict(),
             fingerprint=alert.fingerprint,
+            lastReceived=alert.lastReceived,
+            source=alert.source[0] if alert.source else None,
+            severity=alert.severity if alert.severity else None,
+            status=alert.status if alert.status else None,
+            name=alert.name,
         )
         for alert in alerts
     ]
@@ -1694,8 +1815,13 @@ def test_same_incident_in_the_past_id_set(db_session, client, test_app):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert1.dict(),
+        extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
+        lastReceived=alert1.lastReceived,
+        source=alert1.source[0] if alert1.source else None,
+        severity=alert1.severity if alert1.severity else None,
+        status=alert1.status if alert1.status else None,
+        name=alert1.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1739,8 +1865,13 @@ def test_same_incident_in_the_past_id_set(db_session, client, test_app):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert2.dict(),
+        extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
+        lastReceived=alert2.lastReceived,
+        source=alert2.source[0] if alert2.source else None,
+        severity=alert2.severity if alert2.severity else None,
+        status=alert2.status if alert2.status else None,
+        name=alert2.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1793,8 +1924,13 @@ def test_correlation_to_incident_candidate(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert_dto.dict(),
+        extra_data=alert_dto.dict(),
         fingerprint=alert_dto.fingerprint,
+        lastReceived=alert_dto.lastReceived,
+        source=alert_dto.source[0] if alert_dto.source else None,
+        severity=alert_dto.severity if alert_dto.severity else None,
+        status=alert_dto.status if alert_dto.status else None,
+        name=alert_dto.name,
     )
     db_session.add(alert)
     db_session.commit()
@@ -1843,8 +1979,13 @@ def test_incident_prefix_simple(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert.dict(),
+        extra_data=alert.dict(),
         fingerprint=alert.fingerprint,
+        lastReceived=alert.lastReceived,
+        source=alert.source[0] if alert.source else None,
+        severity=alert.severity if alert.severity else None,
+        status=alert.status if alert.status else None,
+        name=alert.name,
     )
     db_session.add(db_alert)
     db_session.commit()
@@ -1891,8 +2032,13 @@ def test_incident_prefix_with_template(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert.dict(),
+        extra_data=alert.dict(),
         fingerprint=alert.fingerprint,
+        lastReceived=alert.lastReceived,
+        source=alert.source[0] if alert.source else None,
+        severity=alert.severity if alert.severity else None,
+        status=alert.status if alert.status else None,
+        name=alert.name,
     )
     db_session.add(db_alert)
     db_session.commit()
@@ -1939,8 +2085,13 @@ def test_incident_prefix_multiple_incidents(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert1.dict(),
+        extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
+        lastReceived=alert1.lastReceived,
+        source=alert1.source[0] if alert1.source else None,
+        severity=alert1.severity if alert1.severity else None,
+        status=alert1.status if alert1.status else None,
+        name=alert1.name,
     )
     db_session.add(db_alert)
     db_session.commit()
@@ -1966,8 +2117,13 @@ def test_incident_prefix_multiple_incidents(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert2.dict(),
+        extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
+        lastReceived=alert2.lastReceived,
+        source=alert2.source[0] if alert2.source else None,
+        severity=alert2.severity if alert2.severity else None,
+        status=alert2.status if alert2.status else None,
+        name=alert2.name,
     )
     db_session.add(db_alert)
     db_session.commit()
@@ -1993,8 +2149,13 @@ def test_incident_prefix_multiple_incidents(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert3.dict(),
+        extra_data=alert3.dict(),
         fingerprint=alert3.fingerprint,
+        lastReceived=alert3.lastReceived,
+        source=alert3.source[0] if alert3.source else None,
+        severity=alert3.severity if alert3.severity else None,
+        status=alert3.status if alert3.status else None,
+        name=alert3.name,
     )
     db_session.add(db_alert)
     db_session.commit()
@@ -2224,8 +2385,13 @@ def test_incident_created_with_assignee(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert.dict(),
+        extra_data=alert.dict(),
         fingerprint=alert.fingerprint,
+        lastReceived=alert.lastReceived,
+        source=alert.source[0] if alert.source else None,
+        severity=alert.severity if alert.severity else None,
+        status=alert.status if alert.status else None,
+        name=alert.name,
     )
     db_session.add(db_alert)
     db_session.commit()
@@ -2272,8 +2438,13 @@ def test_incident_created_without_assignee(db_session):
         tenant_id=SINGLE_TENANT_UUID,
         provider_type="test",
         provider_id="test",
-        event=alert.dict(),
+        extra_data=alert.dict(),
         fingerprint=alert.fingerprint,
+        lastReceived=alert.lastReceived,
+        source=alert.source[0] if alert.source else None,
+        severity=alert.severity if alert.severity else None,
+        status=alert.status if alert.status else None,
+        name=alert.name,
     )
     db_session.add(db_alert)
     db_session.commit()
