@@ -15,7 +15,6 @@ from arq import Retry
 import requests
 from fastapi.datastructures import FormData
 from opentelemetry import trace
-from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
 # internals
@@ -335,31 +334,19 @@ def __save_to_db(
                     )
                     existing_alert = session.exec(query).first()
                     if existing_alert:
-                        # Update the event dict's lastReceived field
-                        if existing_alert.event:
-                            existing_alert.event["lastReceived"] = event.lastReceived
-                            # Mark the JSON field as modified so SQLAlchemy detects the change
-                            flag_modified(existing_alert, "event")
-                            session.add(existing_alert)
-                            session.flush()
-                            logger.debug(
-                                "Updated lastReceived for deduplicated alert",
-                                extra={
-                                    "tenant_id": tenant_id,
-                                    "fingerprint": event.fingerprint,
-                                    "alert_id": str(existing_alert.id),
-                                    "lastReceived": event.lastReceived,
-                                },
-                            )
-                        else:
-                            logger.warning(
-                                "Existing alert has no event dict",
-                                extra={
-                                    "tenant_id": tenant_id,
-                                    "fingerprint": event.fingerprint,
-                                    "alert_id": str(existing_alert.id),
-                                },
-                            )
+                        # Update the lastReceived field
+                        existing_alert.lastReceived = event.lastReceived
+                        session.add(existing_alert)
+                        session.flush()
+                        logger.debug(
+                            "Updated lastReceived for deduplicated alert",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "fingerprint": event.fingerprint,
+                                "alert_id": str(existing_alert.id),
+                                "lastReceived": event.lastReceived,
+                            },
+                        )
                     else:
                         logger.warning(
                             "No existing alert found to update lastReceived",
@@ -607,16 +594,42 @@ def __save_to_db(
                     else None,
                 },
             )
+            # Map AlertDto fields to native columns
+            event_dict = formatted_event.dict()
+            infra_cols = {"id", "tenant_id", "timestamp", "provider_type", "provider_id", "fingerprint", "alert_hash"}
+            
+            # Extract native columns defined in Alert model
+            native_cols = {
+                "application", "object", "node_name", "severity", "message", "operator",
+                "time_created", "network", "timezone", "custom_key", "expiry_in_minutes",
+                "source", "service", "key_field", "name", "status", "description",
+                "lastReceived", "isFullDuplicate", "isPartialDuplicate", "duplicateReason",
+                "note", "assignee", "incident", "dismissUntil", "dismissed", 
+                "enriched_fields", "startedAt", "firingCounter", "unresolvedCounter",
+                "firingStartTime", "firingStartTimeSinceLastResolved"
+            }
+            
             alert_args = {
                 "tenant_id": tenant_id,
                 "provider_type": (
                     provider_type if provider_type else formatted_event.source[0]
                 ),
-                "event": formatted_event.dict(),
                 "provider_id": provider_id,
                 "fingerprint": formatted_event.fingerprint,
                 "alert_hash": formatted_event.alert_hash,
             }
+            
+            # Map native fields from AlertDto
+            extra_data = {}
+            for key, value in event_dict.items():
+                if key in native_cols:
+                    alert_args[key] = value
+                elif key not in infra_cols and key != "event":
+                    extra_data[key] = value
+            
+            # Put non-native fields in extra_data
+            alert_args["extra_data"] = extra_data
+            
             alert_args = sanitize_alert(alert_args)
             if timestamp_forced is not None:
                 alert_args["timestamp"] = timestamp_forced
@@ -906,7 +919,7 @@ def __save_to_db(
             session.expire_on_commit = False
             incident_bl = IncidentBl(tenant_id, session)
             for alert in saved_alerts:
-                if alert.event.get("status") == AlertStatus.RESOLVED.value:
+                if alert.status == AlertStatus.RESOLVED.value:
                     logger.debug(
                         "Checking for alert with status resolved",
                         extra={
@@ -1153,8 +1166,8 @@ def __handle_formatted_events(
                 bulk_upsert_alert_fields(
                     tenant_id=tenant_id,
                     fields=fields,
-                    provider_id=enriched_formatted_event.providerId,
-                    provider_type=enriched_formatted_event.providerType,
+                    provider_id=enriched_formatted_event.provider_id,
+                    provider_type=enriched_formatted_event.provider_type,
                     session=session,
                 )
 

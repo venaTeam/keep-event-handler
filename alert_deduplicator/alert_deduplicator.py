@@ -122,7 +122,7 @@ class AlertDeduplicator:
 
         # get only relevant rules
         rules = rules or self.get_deduplication_rules(
-            self.tenant_id, alert.providerId, alert.providerType
+            self.tenant_id, alert.provider_id, alert.provider_type
         )
 
         for rule in rules:
@@ -155,8 +155,8 @@ class AlertDeduplicator:
                         deduplication_type=(
                             "full" if alert.isFullDuplicate else "partial"
                         ),
-                        provider_id=alert.providerId,
-                        provider_type=alert.providerType,
+                        provider_id=alert.provider_id,
+                        provider_type=alert.provider_type,
                     )
                     # we don't need to check the other rules
                     break
@@ -166,8 +166,8 @@ class AlertDeduplicator:
                         tenant_id=self.tenant_id,
                         deduplication_rule_id=rule.id,
                         deduplication_type="none",
-                        provider_id=alert.providerId,
-                        provider_type=alert.providerType,
+                        provider_id=alert.provider_id,
+                        provider_type=alert.provider_type,
                     )
 
         return alert

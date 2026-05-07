@@ -143,9 +143,13 @@ class MaintenanceWindowsBl:
         if isinstance(alert, AlertDto):
             payload = alert.dict()
         else:
-            payload = alert.event
+            payload = alert.dict()
+            if alert.extra_data:
+                payload.update(alert.extra_data)
         # todo: fix this in the future
-        payload["source"] = payload["source"][0]
+        source = payload.get("source")
+        if isinstance(source, list) and source:
+            payload["source"] = source[0]
 
         activation = celpy.json_to_cel(json.loads(json.dumps(payload, default=str)))
 
@@ -234,9 +238,6 @@ class MaintenanceWindowsBl:
                         logger,
                         {"tenant_id": alert.tenant_id, "alert_id": alert.id},
                     )
-                    # Recover source structure
-                    if not isinstance(alert.event.get("source"), list):
-                        alert.event["source"] = [alert.event["source"]]
                     if is_in_cel:
                         active = True
                         set_maintenance_windows_trace(alert, window, session)
@@ -249,6 +250,7 @@ class MaintenanceWindowsBl:
             if not active:
                 recover_prev_alert_status(alert, session)
                 fingerprints_to_check.add((alert.tenant_id, alert.fingerprint))
+                prev_status = (alert.extra_data or {}).get("previous_status")
                 add_audit(
                     tenant_id=alert.tenant_id,
                     fingerprint=alert.fingerprint,
@@ -256,27 +258,29 @@ class MaintenanceWindowsBl:
                     action=ActionType.MAINTENANCE_EXPIRED,
                     description=(
                         f"Alert {alert.id} has recover its previous status, "
-                        f"from {alert.event.get('previous_status')} to {alert.event.get('status')}"
+                        f"from {prev_status} to {alert.status}"
                     ),
                 )
 
         for tenant, fp in fingerprints_to_check:
             last_alert = get_last_alert_by_fingerprint(tenant, fp, session)
             alert = get_alert_by_event_id(tenant, str(last_alert.alert_id), session)
-            if "previous_status" not in alert.event:
+            extra_data = alert.extra_data or {}
+            if "previous_status" not in extra_data:
                 logger.info(
                     f"Alert {alert.id} does not have previous status, cannot proceed with recover strategy",
                     extra={
                         "tenant_id": tenant,
                         "fingerprint": fp,
                         "alert_id": alert.id,
-                        "alert.status": alert.event.get("status"),
+                        "alert.status": alert.status,
                     },
                 )
                 continue
-            if not isinstance(alert.event.get("source"), list):
-                alert.event["source"] = [alert.event["source"]]
-            alert_dto = AlertDto(**alert.event)
+            alert_payload = alert.dict()
+            if alert.extra_data:
+                alert_payload.update(alert.extra_data)
+            alert_dto = AlertDto(**alert_payload)
             with tracer.start_as_current_span("mw_recover_strategy_run_rules_engine"):
                 # Now we need to run the rules engine
                 if KEEP_CORRELATION_ENABLED:
@@ -289,8 +293,8 @@ class MaintenanceWindowsBl:
                         logger.exception(
                             "Failed to run rules engine",
                             extra={
-                                "provider_type": alert_dto.providerType,
-                                "provider_id": alert_dto.providerId,
+                                "provider_type": alert_dto.provider_type,
+                                "provider_id": alert_dto.provider_id,
                                 "tenant_id": tenant,
                             },
                         )
@@ -333,8 +337,8 @@ class MaintenanceWindowsBl:
                     logger.exception(
                         "Failed to send presets via SSE",
                         extra={
-                            "provider_type": alert_dto.providerType,
-                            "provider_id": alert_dto.providerId,
+                            "provider_type": alert_dto.provider_type,
+                            "provider_id": alert_dto.provider_id,
                             "tenant_id": tenant,
                         },
                     )

@@ -5,13 +5,69 @@ import hashlib
 import urllib
 import logging
 import datetime
-from typing import Any, TYPE_CHECKING, Dict, Optional
+from typing import Any, Dict, Optional
 import pytz
-from pydantic import AnyHttpUrl, BaseModel, Extra, root_validator, validator
+from pydantic import AnyHttpUrl, BaseModel, Extra, Field, root_validator, validator
 
+logger = logging.getLogger(__name__)
 
-from enum import Enum
+def get_fingerprint(fingerprint, values):
+    # if its none, use the name
+    if fingerprint is None:
+        fingerprint_payload = values.get("name")
+        # if the alert name is None, than use the entire payload
+        if not fingerprint_payload:
+            logger.warning("No name to alert, using the entire payload")
+            fingerprint_payload = json.dumps(values)
+        fingerprint = hashlib.sha256(fingerprint_payload.encode()).hexdigest()
+    # take only the first 255 characters
+    else:
+        fingerprint = fingerprint[:255]
+    return fingerprint
 
+    
+class AlertStatus(Enum):
+    # Active alert
+    FIRING = "firing"
+    # Alert has been resolved
+    RESOLVED = "resolved"
+    # Alert has been acknowledged but not resolved
+    ACKNOWLEDGED = "acknowledged"
+    # Alert is suppressed due to various reasons
+    SUPPRESSED = "suppressed"
+    # No Data
+    PENDING = "pending"
+    # Affected by Maintenance Windows
+    MAINTENANCE = "maintenance"
+
+class DeduplicationRuleRequestDto(BaseModel):
+    name: str
+    description: Optional[str] = None
+    provider_type: str
+    provider_id: Optional[str] = None
+    fingerprint_fields: list[str]
+    full_deduplication: bool = False
+    ignore_fields: Optional[list[str]] = None
+
+class DeduplicationRuleDto(BaseModel):
+    id: str | None 
+    name: str
+    description: str
+    default: bool
+    distribution: list[dict]  # list of {hour: int, count: int}
+    provider_id: str | None  # None for default rules
+    provider_type: str
+    last_updated: str | None
+    last_updated_by: str | None
+    created_at: str | None
+    created_by: str | None
+    ingested: int
+    dedup_ratio: float
+    enabled: bool
+    fingerprint_fields: list[str]
+    full_deduplication: bool
+    ignore_fields: list[str]
+    is_provisioned: bool
 
 class SeverityBaseInterface(Enum):
     def __new__(cls, severity_name, severity_order):
@@ -54,25 +110,6 @@ class SeverityBaseInterface(Enum):
             return self.order >= other.order
         return NotImplemented
 
-if TYPE_CHECKING:
-    pass
-
-logger = logging.getLogger(__name__)
-
-def get_fingerprint(fingerprint, values):
-    # if its none, use the name
-    if fingerprint is None:
-        fingerprint_payload = values.get("name")
-        # if the alert name is None, than use the entire payload
-        if not fingerprint_payload:
-            logger.warning("No name to alert, using the entire payload")
-            fingerprint_payload = json.dumps(values, sort_keys=True)
-        fingerprint = hashlib.sha256(fingerprint_payload.encode()).hexdigest()
-    # take only the first 255 characters
-    else:
-        fingerprint = fingerprint[:255]
-    return fingerprint
-
 
 class AlertSeverity(SeverityBaseInterface):
     CRITICAL = ("critical", 5)
@@ -81,32 +118,6 @@ class AlertSeverity(SeverityBaseInterface):
     INFO = ("info", 2)
     LOW = ("low", 1)
 
-
-class AlertStatus(Enum):
-    # Active alert
-    FIRING = "firing"
-    # Alert has been resolved
-    RESOLVED = "resolved"
-    # Alert has been acknowledged but not resolved
-    ACKNOWLEDGED = "acknowledged"
-    # Alert is suppressed due to various reasons
-    SUPPRESSED = "suppressed"
-    # No Data
-    PENDING = "pending"
-    # Affected by Maintenance Windows
-    MAINTENANCE = "maintenance"
-
-
-class DismissAlertRequest(BaseModel):
-    alert_id: Optional[str] = None
-
-
-class AlertErrorDto(BaseModel):
-    id: str
-    provider_type: str
-    event: dict
-    error_message: Optional[str] = None
-    timestamp: datetime.datetime
 
 
 class AlertDto(BaseModel):
@@ -119,39 +130,72 @@ class AlertDto(BaseModel):
     firingStartTimeSinceLastResolved: str | None = None
     firingCounter: int = 0
     unresolvedCounter: int = 0
-    environment: str = "undefined"
     isFullDuplicate: bool | None = False
     isPartialDuplicate: bool | None = False
     duplicateReason: str | None = None
-    service: str | None = None
     source: list[str] | None = []
-    apiKeyRef: str | None = None
+    service: str | None = None
+    application: str | None = None
+    object: str | None = None
+    node_name: str | None = None
+    operator: str | None = None
+    time_created: str | None = None
+    network: str | None = None
+    timezone: str | None = None
+    custom_key: str | None = None
+    expiry_in_minutes: int | None = None
+    key_field: str | None = None
     message: str | None = None
     description: str | None = None
-    description_format: str | None = None  # Can be 'markdown' or 'html'
-    pushed: bool = False  # Whether the alert was pushed or pulled from the provider
-    event_id: str | None = None  # Database alert id
-    url: AnyHttpUrl | None = None
-    imageUrl: AnyHttpUrl | None = None
-    labels: dict | None = {}
     fingerprint: str | None = (
         None  # The fingerprint of the alert (used for alert de-duplication)
     )
-    deleted: bool = False  # @tal: Obselete field since we have dismissed, but kept for backwards compatibility
     dismissUntil: str | None = None  # The time until the alert is dismissed
     # DO NOT MOVE DISMISSED ABOVE dismissedUntil since it is used in root_validator
     dismissed: bool = False  # Whether the alert has been dismissed
     assignee: str | None = None  # The assignee of the alert
-    providerId: str | None = None  # The provider id
-    providerType: str | None = None  # The provider type
+    provider_id: str | None = Field(default=None, alias="providerId")  # The provider id
+    provider_type: str | None = Field(default=None, alias="providerType")  # The provider type
     note: str | None = None  # The note of the alert
     startedAt: str | None = (
         None  # The time the alert started - e.g. if alert triggered multiple times, it will be the time of the first trigger (calculated on querying)
     )
-    isNoisy: bool = False  # Whether the alert is noisy
 
     enriched_fields: list = []
+
+    @validator("enriched_fields", pre=True)
+    def ensure_enriched_fields_is_list(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, dict):
+            return list(v.keys())
+        return v
     incident: str | None = None
+
+    @validator("id", pre=True)
+    def parse_id(cls, v):
+        if v is not None:
+            return str(v)
+        return v
+
+    @validator("source", pre=True)
+    def parse_source(cls, v):
+        if isinstance(v, str):
+            try:
+                import json
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                pass
+            return [v]
+        return v
+
+    @validator("enriched_fields", pre=True)
+    def parse_enriched_fields(cls, v):
+        if isinstance(v, dict):
+            return list(v.keys())
+        return v
 
     def __str__(self) -> str:
         # Convert the model instance to a dictionary
@@ -183,28 +227,6 @@ class AlertDto(BaseModel):
     @validator("fingerprint", pre=True, always=True)
     def assign_fingerprint_if_none(cls, fingerprint, values):
         return get_fingerprint(fingerprint, values)
-
-    @validator("deleted", pre=True, always=True)
-    def validate_deleted(cls, deleted, values):
-        if isinstance(deleted, bool):
-            return deleted
-        if isinstance(deleted, list):
-            return values.get("lastReceived") in deleted
-
-    @validator("url", pre=True)
-    def prepend_https(cls, url):
-        if not isinstance(url, str):
-            return url
-
-        url = url.strip()
-        # If the URL is empty, return None to avoid validation errors
-        if not url:
-            return None
-        if not url.startswith("http"):
-            # @tb: in some cases we drop the event because of invalid url with no scheme
-            # invalid or missing URL scheme (type=value_error.url.scheme)
-            url = f"https://{url}"
-        return urllib.parse.quote(url, safe="/:?=&")
 
     @validator("lastReceived", pre=True, always=True)
     def validate_last_received(cls, last_received):
@@ -271,14 +293,6 @@ class AlertDto(BaseModel):
         )
         return dismissed
 
-    @validator("description_format")
-    def validate_description_format(cls, description_format):
-        if description_format is None:
-            return None
-        valid_formats = ["markdown", "html"]
-        if description_format not in valid_formats:
-            raise ValueError(f"description_format must be one of {valid_formats}")
-        return description_format
 
     @root_validator(pre=True)
     def set_default_values(cls, values: Dict[str, Any]) -> Dict[str, Any]:
@@ -321,9 +335,18 @@ class AlertDto(BaseModel):
         assignees = values.pop("assignees", None)
         # In some cases (for example PagerDuty) the assignees is list of dicts and we don't handle it atm.
         if assignees and isinstance(assignees, dict):
-            dt = datetime.datetime.fromisoformat(lastReceived)
-            dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            assignee = assignees.get(lastReceived) or assignees.get(dt)
+            # Try exact match first
+            assignee = assignees.get(lastReceived)
+            if not assignee:
+                # Try normalized match
+                try:
+                    dt = datetime.datetime.fromisoformat(lastReceived.rstrip("Z"))
+                    normalized_dt = dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                    if not normalized_dt.endswith("Z"):
+                        normalized_dt += "Z"
+                    assignee = assignees.get(normalized_dt)
+                except Exception:
+                    pass
             values["assignee"] = assignee
         values.pop("deletedAt", None)
         return values
@@ -339,6 +362,7 @@ class AlertDto(BaseModel):
         return values
 
     class Config:
+        allow_population_by_field_name = True
         extra = Extra.allow
         schema_extra = {
             "examples": [
@@ -373,93 +397,15 @@ class AlertDto(BaseModel):
             Enum: lambda v: v.value,
         }
 
-
 class AlertWithIncidentLinkMetadataDto(AlertDto):
     is_created_by_ai: bool = False
 
     @classmethod
     def from_db_instance(cls, db_alert, db_alert_to_incident):
+        payload = db_alert.dict()
+        if db_alert.extra_data:
+            payload.update(db_alert.extra_data)
         return cls(
             is_created_by_ai=db_alert_to_incident.is_created_by_ai,
-            **db_alert.event,
+            **payload,
         )
-
-
-class DeleteRequestBody(BaseModel):
-    fingerprint: str
-    lastReceived: str
-    restore: bool = False
-
-
-class DismissRequestBody(BaseModel):
-    fingerprint: str
-    dismissUntil: str
-    dismissComment: str
-    restore: bool = False
-
-
-class AssignAlertRequestBody(BaseModel):
-    dispose_on_new_alert: bool = True
-    note: Optional[str] = None
-
-
-class EnrichAlertNoteRequestBody(BaseModel):
-    note: str
-    fingerprint: str
-
-
-class EnrichAlertRequestBody(BaseModel):
-    enrichments: dict[str, str]
-    fingerprint: str
-
-
-class BatchEnrichAlertRequestBody(BaseModel):
-    enrichments: dict[str, str]
-    fingerprints: Optional[list[str]] = None
-    cel: Optional[str] = None
-
-
-class UnEnrichAlertRequestBody(BaseModel):
-    enrichments: list[str]
-    fingerprint: str
-
-
-class DeduplicationRuleDto(BaseModel):
-    id: str | None  # UUID
-    name: str
-    description: str
-    default: bool
-    distribution: list[dict]  # list of {hour: int, count: int}
-    provider_id: str | None  # None for default rules
-    provider_type: str
-    last_updated: str | None
-    last_updated_by: str | None
-    created_at: str | None
-    created_by: str | None
-    ingested: int
-    dedup_ratio: float
-    enabled: bool
-    fingerprint_fields: list[str]
-    full_deduplication: bool
-    ignore_fields: list[str]
-    is_provisioned: bool
-
-
-class DeduplicationRuleRequestDto(BaseModel):
-    name: str
-    description: Optional[str] = None
-    provider_type: str
-    provider_id: Optional[str] = None
-    fingerprint_fields: list[str]
-    full_deduplication: bool = False
-    ignore_fields: Optional[list[str]] = None
-
-
-class EnrichIncidentRequestBody(BaseModel):
-    enrichments: Dict[str, Any]
-    force: bool = False
-
-
-class UnEnrichIncidentRequestBody(BaseModel):
-    enrichments: list[str]
-    fingerprint: str
