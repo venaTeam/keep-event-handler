@@ -116,12 +116,13 @@ def alert_maint():
         fingerprint="test-fingerprint",
         provider_id="test-provider",
         provider_type="test-provider-type",
-        event={
-            "name": "Test Alert",
-            "status": AlertStatus.MAINTENANCE.value,
+        name="Test Alert",
+        status=AlertStatus.MAINTENANCE.value,
+        extra_data={
             "previous_status": AlertStatus.FIRING.value,
             "source": ["test-source"],
         },
+        source="test-source",
         alert_hash="test-alert-hash",
     )
 
@@ -377,11 +378,9 @@ def test_strategy_clean_status(
         MaintenanceWindowsBl.recover_strategy(logger=MagicMock(), session=mock_session)
 
     # THEN the new status will be the previous status, and the previous status will be the old status
-    _, new_status, new_previous_status, _ = list(
-        recover_status_session.exec.call_args[0][0]._values.values()
-    )[0].value.values()
-    assert new_status == AlertStatus.FIRING.value
-    assert new_previous_status == AlertStatus.MAINTENANCE.value
+    assert alert_maint.status == AlertStatus.FIRING.value
+    assert alert_maint.extra_data["previous_status"] == AlertStatus.MAINTENANCE.value
+    assert recover_status_session.commit.called
 
 
 def test_strategy_alert_block_by_window(
@@ -417,6 +416,9 @@ def test_strategy_alert_block_by_window(
         retrieve_windows_session,
         retrieve_alerts_session,
         recover_status_session,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
         MagicMock(),
     ]
     with patch("core.db.db.existed_or_new_session", return_value=mock_session):
