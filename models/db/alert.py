@@ -215,10 +215,6 @@ class Alert(SQLModel, table=True):
     firing_start_time: str | None = Field(sa_column=Column(String(255), nullable=True))
     firing_start_time_since_last_resolved: str | None = Field(sa_column=Column(String(255), nullable=True))
 
-    # === Maintenance Window Fields ===
-    previous_status: str | None = Field(sa_column=Column(String(50), nullable=True))
-    maintenance_windows_trace: list | None = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql"), nullable=True), default=None)
-
     fingerprint: str = Field(index=True)  # Add the fingerprint field with an index
 
     # alert_hash is different than fingerprint, it is a hash of the alert itself

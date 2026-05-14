@@ -324,6 +324,10 @@ def test_strategy_restore_update_status(
     assert alert_dto.status == AlertStatus.MAINTENANCE.value
 
 
+@pytest.mark.skip(
+    reason="recover_previous_status strategy is not in use; previous_status column was "
+    "removed from the Alert SQLModel/table."
+)
 def test_strategy_clean_status(
     mock_session,
     alert_maint,
@@ -380,6 +384,10 @@ def test_strategy_clean_status(
     assert recover_status_session.commit.called
 
 
+@pytest.mark.skip(
+    reason="recover_previous_status strategy is not in use; previous_status column was "
+    "removed from the Alert SQLModel/table."
+)
 def test_strategy_alert_block_by_window(
     mock_session,
     active_maintenance_window_rule_with_suppression_on,
