@@ -57,12 +57,38 @@ from core.db.db import (
 from core.db.db import get_rules as get_rules_db
 from core.dependencies import SINGLE_TENANT_UUID
 from models.alert import AlertDto, AlertSeverity, AlertStatus
-from models.db.alert import Alert
+from models.db.alert import Alert, AlertEnrichment
 from models.db.incident import Incident
 from models.db.incident import IncidentSeverity, IncidentStatus
 from models.db.rule import CreateIncidentOn, ResolveOn
 from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
 from rulesengine.rulesengine import RulesEngine
+
+
+def _persist_alert_with_enrichment(session, alert_dto, tenant_id, provider_type="test", provider_id="test"):
+    """Persist an Alert plus an AlertEnrichment carrying the AlertDto's non-native fields
+    (labels, etc.) so that convert_db_alerts_to_dto_alerts can rebuild the full DTO."""
+    alert = Alert(
+        tenant_id=tenant_id,
+        provider_type=provider_type,
+        provider_id=provider_id,
+        fingerprint=alert_dto.fingerprint,
+        last_received=alert_dto.last_received,
+        source=alert_dto.source[0] if alert_dto.source else None,
+        severity=alert_dto.severity if alert_dto.severity else None,
+        status=alert_dto.status if alert_dto.status else None,
+        name=alert_dto.name,
+    )
+    session.add(alert)
+    session.commit()
+    enrichment = AlertEnrichment(
+        tenant_id=tenant_id,
+        alert_fingerprint=alert_dto.fingerprint,
+        enrichments=alert_dto.dict(),
+    )
+    session.add(enrichment)
+    session.commit()
+    return alert
 
 
 @pytest.fixture(autouse=True)
@@ -1160,20 +1186,7 @@ def test_incident_name_template_multiple_alerts(db_session):
     )
 
     # Add first alert
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert1.dict(),
-        fingerprint=alert1.fingerprint,
-        last_received=alert1.last_received,
-        source=alert1.source[0] if alert1.source else None,
-        severity=alert1.severity if alert1.severity else None,
-        status=alert1.status if alert1.status else None,
-        name=alert1.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert1, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert1.event_id = alert.id
@@ -1192,20 +1205,7 @@ def test_incident_name_template_multiple_alerts(db_session):
         labels={"host": "web-2", "service": "nginx"},
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert2.dict(),
-        fingerprint=alert2.fingerprint,
-        last_received=alert2.last_received,
-        source=alert2.source[0] if alert2.source else None,
-        severity=alert2.severity if alert2.severity else None,
-        status=alert2.status if alert2.status else None,
-        name=alert2.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert2, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert2.event_id = alert.id
@@ -1350,20 +1350,7 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
     )
 
     # Add first alert
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert1.dict(),
-        fingerprint=alert1.fingerprint,
-        last_received=alert1.last_received,
-        source=alert1.source[0] if alert1.source else None,
-        severity=alert1.severity if alert1.severity else None,
-        status=alert1.status if alert1.status else None,
-        name=alert1.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert1, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert1.event_id = alert.id
@@ -1381,20 +1368,7 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
         labels={"host": "web-2", "service": "mysql"},
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert2.dict(),
-        fingerprint=alert2.fingerprint,
-        last_received=alert2.last_received,
-        source=alert2.source[0] if alert2.source else None,
-        severity=alert2.severity if alert2.severity else None,
-        status=alert2.status if alert2.status else None,
-        name=alert2.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert2, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert2.event_id = alert.id
@@ -1430,20 +1404,7 @@ def test_multiple_incidents_name_template(db_session):
         labels={"host": "web-1", "services": ["nginx"]},
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert1.dict(),
-        fingerprint=alert1.fingerprint,
-        last_received=alert1.last_received,
-        source=alert1.source[0] if alert1.source else None,
-        severity=alert1.severity if alert1.severity else None,
-        status=alert1.status if alert1.status else None,
-        name=alert1.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert1, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert1.event_id = alert.id
@@ -1463,20 +1424,7 @@ def test_multiple_incidents_name_template(db_session):
         labels={"host": "web-2", "services": ["mysql", "redis"]},
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert2.dict(),
-        fingerprint=alert2.fingerprint,
-        last_received=alert2.last_received,
-        source=alert2.source[0] if alert2.source else None,
-        severity=alert2.severity if alert2.severity else None,
-        status=alert2.status if alert2.status else None,
-        name=alert2.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert2, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert2.event_id = alert.id
@@ -1497,20 +1445,7 @@ def test_multiple_incidents_name_template(db_session):
         labels={"host": "web-1", "services": ["postgresql"]},  # Same host as alert1
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert3.dict(),
-        fingerprint=alert3.fingerprint,
-        last_received=alert3.last_received,
-        source=alert3.source[0] if alert3.source else None,
-        severity=alert3.severity if alert3.severity else None,
-        status=alert3.status if alert3.status else None,
-        name=alert3.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert3, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert3.event_id = alert.id
@@ -1576,20 +1511,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         labels={"host": "web-1", "service": "nginx"},
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert1.dict(),
-        fingerprint=alert1.fingerprint,
-        last_received=alert1.last_received,
-        source=alert1.source[0] if alert1.source else None,
-        severity=alert1.severity if alert1.severity else None,
-        status=alert1.status if alert1.status else None,
-        name=alert1.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert1, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert1.event_id = alert.id
@@ -1608,20 +1530,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         labels={"host": "db-1", "service": "mysql"},
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert2.dict(),
-        fingerprint=alert2.fingerprint,
-        last_received=alert2.last_received,
-        source=alert2.source[0] if alert2.source else None,
-        severity=alert2.severity if alert2.severity else None,
-        status=alert2.status if alert2.status else None,
-        name=alert2.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert2, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert2.event_id = alert.id
@@ -1639,20 +1548,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         labels={"host": "web-2", "service": "nginx"},  # Same service as alert1
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert3.dict(),
-        fingerprint=alert3.fingerprint,
-        last_received=alert3.last_received,
-        source=alert3.source[0] if alert3.source else None,
-        severity=alert3.severity if alert3.severity else None,
-        status=alert3.status if alert3.status else None,
-        name=alert3.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert3, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert3.event_id = alert.id
@@ -1669,20 +1565,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         labels={"host": "db-2", "service": "mysql"},
     )
 
-    alert = Alert(
-        tenant_id=SINGLE_TENANT_UUID,
-        provider_type="test",
-        provider_id="test",
-        extra_data=alert4.dict(),
-        fingerprint=alert4.fingerprint,
-        last_received=alert4.last_received,
-        source=alert4.source[0] if alert4.source else None,
-        severity=alert4.severity if alert4.severity else None,
-        status=alert4.status if alert4.status else None,
-        name=alert4.name,
-    )
-    db_session.add(alert)
-    db_session.commit()
+    alert = _persist_alert_with_enrichment(db_session, alert4, SINGLE_TENANT_UUID)
     set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
 
     alert4.event_id = alert.id

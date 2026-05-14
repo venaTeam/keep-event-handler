@@ -118,10 +118,7 @@ def alert_maint():
         provider_type="test-provider-type",
         name="Test Alert",
         status=AlertStatus.MAINTENANCE.value,
-        extra_data={
-            "previous_status": AlertStatus.FIRING.value,
-            "source": ["test-source"],
-        },
+        previous_status=AlertStatus.FIRING.value,
         source="test-source",
         alert_hash="test-alert-hash",
     )
@@ -373,13 +370,13 @@ def test_strategy_clean_status(
             "bl.maintenance_windows_bl.get_last_alert_by_fingerprint",
             return_value=mock_last_alert,
         ),
-        patch("core.db.db.get_alert_by_event_id", return_value=alert_maint),
+        patch("bl.maintenance_windows_bl.get_alert_by_event_id", return_value=alert_maint),
     ):
         MaintenanceWindowsBl.recover_strategy(logger=MagicMock(), session=mock_session)
 
     # THEN the new status will be the previous status, and the previous status will be the old status
     assert alert_maint.status == AlertStatus.FIRING.value
-    assert alert_maint.extra_data["previous_status"] == AlertStatus.MAINTENANCE.value
+    assert alert_maint.previous_status == AlertStatus.MAINTENANCE.value
     assert recover_status_session.commit.called
 
 
