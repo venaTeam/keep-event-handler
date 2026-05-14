@@ -56,7 +56,7 @@ def test_firing_counter_increment_on_same_alert(db_session, client, test_app):
     assert len(alerts) == 1
 
     fingerprint = alerts[0]["fingerprint"]
-    assert alerts[0]["firingCounter"] == 1
+    assert alerts[0]["firing_counter"] == 1
 
     # Send the alert again with newer timestamp but same fingerprint
     alert["startsAt"] = (datetime.now() + timedelta(minutes=1)).isoformat()
@@ -74,12 +74,12 @@ def test_firing_counter_increment_on_same_alert(db_session, client, test_app):
         time.sleep(1)
         # Get the updated alert - should be deduplicated and counter incremented
         updated_alert = get_alert_by_fingerprint(client, fingerprint)
-        if updated_alert and updated_alert["firingCounter"] == 2:
+        if updated_alert and updated_alert["firing_counter"] == 2:
             break
         retry += 1
     
     assert updated_alert is not None
-    assert updated_alert["firingCounter"] == 2
+    assert updated_alert["firing_counter"] == 2
 
 
 @pytest.mark.timeout(15)
@@ -114,14 +114,14 @@ def test_firing_counter_reset_on_acknowledge(db_session, client, test_app):
     assert len(alerts) == 1
 
     fingerprint = alerts[0]["fingerprint"]
-    assert alerts[0]["firingCounter"] == 1
+    assert alerts[0]["firing_counter"] == 1
 
     # Acknowledge the alert
     payload = {
         "enrichments": {
             "status": "acknowledged",
             "dismissed": False,
-            "dismissUntil": "",
+            "dismiss_until": "",
         },
         "fingerprint": alerts[0]["fingerprint"],
     }
@@ -138,7 +138,7 @@ def test_firing_counter_reset_on_acknowledge(db_session, client, test_app):
     # Get the updated alert
     updated_alert = get_alert_by_fingerprint(client, fingerprint)
     assert updated_alert is not None
-    assert updated_alert["firingCounter"] == 0
+    assert updated_alert["firing_counter"] == 0
 
     # Fire the same alert again after it was acknowledged
     response = client.post(
@@ -152,7 +152,7 @@ def test_firing_counter_reset_on_acknowledge(db_session, client, test_app):
     # Get the updated alert
     updated_alert = get_alert_by_fingerprint(client, fingerprint)
     assert updated_alert is not None
-    assert updated_alert["firingCounter"] == 1
+    assert updated_alert["firing_counter"] == 1
 
 
 @pytest.mark.timeout(15)
@@ -187,7 +187,7 @@ def test_firing_counter_with_different_status(db_session, client, test_app):
     assert len(alerts) == 1
 
     fingerprint = alerts[0]["fingerprint"]
-    assert alerts[0]["firingCounter"] == 1
+    assert alerts[0]["firing_counter"] == 1
 
     # 2. Send the alert again (RESOLVED)
     alert["status"] = "resolved"
@@ -205,7 +205,7 @@ def test_firing_counter_with_different_status(db_session, client, test_app):
 
     # Check status and firing counter (should keep previous value when resolved)
     assert resolved_alert["status"] == "resolved"
-    resolved_firing_counter = resolved_alert["firingCounter"]
+    resolved_firing_counter = resolved_alert["firing_counter"]
     # Firing counter tracks how many times it FIRED. Resolving shouldn't increment it? 
     # Or maybe it stays same. Let's assume it stays same for now.
     
@@ -224,7 +224,7 @@ def test_firing_counter_with_different_status(db_session, client, test_app):
     assert refired_alert is not None
     assert refired_alert["status"] == "firing"
     # Should have incremented from the resolved state because it transitioned back to firing
-    assert refired_alert["firingCounter"] == resolved_firing_counter + 1
+    assert refired_alert["firing_counter"] == resolved_firing_counter + 1
 
 
 @pytest.mark.timeout(15)
@@ -263,7 +263,7 @@ def test_unresolved_counter_increment_on_same_alert(db_session, client, test_app
     assert len(alerts) == 1
 
     fingerprint = alerts[0]["fingerprint"]
-    assert alerts[0]["unresolvedCounter"] == 1
+    assert alerts[0]["unresolved_counter"] == 1
 
     # Send the same alert again
     alert["startsAt"] = (datetime.now() + timedelta(minutes=1)).isoformat()
@@ -278,7 +278,7 @@ def test_unresolved_counter_increment_on_same_alert(db_session, client, test_app
     # Get the updated alert
     updated_alert = get_alert_by_fingerprint(client, fingerprint)
     assert updated_alert is not None
-    assert updated_alert["unresolvedCounter"] == 2
+    assert updated_alert["unresolved_counter"] == 2
 
 
 @pytest.mark.timeout(15)
@@ -315,14 +315,14 @@ def test_unresolved_counter_reset_on_resolved(db_session, client, test_app):
     assert len(alerts) == 1
 
     fingerprint = alerts[0]["fingerprint"]
-    assert alerts[0]["unresolvedCounter"] == 1
+    assert alerts[0]["unresolved_counter"] == 1
 
     # Acknowledge the alert
     payload = {
         "enrichments": {
             "status": "resolved",
             "dismissed": False,
-            "dismissUntil": "",
+            "dismiss_until": "",
         },
         "fingerprint": alerts[0]["fingerprint"],
     }
@@ -339,7 +339,7 @@ def test_unresolved_counter_reset_on_resolved(db_session, client, test_app):
     # Get the updated alert
     updated_alert = get_alert_by_fingerprint(client, fingerprint)
     assert updated_alert is not None
-    assert updated_alert["unresolvedCounter"] == 0
+    assert updated_alert["unresolved_counter"] == 0
 
     # Fire the same alert again after it was acknowledged
     response = client.post(
@@ -353,7 +353,7 @@ def test_unresolved_counter_reset_on_resolved(db_session, client, test_app):
     # Get the updated alert
     updated_alert = get_alert_by_fingerprint(client, fingerprint)
     assert updated_alert is not None
-    assert updated_alert["unresolvedCounter"] == 1
+    assert updated_alert["unresolved_counter"] == 1
 
 
 @pytest.mark.timeout(15)
@@ -389,7 +389,7 @@ def test_unresolved_counter_with_different_status(db_session, client, test_app):
     assert len(alerts) == 1
 
     fingerprint = alerts[0]["fingerprint"]
-    assert alerts[0]["unresolvedCounter"] == 1
+    assert alerts[0]["unresolved_counter"] == 1
 
     # Now send same alert but with resolved status
     alert["status"] = "resolved"
@@ -408,7 +408,7 @@ def test_unresolved_counter_with_different_status(db_session, client, test_app):
     # Check status - should be resolved now
     assert resolved_alert["status"] == "resolved"
     # Counter should increment
-    resolved_counter = resolved_alert["unresolvedCounter"]
+    resolved_counter = resolved_alert["unresolved_counter"]
 
     # Send it firing again
     alert["status"] = "firing"
@@ -425,4 +425,4 @@ def test_unresolved_counter_with_different_status(db_session, client, test_app):
     assert refired_alert is not None
     assert refired_alert["status"] == "firing"
     # Should have incremented from the resolved state
-    assert refired_alert["unresolvedCounter"] == resolved_counter + 1
+    assert refired_alert["unresolved_counter"] == resolved_counter + 1

@@ -35,15 +35,15 @@ def parse_and_enrich_deleted_and_assignees(alert: AlertDto, enrichments: dict):
     deleted_last_received = enrichments.get(
         "deletedAt", enrichments.get("deleted", [])
     )  # "deleted" is for backward compatibility
-    if javascript_iso_format(alert.lastReceived) in deleted_last_received:
+    if javascript_iso_format(alert.last_received) in deleted_last_received:
         alert.deleted = True
     assignees: dict = enrichments.get("assignees", {})
     # Try exact match
-    assignee = assignees.get(alert.lastReceived)
+    assignee = assignees.get(alert.last_received)
     if not assignee:
         # Try normalized match
         try:
-            normalized = javascript_iso_format(alert.lastReceived)
+            normalized = javascript_iso_format(alert.last_received)
             assignee = assignees.get(normalized)
         except Exception:
             pass
@@ -51,12 +51,7 @@ def parse_and_enrich_deleted_and_assignees(alert: AlertDto, enrichments: dict):
     if assignee:
         alert.assignee = assignee
 
-    alert.enriched_fields = list(
-        filter(lambda x: not x.startswith("disposable_"), list(enrichments.keys()))
-    )
-    if "assignees" in alert.enriched_fields:
-        # User can't be un-assigned. Just re-assigned to someone else
-        alert.enriched_fields.remove("assignees")
+
 
 
 def calculated_start_firing_time(
@@ -77,15 +72,15 @@ def calculated_start_firing_time(
         return None
     # if this is the first alert, the start firing time is the same as the last received time
     if not previous_alert:
-        return alert.lastReceived
+        return alert.last_received
     elif isinstance(previous_alert, list):
         previous_alert = previous_alert[0]
     # else, if the previous alert was firing, the start firing time is the same as the previous alert
     if previous_alert.status == AlertStatus.FIRING.value:
-        return previous_alert.firingStartTime
+        return previous_alert.firing_start_time
     # else, if the previous alert was resolved, the start firing time is the same as the last received time
     else:
-        return alert.lastReceived
+        return alert.last_received
 
 
 def calculate_firing_time_since_last_resolved(
@@ -106,14 +101,14 @@ def calculate_firing_time_since_last_resolved(
                 previous_alert.status == AlertStatus.RESOLVED.value
                 and alert.status == AlertStatus.FIRING.value
             ):
-                return alert.lastReceived
+                return alert.last_received
             # if the previous alert has firing time since last resolved, we need to return it
-            if previous_alert.firingStartTimeSinceLastResolved:
-                return previous_alert.firingStartTimeSinceLastResolved
+            if previous_alert.firing_start_time_since_last_resolved:
+                return previous_alert.firing_start_time_since_last_resolved
         else:
             # if there is no previous alert, we need to check if the alert is firing
             if alert.status == AlertStatus.FIRING.value:
-                return alert.lastReceived
+                return alert.last_received
             else:
                 return None
 
@@ -146,8 +141,8 @@ def calculated_firing_counter(
         return 1
 
     # else, increment counter if the previous alert was firing
-    # NOTE: firingCounter -> 0 only if acknowledged
-    return previous_alert.firingCounter + 1
+    # NOTE: firing_counter -> 0 only if acknowledged
+    return previous_alert.firing_counter + 1
 
 
 def calculated_unresolved_counter(
@@ -177,8 +172,8 @@ def calculated_unresolved_counter(
         return 1
 
     # else, increment counter if the previous alert was firing
-    # NOTE: unresolvedCounter -> 0 only if resolved
-    return previous_alert.unresolvedCounter + 1
+    # NOTE: unresolved_counter -> 0 only if resolved
+    return previous_alert.unresolved_counter + 1
 
 
 def convert_db_alerts_to_dto_alerts(
@@ -219,8 +214,7 @@ def convert_db_alerts_to_dto_alerts(
                     enrichments = alert.alert_enrichment.enrichments
 
                 alert_payload = alert.dict()
-                if alert.extra_data:
-                    alert_payload.update(alert.extra_data)
+
                 alert_payload.update(enrichments)
 
                 if with_incidents:
@@ -257,11 +251,11 @@ def convert_db_alerts_to_dto_alerts(
 
                 # if the alert is acknowledged, the firing counter is 0
                 if alert_dto.status == AlertStatus.ACKNOWLEDGED.value:
-                    alert_dto.firingCounter = 0
+                    alert_dto.firing_counter = 0
 
                 # if the alert is resolved, the unresolved counter is 0
                 if alert_dto.status == AlertStatus.RESOLVED.value:
-                    alert_dto.unresolvedCounter = 0
+                    alert_dto.unresolved_counter = 0
 
                 # always update provider id and type to the new values
                 alert_dto.provider_id = alert.provider_id

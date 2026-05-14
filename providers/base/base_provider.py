@@ -568,10 +568,10 @@ class BaseProvider(metaclass=abc.ABCMeta):
 
     def get_alerts_by_fingerprint(self, tenant_id: str) -> dict[str, list[AlertDto]]:
         """
-        Get alerts from the provider grouped by fingerprint, sorted by lastReceived.
+        Get alerts from the provider grouped by fingerprint, sorted by last_received.
 
         Returns:
-            dict[str, list[AlertDto]]: A dict of alerts grouped by fingerprint, sorted by lastReceived.
+            dict[str, list[AlertDto]]: A dict of alerts grouped by fingerprint, sorted by last_received.
         """
         try:
             alerts = self.get_alerts()
@@ -581,7 +581,7 @@ class BaseProvider(metaclass=abc.ABCMeta):
         if not alerts:
             return {}
 
-        # get alerts, group by fingerprint and sort them by lastReceived
+        # get alerts, group by fingerprint and sort them by last_received
         with tracer.start_as_current_span(f"{self.__class__.__name__}-get_last_alerts"):
             get_attr = operator.attrgetter("fingerprint")
             grouped_alerts = {
@@ -775,13 +775,13 @@ class BaseProvider(metaclass=abc.ABCMeta):
             id=alert_data.get("id", str(uuid.uuid4())),
             name=alert_data.get("name", "alert-from-event-queue"),
             status=alert_data.get("status", AlertStatus.FIRING),
-            lastReceived=alert_data.get(
-                "lastReceived",
+            last_received=alert_data.get(
+                "last_received",
                 datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
             ),
             environment=alert_data.get("environment", "alert-from-event-queue"),
             isDuplicate=alert_data.get("isDuplicate", False),
-            duplicateReason=alert_data.get("duplicateReason", None),
+            duplicate_reason=alert_data.get("duplicate_reason", None),
             service=alert_data.get("service", "alert-from-event-queue"),
             source=alert_data.get("source", [self.provider_type]),
             message=alert_data.get("message", "alert-from-event-queue"),
@@ -999,13 +999,13 @@ class ProviderHealthMixin:
 
             fingerprint_alerts = list(fingerprint_alerts)
 
-            fingerprint_alerts.sort(key=attrgetter("lastReceived"))
+            fingerprint_alerts.sort(key=attrgetter("last_received"))
             # Iterate through alerts to check if some of them are too close
             for i in range(len(fingerprint_alerts)):
                 for j in range(i + 1, len(fingerprint_alerts)):
                     if (
-                        parse(fingerprint_alerts[j].lastReceived)
-                        - parse(fingerprint_alerts[i].lastReceived)
+                        parse(fingerprint_alerts[j].last_received)
+                        - parse(fingerprint_alerts[i].last_received)
                         <= SPAMMY_ALERTS_THRESHOLD
                     ):
                         close_alerts.append(
@@ -1017,7 +1017,7 @@ class ProviderHealthMixin:
             if len(close_alerts) > 2:
                 spammy_alerts.extend(fingerprint_alerts)
 
-        timestamps = [parse(alert.lastReceived) for alert in spammy_alerts]
+        timestamps = [parse(alert.last_received) for alert in spammy_alerts]
         hours = [ts.strftime("%Y-%m-%d %H:00") for ts in timestamps]
         hourly_alerts = Counter(hours)
         health["spammy"] = [

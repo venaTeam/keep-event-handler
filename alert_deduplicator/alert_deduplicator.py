@@ -50,7 +50,7 @@ class AlertDeduplicator:
         - removing the fields that should be ignored
         - calculating the hash
         - checking if the hash is already in the database
-        - setting the isFullDuplicate or isPartialDuplicate flag
+        - setting the is_full_duplicate or is_partial_duplicate flag
         """
         # we don't want to remove fields from the original alert
         alert_copy = copy.deepcopy(alert)
@@ -85,7 +85,7 @@ class AlertDeduplicator:
                     "tenant_id": self.tenant_id,
                 },
             )
-            alert.isFullDuplicate = True
+            alert.is_full_duplicate = True
         # it means that there is another alert with the same fingerprint but different hash
         # so its a deduplication
         elif last_alerts_hash_by_fingerprint.get(alert.fingerprint):
@@ -96,7 +96,7 @@ class AlertDeduplicator:
                     "tenant_id": self.tenant_id,
                 },
             )
-            alert.isPartialDuplicate = True
+            alert.is_partial_duplicate = True
         else:
             self.logger.debug(
                 "Alert is not deduplicated",
@@ -141,19 +141,19 @@ class AlertDeduplicator:
                 extra={
                     "rule_id": rule.id,
                     "alert_id": alert.id,
-                    "is_full_duplicate": alert.isFullDuplicate,
-                    "is_partial_duplicate": alert.isPartialDuplicate,
+                    "is_full_duplicate": alert.is_full_duplicate,
+                    "is_partial_duplicate": alert.is_partial_duplicate,
                 },
             )
 
             if AlertDeduplicator.DEDUPLICATION_DISTRIBUTION_ENABLED:
-                if alert.isFullDuplicate or alert.isPartialDuplicate:
+                if alert.is_full_duplicate or alert.is_partial_duplicate:
                     # create deduplication event
                     create_deduplication_event(
                         tenant_id=self.tenant_id,
                         deduplication_rule_id=rule.id,
                         deduplication_type=(
-                            "full" if alert.isFullDuplicate else "partial"
+                            "full" if alert.is_full_duplicate else "partial"
                         ),
                         provider_id=alert.provider_id,
                         provider_type=alert.provider_type,
@@ -258,7 +258,7 @@ class AlertDeduplicator:
         # this is a way to generate a unique uuid for the default deduplication rule per (provider_id, provider_type)
         generated_uuid = self._generate_uuid(provider_id, provider_type)
 
-        # just return a default deduplication rule with lastReceived field
+        # just return a default deduplication rule with last_received field
         if not provider_type:
             provider_type = "keep"
 
@@ -272,7 +272,7 @@ class AlertDeduplicator:
             provider_type=provider_type or "keep",
             provider_id=provider_id,
             full_deduplication=True,
-            ignore_fields=["lastReceived"],
+            ignore_fields=["last_received"],
             priority=0,
             last_updated=None,
             last_updated_by=None,

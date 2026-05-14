@@ -144,8 +144,6 @@ class MaintenanceWindowsBl:
             payload = alert.dict()
         else:
             payload = alert.dict()
-            if alert.extra_data:
-                payload.update(alert.extra_data)
         # todo: fix this in the future
         source = payload.get("source")
         if isinstance(source, list) and source:
@@ -250,7 +248,7 @@ class MaintenanceWindowsBl:
             if not active:
                 recover_prev_alert_status(alert, session)
                 fingerprints_to_check.add((alert.tenant_id, alert.fingerprint))
-                prev_status = (alert.extra_data or {}).get("previous_status")
+                prev_status = getattr(alert, 'previous_status', None)
                 add_audit(
                     tenant_id=alert.tenant_id,
                     fingerprint=alert.fingerprint,
@@ -265,8 +263,7 @@ class MaintenanceWindowsBl:
         for tenant, fp in fingerprints_to_check:
             last_alert = get_last_alert_by_fingerprint(tenant, fp, session)
             alert = get_alert_by_event_id(tenant, str(last_alert.alert_id), session)
-            extra_data = alert.extra_data or {}
-            if "previous_status" not in extra_data:
+            if not getattr(alert, "previous_status", None):
                 logger.info(
                     f"Alert {alert.id} does not have previous status, cannot proceed with recover strategy",
                     extra={
@@ -278,8 +275,6 @@ class MaintenanceWindowsBl:
                 )
                 continue
             alert_payload = alert.dict()
-            if alert.extra_data:
-                alert_payload.update(alert.extra_data)
             alert_dto = AlertDto(**alert_payload)
             with tracer.start_as_current_span("mw_recover_strategy_run_rules_engine"):
                 # Now we need to run the rules engine

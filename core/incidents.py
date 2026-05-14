@@ -131,15 +131,15 @@ incident_field_configurations = [
 ]
 
 _INFRA_COLUMNS = {"id", "tenant_id", "timestamp", "provider_type", "provider_id",
-                  "fingerprint", "alert_hash", "extra_data"}
+                  "fingerprint", "alert_hash"}
 
 _SPECIAL_FIELDS = {
     "severity": {"data_type": DataType.STRING},
     "status": {"data_type": DataType.STRING},
-    "lastReceived": {"data_type": DataType.DATETIME},
+    "last_received": {"data_type": DataType.DATETIME},
     "dismissed": {"data_type": DataType.BOOLEAN},
-    "firingCounter": {"data_type": DataType.INTEGER},
-    "unresolvedCounter": {"data_type": DataType.INTEGER},
+    "firing_counter": {"data_type": DataType.INTEGER},
+    "unresolved_counter": {"data_type": DataType.INTEGER},
 }
 
 for col_item in Alert.__table__.columns:
@@ -162,7 +162,7 @@ for col_item in Alert.__table__.columns:
 incident_field_configurations.append(
     FieldMappingConfiguration(
         map_from_pattern="alert.*",
-        map_to=["JSON(alertenrichment.enrichments).*", "JSON(alert.extra_data).*"],
+        map_to=["JSON(alertenrichment.enrichments).*"],
     )
 )
 

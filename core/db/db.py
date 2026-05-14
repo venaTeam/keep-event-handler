@@ -1706,7 +1706,7 @@ def add_alerts_to_incident(
             else:
                 alerts_count = alerts_data_for_incident["count"]
 
-            last_received_field = Alert.lastReceived
+            last_received_field = Alert.last_received
 
             started_at, last_seen_at = session.exec(
                 select(func.min(last_received_field), func.max(last_received_field))
@@ -2089,7 +2089,7 @@ def remove_alerts_to_incident_by_incident_id(
             if source not in sources_existed
         ]
 
-        last_received_field = Alert.lastReceived
+        last_received_field = Alert.last_received
 
         started_at, last_seen_at = session.exec(
             select(func.min(last_received_field), func.max(last_received_field))
@@ -2272,12 +2272,9 @@ def recover_prev_alert_status(alert: Alert, session: Optional[Session] = None):
     with existed_or_new_session(session) as session:
         try:
             status = alert.status
-            extra_data = alert.extra_data or {}
-            prev_status = extra_data.get("previous_status")
+            prev_status = alert.previous_status
             alert.status = prev_status
-            extra_data["previous_status"] = status
-            alert.extra_data = extra_data
-            flag_modified(alert, "extra_data")
+            alert.previous_status = status
         except KeyError:
             logger.warning(f"Alert {alert.id} does not have previous status.")
         session.add(alert)
@@ -2291,17 +2288,14 @@ def set_maintenance_windows_trace(
     session: Optional[Session] = None,
 ):
     mw_id = str(maintenance_w.id)
-    extra_data = alert.extra_data or {}
-    if mw_id in extra_data.get("maintenance_windows_trace", []):
+    if not alert.maintenance_windows_trace:
+        alert.maintenance_windows_trace = []
+    if mw_id in alert.maintenance_windows_trace:
         return
     with existed_or_new_session(session) as session:
-        if "maintenance_windows_trace" in extra_data:
-            if mw_id not in extra_data["maintenance_windows_trace"]:
-                extra_data["maintenance_windows_trace"].append(mw_id)
-        else:
-            extra_data["maintenance_windows_trace"] = [mw_id]
-        alert.extra_data = extra_data
-        flag_modified(alert, "extra_data")
+        if mw_id not in alert.maintenance_windows_trace:
+            alert.maintenance_windows_trace = alert.maintenance_windows_trace + [mw_id]
+        flag_modified(alert, "maintenance_windows_trace")
         session.add(alert)
         session.commit()
 

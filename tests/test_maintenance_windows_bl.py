@@ -104,7 +104,7 @@ def alert_dto():
         name="Test Alert",
         status="firing",
         severity="critical",
-        lastReceived="2021-08-01T00:00:00Z",
+        last_received="2021-08-01T00:00:00Z",
     )
 
 

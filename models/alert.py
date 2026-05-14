@@ -125,14 +125,14 @@ class AlertDto(BaseModel):
     name: str
     status: AlertStatus
     severity: AlertSeverity
-    lastReceived: str
-    firingStartTime: str | None = None
-    firingStartTimeSinceLastResolved: str | None = None
-    firingCounter: int = 0
-    unresolvedCounter: int = 0
-    isFullDuplicate: bool | None = False
-    isPartialDuplicate: bool | None = False
-    duplicateReason: str | None = None
+    last_received: str = Field(default=None, alias="lastReceived")
+    firing_start_time: str | None = Field(default=None, alias="firingStartTime")
+    firing_start_time_since_last_resolved: str | None = Field(default=None, alias="firingStartTimeSinceLastResolved")
+    firing_counter: int = Field(default=0, alias="firingCounter")
+    unresolved_counter: int = Field(default=0, alias="unresolvedCounter")
+    is_full_duplicate: bool | None = Field(default=False, alias="isFullDuplicate")
+    is_partial_duplicate: bool | None = Field(default=False, alias="isPartialDuplicate")
+    duplicate_reason: str | None = Field(default=None, alias="duplicateReason")
     source: list[str] | None = []
     service: str | None = None
     application: str | None = None
@@ -150,26 +150,20 @@ class AlertDto(BaseModel):
     fingerprint: str | None = (
         None  # The fingerprint of the alert (used for alert de-duplication)
     )
-    dismissUntil: str | None = None  # The time until the alert is dismissed
+    dismiss_until: str | None = Field(default=None, alias="dismissUntil")  # The time until the alert is dismissed
     # DO NOT MOVE DISMISSED ABOVE dismissedUntil since it is used in root_validator
     dismissed: bool = False  # Whether the alert has been dismissed
     assignee: str | None = None  # The assignee of the alert
     provider_id: str | None = Field(default=None, alias="providerId")  # The provider id
     provider_type: str | None = Field(default=None, alias="providerType")  # The provider type
     note: str | None = None  # The note of the alert
-    startedAt: str | None = (
-        None  # The time the alert started - e.g. if alert triggered multiple times, it will be the time of the first trigger (calculated on querying)
+    started_at: str | None = Field(
+        default=None, alias="startedAt"  # The time the alert started
     )
 
-    enriched_fields: list = []
 
-    @validator("enriched_fields", pre=True)
-    def ensure_enriched_fields_is_list(cls, v):
-        if v is None:
-            return []
-        if isinstance(v, dict):
-            return list(v.keys())
-        return v
+
+
     incident: str | None = None
 
     @validator("id", pre=True)
@@ -191,11 +185,7 @@ class AlertDto(BaseModel):
             return [v]
         return v
 
-    @validator("enriched_fields", pre=True)
-    def parse_enriched_fields(cls, v):
-        if isinstance(v, dict):
-            return list(v.keys())
-        return v
+
 
     def __str__(self) -> str:
         # Convert the model instance to a dictionary
@@ -210,7 +200,7 @@ class AlertDto(BaseModel):
 
             # Fields to exclude from comparison since they are bit different in different db's
             # todo: solve it in a better way
-            exclude_fields = {"lastReceived", "startedAt", "event_id"}
+            exclude_fields = {"last_received", "started_at", "event_id"}
 
             # Remove excluded fields from both dictionaries
             for field in exclude_fields:
@@ -228,7 +218,7 @@ class AlertDto(BaseModel):
     def assign_fingerprint_if_none(cls, fingerprint, values):
         return get_fingerprint(fingerprint, values)
 
-    @validator("lastReceived", pre=True, always=True)
+    @validator("last_received", pre=True, always=True)
     def validate_last_received(cls, last_received):
         def convert_to_iso_format(date_string):
             try:
@@ -279,12 +269,12 @@ class AlertDto(BaseModel):
             return dismissed
 
         # else, validate dismissedUntil
-        dismiss_until = values.get("dismissUntil")
-        # if there's no dismissUntil, return just return dismissed
+        dismiss_until = values.get("dismiss_until")
+        # if there's no dismiss_until, return just return dismissed
         if not dismiss_until or dismiss_until == "forever":
             return dismissed
 
-        # if there's dismissUntil, validate it
+        # if there's dismiss_until, validate it
         dismiss_until_datetime = datetime.datetime.strptime(
             dismiss_until, "%Y-%m-%dT%H:%M:%S.%fZ"
         ).replace(tzinfo=datetime.timezone.utc)
@@ -327,20 +317,20 @@ class AlertDto(BaseModel):
             values["status"] = AlertStatus.FIRING
 
         # this is code duplication of enrichment_helpers.py and should be refactored
-        lastReceived = values.get("lastReceived", None)
-        if not lastReceived:
-            lastReceived = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            values["lastReceived"] = lastReceived
+        last_received = values.get("last_received", None)
+        if not last_received:
+            last_received = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            values["last_received"] = last_received
 
         assignees = values.pop("assignees", None)
         # In some cases (for example PagerDuty) the assignees is list of dicts and we don't handle it atm.
         if assignees and isinstance(assignees, dict):
             # Try exact match first
-            assignee = assignees.get(lastReceived)
+            assignee = assignees.get(last_received)
             if not assignee:
                 # Try normalized match
                 try:
-                    dt = datetime.datetime.fromisoformat(lastReceived.rstrip("Z"))
+                    dt = datetime.datetime.fromisoformat(last_received.rstrip("Z"))
                     normalized_dt = dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
                     if not normalized_dt.endswith("Z"):
                         normalized_dt += "Z"
@@ -356,7 +346,7 @@ class AlertDto(BaseModel):
     def validate_status(cls, values: Dict[str, Any]) -> Dict[str, Any]:
         # if dismissed, change status to SUPPRESSED
         # note this is happen AFTER validate_dismissed which already consider
-        #   dismissed + dismissUntil
+        #   dismissed + dismiss_until
         # if values.get("dismissed"):
         #     values["status"] = AlertStatus.SUPPRESSED
         return values
@@ -370,9 +360,9 @@ class AlertDto(BaseModel):
                     "id": "1234",
                     "name": "Pod 'api-service-production' lacks memory",
                     "status": "firing",
-                    "lastReceived": "2021-01-01T00:00:00.000Z",
+                    "last_received": "2021-01-01T00:00:00.000Z",
                     "environment": "production",
-                    "duplicateReason": None,
+                    "duplicate_reason": None,
                     "service": "backend",
                     "source": ["prometheus"],
                     "message": "The pod 'api-service-production' lacks memory causing high error rate",
@@ -403,8 +393,7 @@ class AlertWithIncidentLinkMetadataDto(AlertDto):
     @classmethod
     def from_db_instance(cls, db_alert, db_alert_to_incident):
         payload = db_alert.dict()
-        if db_alert.extra_data:
-            payload.update(db_alert.extra_data)
+
         return cls(
             is_created_by_ai=db_alert_to_incident.is_created_by_ai,
             **payload,

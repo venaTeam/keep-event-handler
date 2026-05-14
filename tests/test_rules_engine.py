@@ -80,7 +80,7 @@ def test_sanity(db_session):
             name="grafana-test-alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived="2021-08-01T00:00:00Z",
+            last_received="2021-08-01T00:00:00Z",
         ),
     ]
     # create a simple rule
@@ -107,7 +107,7 @@ def test_sanity(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -134,7 +134,7 @@ def test_sanity_2(db_session):
             name="grafana-test-alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             labels={"label_1": "a"},
         ),
     ]
@@ -162,7 +162,7 @@ def test_sanity_2(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -187,7 +187,7 @@ def test_sanity_3(db_session):
             name="grafana-test-alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived="2021-08-01T00:00:00Z",
+            last_received="2021-08-01T00:00:00Z",
             tags={"tag_1": "tag1"},
             labels={"label_1": "a"},
         ),
@@ -216,7 +216,7 @@ def test_sanity_3(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -241,7 +241,7 @@ def test_sanity_4(db_session):
             name="grafana-test-alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived="2021-08-01T00:00:00Z",
+            last_received="2021-08-01T00:00:00Z",
             tags={"tag_1": "tag2"},
             labels={"label_1": "a"},
         ),
@@ -270,7 +270,7 @@ def test_sanity_4(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -295,7 +295,7 @@ def test_incident_attributes(db_session):
             name=f"grafana-test-alert-{i}",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             labels={"label_1": "a"},
         )
         for i in range(3)
@@ -326,12 +326,12 @@ def test_incident_attributes(db_session):
             provider_id="test",
             extra_data=alert.dict(),
             fingerprint=alert.fingerprint,
-            lastReceived=alert.lastReceived,
+            last_received=alert.last_received,
             source=alert.source[0] if alert.source else None,
             severity=alert.severity if alert.severity else None,
             status=alert.status if alert.status else None,
             name=alert.name,
-            timestamp=alert.lastReceived,
+            timestamp=alert.last_received,
         )
         for alert in alerts_dto
     ]
@@ -350,7 +350,7 @@ def test_incident_attributes(db_session):
         assert results[0].alerts_count == i + 1
         assert (
             results[0].last_seen_time.isoformat(timespec="milliseconds") + "Z"
-            == alert.lastReceived
+            == alert.last_received
         )
         assert results[0].start_time == alerts[0].timestamp
 
@@ -363,7 +363,7 @@ def test_incident_severity(db_session):
             name=f"grafana-test-alert-{i}",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.INFO,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             labels={"label_1": "a"},
         )
         for i in range(3)
@@ -393,12 +393,12 @@ def test_incident_severity(db_session):
             provider_id="test",
             extra_data=alert.dict(),
             fingerprint=alert.fingerprint,
-            lastReceived=alert.lastReceived,
+            last_received=alert.last_received,
             source=alert.source[0] if alert.source else None,
             severity=alert.severity if alert.severity else None,
             status=alert.status if alert.status else None,
             name=alert.name,
-            timestamp=alert.lastReceived,
+            timestamp=alert.last_received,
         )
         for alert in alerts_dto
     ]
@@ -925,7 +925,7 @@ def test_at_sign(db_session):
             name="grafana-test-alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived="2021-08-01T00:00:00Z",
+            last_received="2021-08-01T00:00:00Z",
             **event,
         ),
     ]
@@ -954,7 +954,7 @@ def test_at_sign(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -985,7 +985,7 @@ def test_incident_name_template_simple(db_session):
             name="Test alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             labels={"host": "web-server-1", "service": "nginx"},
         ),
     ]
@@ -1013,7 +1013,7 @@ def test_incident_name_template_simple(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -1041,7 +1041,7 @@ def test_incident_name_template_nested(db_session):
             name="Complex alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             labels={
                 "environment": "production",
                 "metadata": {"region": "us-east", "datacenter": "dc1"},
@@ -1067,7 +1067,7 @@ def test_incident_name_template_nested(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -1093,7 +1093,7 @@ def test_incident_name_template_fallback(db_session):
             name="Missing fields alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             labels={},  # empty labels
         ),
     ]
@@ -1116,7 +1116,7 @@ def test_incident_name_template_fallback(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -1143,7 +1143,7 @@ def test_incident_name_template_multiple_alerts(db_session):
         name="First alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1", "service": "nginx"},
     )
 
@@ -1166,7 +1166,7 @@ def test_incident_name_template_multiple_alerts(db_session):
         provider_id="test",
         extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
-        lastReceived=alert1.lastReceived,
+        last_received=alert1.last_received,
         source=alert1.source[0] if alert1.source else None,
         severity=alert1.severity if alert1.severity else None,
         status=alert1.status if alert1.status else None,
@@ -1188,7 +1188,7 @@ def test_incident_name_template_multiple_alerts(db_session):
         name="Second alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-2", "service": "nginx"},
     )
 
@@ -1198,7 +1198,7 @@ def test_incident_name_template_multiple_alerts(db_session):
         provider_id="test",
         extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
-        lastReceived=alert2.lastReceived,
+        last_received=alert2.last_received,
         source=alert2.source[0] if alert2.source else None,
         severity=alert2.severity if alert2.severity else None,
         status=alert2.status if alert2.status else None,
@@ -1223,7 +1223,7 @@ def test_incident_name_template_partial_fields(db_session):
             name="Partial fields alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             labels={"host": "web-1"},  # service is missing
         ),
     ]
@@ -1246,7 +1246,7 @@ def test_incident_name_template_partial_fields(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -1273,7 +1273,7 @@ def test_incident_name_template_complex_fields(db_session):
             name="Complex fields alert",
             status=AlertStatus.FIRING,
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             labels={  # Dictionary
                 "hosts": ["web-1", "web-2"],
                 "services": {"primary": "nginx", "secondary": "mysql"},
@@ -1303,7 +1303,7 @@ def test_incident_name_template_complex_fields(db_session):
         provider_id="test",
         extra_data=alerts[0].dict(),
         fingerprint=alerts[0].fingerprint,
-        lastReceived=alerts[0].lastReceived,
+        last_received=alerts[0].last_received,
         source=alerts[0].source[0] if alerts[0].source else None,
         severity=alerts[0].severity if alerts[0].severity else None,
         status=alerts[0].status if alerts[0].status else None,
@@ -1333,7 +1333,7 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
         name="First alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1", "service": "nginx"},
     )
 
@@ -1356,7 +1356,7 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
         provider_id="test",
         extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
-        lastReceived=alert1.lastReceived,
+        last_received=alert1.last_received,
         source=alert1.source[0] if alert1.source else None,
         severity=alert1.severity if alert1.severity else None,
         status=alert1.status if alert1.status else None,
@@ -1377,7 +1377,7 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
         name="Second alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-2", "service": "mysql"},
     )
 
@@ -1387,7 +1387,7 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
         provider_id="test",
         extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
-        lastReceived=alert2.lastReceived,
+        last_received=alert2.last_received,
         source=alert2.source[0] if alert2.source else None,
         severity=alert2.severity if alert2.severity else None,
         status=alert2.status if alert2.status else None,
@@ -1426,7 +1426,7 @@ def test_multiple_incidents_name_template(db_session):
         name="First alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1", "services": ["nginx"]},
     )
 
@@ -1436,7 +1436,7 @@ def test_multiple_incidents_name_template(db_session):
         provider_id="test",
         extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
-        lastReceived=alert1.lastReceived,
+        last_received=alert1.last_received,
         source=alert1.source[0] if alert1.source else None,
         severity=alert1.severity if alert1.severity else None,
         status=alert1.status if alert1.status else None,
@@ -1459,7 +1459,7 @@ def test_multiple_incidents_name_template(db_session):
         name="Second alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-2", "services": ["mysql", "redis"]},
     )
 
@@ -1469,7 +1469,7 @@ def test_multiple_incidents_name_template(db_session):
         provider_id="test",
         extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
-        lastReceived=alert2.lastReceived,
+        last_received=alert2.last_received,
         source=alert2.source[0] if alert2.source else None,
         severity=alert2.severity if alert2.severity else None,
         status=alert2.status if alert2.status else None,
@@ -1493,7 +1493,7 @@ def test_multiple_incidents_name_template(db_session):
         name="Third alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1", "services": ["postgresql"]},  # Same host as alert1
     )
 
@@ -1503,7 +1503,7 @@ def test_multiple_incidents_name_template(db_session):
         provider_id="test",
         extra_data=alert3.dict(),
         fingerprint=alert3.fingerprint,
-        lastReceived=alert3.lastReceived,
+        last_received=alert3.last_received,
         source=alert3.source[0] if alert3.source else None,
         severity=alert3.severity if alert3.severity else None,
         status=alert3.status if alert3.status else None,
@@ -1572,7 +1572,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         name="First alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1", "service": "nginx"},
     )
 
@@ -1582,7 +1582,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         provider_id="test",
         extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
-        lastReceived=alert1.lastReceived,
+        last_received=alert1.last_received,
         source=alert1.source[0] if alert1.source else None,
         severity=alert1.severity if alert1.severity else None,
         status=alert1.status if alert1.status else None,
@@ -1604,7 +1604,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         name="Second alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "db-1", "service": "mysql"},
     )
 
@@ -1614,7 +1614,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         provider_id="test",
         extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
-        lastReceived=alert2.lastReceived,
+        last_received=alert2.last_received,
         source=alert2.source[0] if alert2.source else None,
         severity=alert2.severity if alert2.severity else None,
         status=alert2.status if alert2.status else None,
@@ -1635,7 +1635,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         name="Third alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-2", "service": "nginx"},  # Same service as alert1
     )
 
@@ -1645,7 +1645,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         provider_id="test",
         extra_data=alert3.dict(),
         fingerprint=alert3.fingerprint,
-        lastReceived=alert3.lastReceived,
+        last_received=alert3.last_received,
         source=alert3.source[0] if alert3.source else None,
         severity=alert3.severity if alert3.severity else None,
         status=alert3.status if alert3.status else None,
@@ -1665,7 +1665,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         name="Fourth alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "db-2", "service": "mysql"},
     )
 
@@ -1675,7 +1675,7 @@ def test_multiple_incidents_name_template_with_updates(db_session):
         provider_id="test",
         extra_data=alert4.dict(),
         fingerprint=alert4.fingerprint,
-        lastReceived=alert4.lastReceived,
+        last_received=alert4.last_received,
         source=alert4.source[0] if alert4.source else None,
         severity=alert4.severity if alert4.severity else None,
         status=alert4.status if alert4.status else None,
@@ -1723,7 +1723,7 @@ def test_incident_created_only_for_firing_alerts(db_session):
             name="Non-firing alert",
             status=AlertStatus.RESOLVED,  # Non-firing status
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             fingerprint="Non-firing alert",
         ),
         AlertDto(
@@ -1732,7 +1732,7 @@ def test_incident_created_only_for_firing_alerts(db_session):
             name="Firing alert",
             status=AlertStatus.FIRING,  # Firing status
             severity=AlertSeverity.CRITICAL,
-            lastReceived=datetime.datetime.now().isoformat(),
+            last_received=datetime.datetime.now().isoformat(),
             fingerprint="Firing alert",
         ),
     ]
@@ -1757,7 +1757,7 @@ def test_incident_created_only_for_firing_alerts(db_session):
             provider_id="test",
             extra_data=alert.dict(),
             fingerprint=alert.fingerprint,
-            lastReceived=alert.lastReceived,
+            last_received=alert.last_received,
             source=alert.source[0] if alert.source else None,
             severity=alert.severity if alert.severity else None,
             status=alert.status if alert.status else None,
@@ -1808,7 +1808,7 @@ def test_same_incident_in_the_past_id_set(db_session, client, test_app):
         name="First critical alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
     )
 
     alert = Alert(
@@ -1817,7 +1817,7 @@ def test_same_incident_in_the_past_id_set(db_session, client, test_app):
         provider_id="test",
         extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
-        lastReceived=alert1.lastReceived,
+        last_received=alert1.last_received,
         source=alert1.source[0] if alert1.source else None,
         severity=alert1.severity if alert1.severity else None,
         status=alert1.status if alert1.status else None,
@@ -1858,7 +1858,7 @@ def test_same_incident_in_the_past_id_set(db_session, client, test_app):
         name="Second critical alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
     )
 
     alert = Alert(
@@ -1867,7 +1867,7 @@ def test_same_incident_in_the_past_id_set(db_session, client, test_app):
         provider_id="test",
         extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
-        lastReceived=alert2.lastReceived,
+        last_received=alert2.last_received,
         source=alert2.source[0] if alert2.source else None,
         severity=alert2.severity if alert2.severity else None,
         status=alert2.status if alert2.status else None,
@@ -1917,7 +1917,7 @@ def test_correlation_to_incident_candidate(db_session):
         name="First critical alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
     )
 
     alert = Alert(
@@ -1926,7 +1926,7 @@ def test_correlation_to_incident_candidate(db_session):
         provider_id="test",
         extra_data=alert_dto.dict(),
         fingerprint=alert_dto.fingerprint,
-        lastReceived=alert_dto.lastReceived,
+        last_received=alert_dto.last_received,
         source=alert_dto.source[0] if alert_dto.source else None,
         severity=alert_dto.severity if alert_dto.severity else None,
         status=alert_dto.status if alert_dto.status else None,
@@ -1957,7 +1957,7 @@ def test_incident_prefix_simple(db_session):
         name="Test alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1"},
     )
 
@@ -1981,7 +1981,7 @@ def test_incident_prefix_simple(db_session):
         provider_id="test",
         extra_data=alert.dict(),
         fingerprint=alert.fingerprint,
-        lastReceived=alert.lastReceived,
+        last_received=alert.last_received,
         source=alert.source[0] if alert.source else None,
         severity=alert.severity if alert.severity else None,
         status=alert.status if alert.status else None,
@@ -2009,7 +2009,7 @@ def test_incident_prefix_with_template(db_session):
         name="Test alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1", "service": "nginx"},
     )
 
@@ -2034,7 +2034,7 @@ def test_incident_prefix_with_template(db_session):
         provider_id="test",
         extra_data=alert.dict(),
         fingerprint=alert.fingerprint,
-        lastReceived=alert.lastReceived,
+        last_received=alert.last_received,
         source=alert.source[0] if alert.source else None,
         severity=alert.severity if alert.severity else None,
         status=alert.status if alert.status else None,
@@ -2077,7 +2077,7 @@ def test_incident_prefix_multiple_incidents(db_session):
         name="First alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1"},
     )
 
@@ -2087,7 +2087,7 @@ def test_incident_prefix_multiple_incidents(db_session):
         provider_id="test",
         extra_data=alert1.dict(),
         fingerprint=alert1.fingerprint,
-        lastReceived=alert1.lastReceived,
+        last_received=alert1.last_received,
         source=alert1.source[0] if alert1.source else None,
         severity=alert1.severity if alert1.severity else None,
         status=alert1.status if alert1.status else None,
@@ -2109,7 +2109,7 @@ def test_incident_prefix_multiple_incidents(db_session):
         name="Second alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-2"},
     )
 
@@ -2119,7 +2119,7 @@ def test_incident_prefix_multiple_incidents(db_session):
         provider_id="test",
         extra_data=alert2.dict(),
         fingerprint=alert2.fingerprint,
-        lastReceived=alert2.lastReceived,
+        last_received=alert2.last_received,
         source=alert2.source[0] if alert2.source else None,
         severity=alert2.severity if alert2.severity else None,
         status=alert2.status if alert2.status else None,
@@ -2141,7 +2141,7 @@ def test_incident_prefix_multiple_incidents(db_session):
         name="Third alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1"},  # Same host as alert1
     )
 
@@ -2151,7 +2151,7 @@ def test_incident_prefix_multiple_incidents(db_session):
         provider_id="test",
         extra_data=alert3.dict(),
         fingerprint=alert3.fingerprint,
-        lastReceived=alert3.lastReceived,
+        last_received=alert3.last_received,
         source=alert3.source[0] if alert3.source else None,
         severity=alert3.severity if alert3.severity else None,
         status=alert3.status if alert3.status else None,
@@ -2363,7 +2363,7 @@ def test_incident_created_with_assignee(db_session):
         name="Test alert",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-1"},
     )
 
@@ -2387,7 +2387,7 @@ def test_incident_created_with_assignee(db_session):
         provider_id="test",
         extra_data=alert.dict(),
         fingerprint=alert.fingerprint,
-        lastReceived=alert.lastReceived,
+        last_received=alert.last_received,
         source=alert.source[0] if alert.source else None,
         severity=alert.severity if alert.severity else None,
         status=alert.status if alert.status else None,
@@ -2416,7 +2416,7 @@ def test_incident_created_without_assignee(db_session):
         name="Test alert without assignee",
         status=AlertStatus.FIRING,
         severity=AlertSeverity.CRITICAL,
-        lastReceived=datetime.datetime.now().isoformat(),
+        last_received=datetime.datetime.now().isoformat(),
         labels={"host": "web-2"},
     )
 
@@ -2440,7 +2440,7 @@ def test_incident_created_without_assignee(db_session):
         provider_id="test",
         extra_data=alert.dict(),
         fingerprint=alert.fingerprint,
-        lastReceived=alert.lastReceived,
+        last_received=alert.last_received,
         source=alert.source[0] if alert.source else None,
         severity=alert.severity if alert.severity else None,
         status=alert.status if alert.status else None,
@@ -2660,4 +2660,4 @@ def test_rule_alerts_threshold_same_fingerprint(db_session, create_alert):
     last_alert_dto = convert_db_alerts_to_dto_alerts(
         [last_alert],
     )
-    assert last_alert_dto[0].unresolvedCounter == 2
+    assert last_alert_dto[0].unresolved_counter == 2

@@ -122,8 +122,7 @@ class EnrichmentsBl:
 
         # so we can track the enrichment event
         alert_payload = alert.dict()
-        if alert.extra_data:
-            alert_payload.update(alert.extra_data)
+
         alert_payload["event_id"] = alert.id
         if not rule:
             raise HTTPException(status_code=404, detail="Extraction rule not found")
@@ -893,9 +892,9 @@ class EnrichmentsBl:
             # Ensure alerts are explicitly marked as not dismissed after disposal.
             # Some alert payloads may still carry the dismissed flag, so we reset it here.
             new_enrichments["dismissed"] = False
-        if "dismissUntil" in disposed_keys:
+        if "dismiss_until" in disposed_keys:
             # Clear any lingering dismissal deadline metadata.
-            new_enrichments["dismissUntil"] = None
+            new_enrichments["dismiss_until"] = None
         if disposed:
             enrich_alert_db(
                 self.tenant_id,
@@ -920,14 +919,12 @@ class EnrichmentsBl:
 
                     if latest_alert:
                         alert_data = latest_alert.dict()
-                        if latest_alert.extra_data:
-                            alert_data.update(latest_alert.extra_data)
                         alert_data.update(
                             {
                                 key: value
                                 for key, value in new_enrichments.items()
                                 if value is not None
-                                or key in {"dismissed", "dismissUntil"}
+                                or key in {"dismissed", "dismiss_until"}
                             }
                         )
                         alert_dto = AlertDto(**alert_data)
@@ -1012,8 +1009,6 @@ class EnrichmentsBl:
 
                     if latest_alert:
                         alert_data = latest_alert.dict()
-                        if latest_alert.extra_data:
-                            alert_data.update(latest_alert.extra_data)
                         alert_data.update(new_enrichments)
                         alert_dto = AlertDto(**alert_data)
                         self.elastic_client.index_alert(alert_dto)

@@ -200,24 +200,25 @@ class Alert(SQLModel, table=True):
     description: str | None = Field(sa_column=Column(TEXT, nullable=True))
 
     # === Source 3: Keep Platform Fields (14) ===
-    lastReceived: str | None = Field(sa_column=Column(String(255), nullable=True))
-    isFullDuplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
-    isPartialDuplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
-    duplicateReason: str | None = Field(sa_column=Column(String(255), nullable=True))
+    last_received: str | None = Field(sa_column=Column(String(255), nullable=True))
+    is_full_duplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
+    is_partial_duplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
+    duplicate_reason: str | None = Field(sa_column=Column(String(255), nullable=True))
     note: str | None = Field(sa_column=Column(TEXT, nullable=True))
     assignee: str | None = Field(sa_column=Column(String(255), nullable=True))
     incident: str | None = Field(sa_column=Column(String(255), nullable=True))
-    dismissUntil: str | None = Field(sa_column=Column(String(255), nullable=True))
+    dismiss_until: str | None = Field(sa_column=Column(String(255), nullable=True))
     dismissed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
-    enriched_fields: dict | None = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql"), nullable=True))
-    startedAt: str | None = Field(sa_column=Column(String(255), nullable=True))
-    firingCounter: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
-    unresolvedCounter: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
-    firingStartTime: str | None = Field(sa_column=Column(String(255), nullable=True))
-    firingStartTimeSinceLastResolved: str | None = Field(sa_column=Column(String(255), nullable=True))
+    started_at: str | None = Field(sa_column=Column(String(255), nullable=True))
+    firing_counter: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
+    unresolved_counter: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
+    firing_start_time: str | None = Field(sa_column=Column(String(255), nullable=True))
+    firing_start_time_since_last_resolved: str | None = Field(sa_column=Column(String(255), nullable=True))
 
-    # === Overflow ===
-    extra_data: dict | None = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql"), nullable=True))
+    # === Maintenance Window Fields ===
+    previous_status: str | None = Field(sa_column=Column(String(50), nullable=True))
+    maintenance_windows_trace: list | None = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql"), nullable=True), default=None)
+
     fingerprint: str = Field(index=True)  # Add the fingerprint field with an index
 
     # alert_hash is different than fingerprint, it is a hash of the alert itself
