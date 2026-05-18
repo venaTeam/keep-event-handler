@@ -245,6 +245,15 @@ class AlertDto(BaseModel):
         if not last_received:
             return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+        # ORM column is TIMESTAMPTZ — datetime arrives directly from SQLAlchemy
+        if isinstance(last_received, datetime.datetime):
+            dt_utc = (
+                last_received.astimezone(pytz.UTC)
+                if last_received.tzinfo is not None
+                else last_received.replace(tzinfo=pytz.UTC)
+            )
+            return dt_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
         # Try to convert the date to iso format
         # see: https://github.com/keephq/keep/issues/1397
         iso_date = convert_to_iso_format(last_received)

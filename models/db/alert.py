@@ -1,4 +1,4 @@
-from sqlmodel import JSON, TEXT, Column, Field, Index, Relationship, SQLModel, String, Integer, Boolean
+from sqlmodel import JSON, TEXT, Column, DateTime, Field, Index, Relationship, SQLModel, String, Integer, Boolean
 from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlalchemy import ForeignKey, ForeignKeyConstraint, UniqueConstraint
 from uuid import UUID, uuid4
@@ -200,7 +200,7 @@ class Alert(SQLModel, table=True):
     description: str | None = Field(sa_column=Column(TEXT, nullable=True))
 
     # === Source 3: Keep Platform Fields (14) ===
-    last_received: str | None = Field(sa_column=Column(String(255), nullable=True))
+    last_received: datetime | None = Field(sa_column=Column(DateTime(timezone=True), nullable=True))
     is_full_duplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
     is_partial_duplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
     duplicate_reason: str | None = Field(sa_column=Column(String(255), nullable=True))
