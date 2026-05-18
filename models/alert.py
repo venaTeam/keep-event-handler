@@ -400,8 +400,11 @@ class AlertWithIncidentLinkMetadataDto(AlertDto):
     is_created_by_ai: bool = False
 
     @classmethod
-    def from_db_instance(cls, db_alert, db_alert_to_incident):
-        payload = db_alert.dict()
+    def from_db_instance(cls, db_alert, db_alert_to_incident, payload=None):
+        # Accept a pre-merged payload (with enrichments applied) so callers
+        # don't silently lose enrichment overrides like resolved status.
+        if payload is None:
+            payload = db_alert.dict()
 
         return cls(
             is_created_by_ai=db_alert_to_incident.is_created_by_ai,

@@ -229,7 +229,7 @@ def convert_db_alerts_to_dto_alerts(
                 try:
                     if alert_to_incident is not None:
                         alert_dto = AlertWithIncidentLinkMetadataDto.from_db_instance(
-                            alert, alert_to_incident
+                            alert, alert_to_incident, payload=alert_payload
                         )
                     else:
                         alert_dto = AlertDto(**alert_payload)
