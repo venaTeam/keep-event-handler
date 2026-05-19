@@ -15,11 +15,16 @@ tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
 
 
-def javascript_iso_format(last_received: str) -> str:
+def javascript_iso_format(last_received) -> str:
     """
     https://stackoverflow.com/a/63894149/12012756
+    Accepts either an ISO-format string or a datetime (since the ORM column
+    is now TIMESTAMPTZ and may bypass AlertDto's string-coercion validator).
     """
-    dt = datetime.fromisoformat(last_received)
+    if isinstance(last_received, datetime):
+        dt = last_received
+    else:
+        dt = datetime.fromisoformat(last_received)
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
