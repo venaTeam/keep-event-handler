@@ -919,25 +919,16 @@ def set_last_alert(
 
                 elif not last_alert:
                     logger.info(f"No last alert for `{fingerprint}`, creating new")
-                    # Race-safe insert: under burst load (especially right after
-                    # truncate) two workers can both observe no existing row and
-                    # both try to INSERT. The partition PK is
-                    # (tenant_id, fingerprint, timestamp); since Alert.timestamp
-                    # is millisecond-rounded, identical triples are common.
-                    # ON CONFLICT DO NOTHING lets the loser silently no-op
-                    # instead of throwing IntegrityError that the retry loop
-                    # would have to swallow.
-                    stmt = pg_insert(LastAlert).values(
-                        tenant_id=tenant_id,
-                        fingerprint=alert.fingerprint,
-                        timestamp=alert.timestamp,
-                        first_timestamp=alert.timestamp,
-                        alert_id=alert.id,
-                        alert_hash=alert.alert_hash,
-                    ).on_conflict_do_nothing(
-                        index_elements=["tenant_id", "fingerprint", "timestamp"]
+                    session.add(
+                        LastAlert(
+                            tenant_id=tenant_id,
+                            fingerprint=alert.fingerprint,
+                            timestamp=alert.timestamp,
+                            first_timestamp=alert.timestamp,
+                            alert_id=alert.id,
+                            alert_hash=alert.alert_hash,
+                        )
                     )
-                    session.execute(stmt)
 
                 session.commit()
             except IntegrityError as ex:
