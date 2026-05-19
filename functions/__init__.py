@@ -423,7 +423,7 @@ def get_firing_time(alert: dict, time_unit: str, **kwargs) -> str:
             return "0.00"
         firing = datetime.datetime.now(
             tz=datetime.timezone.utc
-        ) - datetime.datetime.fromisoformat(alert_dto.firingStartTime)
+        ) - datetime.datetime.fromisoformat(alert_dto.firing_start_time)
     else:
         return "0.00"
 

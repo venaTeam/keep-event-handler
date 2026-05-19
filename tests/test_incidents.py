@@ -31,9 +31,9 @@ from models.alert import AlertSeverity, AlertStatus
 from models.db.alert import (
     NULL_FOR_DELETED_AT,
     Alert,
-    Incident,
     LastAlertToIncident,
 )
+from models.db.incident import Incident
 from models.db.incident import IncidentSeverity, IncidentStatus
 from models.db.mapping import MappingRule
 from models.db.rule import CreateIncidentOn, ResolveOn, Rule
@@ -519,7 +519,7 @@ def test_incident_status_change_manual_alert_enrichment(
                 "enrichments": {
                     "status": AlertStatus.RESOLVED.value,
                     "dismissed": False,
-                    "dismissUntil": "",
+                    "dismiss_until": "",
                 },
                 "fingerprint": incident._alerts[0].fingerprint,
             },
@@ -1591,9 +1591,9 @@ async def test_incident_timestamps_based_on_alert_last_received(
     current_date = now
     future_date = now + timedelta(days=1)
 
-    past_alert_data = {"lastReceived": past_date.isoformat()}
-    current_alert_data = {"lastReceived": current_date.isoformat()}
-    future_alert_data = {"lastReceived": future_date.isoformat()}
+    past_alert_data = {"last_received": past_date.isoformat()}
+    current_alert_data = {"last_received": current_date.isoformat()}
+    future_alert_data = {"last_received": future_date.isoformat()}
 
     create_alert(
         "past-alert",
@@ -1617,13 +1617,13 @@ async def test_incident_timestamps_based_on_alert_last_received(
     # Link alerts to an incident
     alerts = db_session.query(Alert).all()
 
-    assert alerts[0].event["lastReceived"] == past_date.isoformat(
+    assert alerts[0].event["last_received"] == past_date.isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
-    assert alerts[1].event["lastReceived"] == current_date.isoformat(
+    assert alerts[1].event["last_received"] == current_date.isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
-    assert alerts[2].event["lastReceived"] == future_date.isoformat(
+    assert alerts[2].event["last_received"] == future_date.isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
 
@@ -1796,7 +1796,7 @@ def test_incident_not_created_maintenance(
         datetime.now(UTC) - timedelta(hours=1),
         {
             "severity": AlertSeverity.INFO.value,
-            "lastReceived": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            "last_received": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
             "source": ["test-source"],
         },
         tenant_id=SINGLE_TENANT_UUID,
@@ -1808,7 +1808,7 @@ def test_incident_not_created_maintenance(
         datetime.now(UTC) - timedelta(hours=1),
         {
             "severity": AlertSeverity.INFO.value,
-            "lastReceived": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            "last_received": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
             "source": ["test-source"],
         },
         tenant_id=SINGLE_TENANT_UUID,
@@ -1874,7 +1874,7 @@ def test_create_incident_after_maintenance_window(
         datetime.now(UTC) - timedelta(hours=1),
         {
             "severity": AlertSeverity.INFO.value,
-            "lastReceived": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            "last_received": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
             "source": ["test-source"],
         },
         tenant_id=SINGLE_TENANT_UUID,

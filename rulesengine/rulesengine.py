@@ -127,7 +127,7 @@ class RulesEngine:
                                 status=AlertStatus.RESOLVED.value,
                             )
                             if alerts_solved and any(
-                                event.lastReceived < solved_alert.event["lastReceived"]
+                                event.last_received < solved_alert.last_received
                                 for solved_alert in alerts_solved
                             ):
                                 creation_allowed = False
@@ -156,7 +156,7 @@ class RulesEngine:
                                 )
                                 firing_count = sum(
                                     [
-                                        alert.event.get("unresolvedCounter", 1)
+                                        alert.unresolved_counter if getattr(alert, "unresolved_counter", None) is not None else 1
                                         for alert in incident.alerts
                                     ]
                                 )
@@ -376,8 +376,9 @@ class RulesEngine:
         matched_sub_rules = set()
 
         for alert in incident.alerts:
+            alert_payload = alert.dict()
             matched_sub_rules = matched_sub_rules.union(
-                self._check_if_rule_apply(rule, AlertDto(**alert.event))
+                self._check_if_rule_apply(rule, AlertDto(**alert_payload))
             )
             if all_sub_rules == matched_sub_rules:
                 is_all_conditions_met = True
@@ -464,7 +465,9 @@ class RulesEngine:
         payload = event.dict()
         # workaround since source is a list
         # todo: fix this in the future
-        payload["source"] = payload["source"][0]
+        source = payload.get("source")
+        if isinstance(source, list) and source:
+            payload["source"] = source[0]
         payload = RulesEngine.sanitize_cel_payload(payload)
 
         # what we do here is to compile the CEL rule and evaluate it
@@ -663,9 +666,11 @@ class RulesEngine:
         activations = []
         for alert in alerts:
             payload = alert.dict()
-            # TODO: workaround since source is a list
-            #       should be fixed in the future
-            payload["source"] = ",".join(payload["source"])
+            source = payload.get("source")
+            if isinstance(source, list):
+                payload["source"] = ",".join(source)
+            elif source is None:
+                payload["source"] = ""
             # payload severity could be the severity itself or the order of the severity, cast it to the order
             if isinstance(payload["severity"], str):
                 payload["severity"] = AlertSeverity(payload["severity"].lower()).order

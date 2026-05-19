@@ -73,10 +73,10 @@ def mock_providers_factory():
                     id=event.get("id", "test_id"),
                     name=event.get("name", "test_mock"),
                     status=event.get("status", "firing"),
-                    lastReceived=event.get("lastReceived", "2023-10-26T12:00:00Z"),
+                    last_received=event.get("last_received", "2023-10-26T12:00:00Z"),
                     environment="test",
                     isDuplicate=False,
-                    duplicateReason=None,
+                    duplicate_reason=None,
                     service=event.get("service", "test_service"),
                     source=[provider_type],
                     message=event.get("message", ""),
@@ -86,7 +86,7 @@ def mock_providers_factory():
                     event_id=event.get("event_id", "test_id"),
                     fingerprint=event.get("fingerprint", "test_fingerprint"),
                     url=event.get("url", ""),
-                    **{k: v for k, v in event.items() if k not in ["id", "name", "status", "lastReceived", "service", "source", "message", "description", "severity", "fingerprint", "url"]}
+                    **{k: v for k, v in event.items() if k not in ["id", "name", "status", "last_received", "service", "source", "message", "description", "severity", "fingerprint", "url"]}
                 )
                 
             @classmethod
@@ -444,14 +444,14 @@ def docker_compose_file(pytestconfig):
     )
 
 
-def _create_valid_event(d, lastReceived=None):
+def _create_valid_event(d, last_received=None):
     event = {
         "id": str(uuid.uuid4()),
         "name": "some-test-event",
         "status": "firing",
-        "lastReceived": (
-            str(lastReceived)
-            if lastReceived
+        "last_received": (
+            str(last_received)
+            if last_received
             else datetime.now(tz=timezone.utc).isoformat()
         ),
     }
@@ -464,7 +464,7 @@ def setup_alerts(elastic_client, db_session, request):
     alert_details = request.param.get("alert_details")
     alerts = []
     for i, detail in enumerate(alert_details):
-        # sleep to avoid same lastReceived
+        # sleep to avoid same last_received
         time.sleep(0.02)
         detail["fingerprint"] = f"test-{i}"
         if "source" in detail:
@@ -544,7 +544,7 @@ def setup_stress_alerts_no_elastic(db_session):
                     provider_id="test_{}".format(
                         i % 5
                     ),  # Cycle through 5 different provider_ids
-                    event=_create_valid_event(detail, lastReceived=random_timestamp),
+                    event=_create_valid_event(detail, last_received=random_timestamp),
                     fingerprint="fingerprint_{}".format(i),
                 )
             )
@@ -617,7 +617,7 @@ def create_alert(db_session):
             api_key_name="test",
             event={
                 "name": random_name,
-                "lastReceived": details.pop("lastReceived", timestamp.isoformat()),
+                "last_received": details.pop("last_received", timestamp.isoformat()),
                 "status": status.value,
                 **details,
             },

@@ -45,7 +45,7 @@ def test_bi_metrics(client, db_session, test_app):
         "source": ["test_source"],
         "name": "test_alert",
         "status": "firing",
-        "lastReceived": "2023-10-26T12:00:00Z",
+        "last_received": "2023-10-26T12:00:00Z",
     }
     resp = client.post("/alerts/event", json=alert, headers=headers)
     assert resp.status_code == 202

@@ -49,7 +49,7 @@ def mock_alert_dto():
         name="Test Alert",
         status="firing",
         severity="high",
-        lastReceived="2021-01-01T00:00:00Z",
+        last_received="2021-01-01T00:00:00Z",
         source=["test_source"],
         fingerprint="mock_fingerprint",
         labels={},

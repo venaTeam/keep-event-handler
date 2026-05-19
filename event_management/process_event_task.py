@@ -15,7 +15,6 @@ from arq import Retry
 import requests
 from fastapi.datastructures import FormData
 from opentelemetry import trace
-from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
 # internals
@@ -179,17 +178,17 @@ def __internal_prepartion(
 
 
 def __validate_last_received(event):
-    # Make sure the lastReceived is a valid date string
-    # tb: we do this because `AlertDto` object lastReceived is a string and not a datetime object
-    # TODO: `AlertDto` object `lastReceived` should be a datetime object so we can easily validate with pydantic
-    if not event.lastReceived:
-        event.lastReceived = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    # Make sure the last_received is a valid date string
+    # tb: we do this because `AlertDto` object last_received is a string and not a datetime object
+    # TODO: `AlertDto` object `last_received` should be a datetime object so we can easily validate with pydantic
+    if not event.last_received:
+        event.last_received = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
     else:
         try:
-            dateutil.parser.isoparse(event.lastReceived)
+            dateutil.parser.isoparse(event.last_received)
         except ValueError:
-            logger.warning("Invalid lastReceived date, setting to now")
-            event.lastReceived = datetime.datetime.now(
+            logger.warning("Invalid last_received date, setting to now")
+            event.last_received = datetime.datetime.now(
                 tz=datetime.timezone.utc
             ).isoformat()
 
@@ -288,11 +287,11 @@ def __save_to_db(
                 __validate_last_received(event)
                 enrichments_bl.enrich_entity(
                     event.fingerprint,
-                    enrichments={"lastReceived": event.lastReceived},
+                    enrichments={"last_received": event.last_received},
                     dispose_on_new_alert=True,
                     action_type=ActionType.GENERIC_ENRICH,
                     action_callee="system",
-                    action_description="Alert lastReceived enriched on deduplication",
+                    action_description="Alert last_received enriched on deduplication",
                 )
                 try:
                     if event.status == AlertStatus.RESOLVED.value:
@@ -302,7 +301,7 @@ def __save_to_db(
                         # "keep on new alerts".
                         enrichments_bl.make_enrichments_permanent(
                             event.fingerprint,
-                            dispose_keys=["assignees", "status", "dismissed", "dismissUntil"],
+                            dispose_keys=["assignees", "status", "dismissed", "dismiss_until"],
                         )
                     else:
                         enrichments_bl.dispose_enrichments(event.fingerprint)
@@ -315,14 +314,14 @@ def __save_to_db(
                         },
                     )
 
-                # Update the existing alert record's lastReceived field
+                # Update the existing alert record's last_received field
                 try:
                     logger.debug(
-                        "Updating lastReceived for deduplicated alert",
+                        "Updating last_received for deduplicated alert",
                         extra={
                             "tenant_id": tenant_id,
                             "fingerprint": event.fingerprint,
-                            "lastReceived": event.lastReceived,
+                            "last_received": event.last_received,
                         },
                     )
                     # Query the most recent alert for this fingerprint using the existing session
@@ -335,34 +334,22 @@ def __save_to_db(
                     )
                     existing_alert = session.exec(query).first()
                     if existing_alert:
-                        # Update the event dict's lastReceived field
-                        if existing_alert.event:
-                            existing_alert.event["lastReceived"] = event.lastReceived
-                            # Mark the JSON field as modified so SQLAlchemy detects the change
-                            flag_modified(existing_alert, "event")
-                            session.add(existing_alert)
-                            session.flush()
-                            logger.debug(
-                                "Updated lastReceived for deduplicated alert",
-                                extra={
-                                    "tenant_id": tenant_id,
-                                    "fingerprint": event.fingerprint,
-                                    "alert_id": str(existing_alert.id),
-                                    "lastReceived": event.lastReceived,
-                                },
-                            )
-                        else:
-                            logger.warning(
-                                "Existing alert has no event dict",
-                                extra={
-                                    "tenant_id": tenant_id,
-                                    "fingerprint": event.fingerprint,
-                                    "alert_id": str(existing_alert.id),
-                                },
-                            )
+                        # Update the last_received field
+                        existing_alert.last_received = event.last_received
+                        session.add(existing_alert)
+                        session.flush()
+                        logger.debug(
+                            "Updated last_received for deduplicated alert",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "fingerprint": event.fingerprint,
+                                "alert_id": str(existing_alert.id),
+                                "last_received": event.last_received,
+                            },
+                        )
                     else:
                         logger.warning(
-                            "No existing alert found to update lastReceived",
+                            "No existing alert found to update last_received",
                             extra={
                                 "tenant_id": tenant_id,
                                 "fingerprint": event.fingerprint,
@@ -370,7 +357,7 @@ def __save_to_db(
                         )
                 except Exception as e:
                     logger.exception(
-                        "Failed to update lastReceived for deduplicated alert",
+                        "Failed to update last_received for deduplicated alert",
                         extra={
                             "tenant_id": tenant_id,
                             "fingerprint": event.fingerprint,
@@ -441,7 +428,7 @@ def __save_to_db(
                 formatted_event.fingerprint, None
             )
             if started_at:
-                formatted_event.startedAt = str(started_at)
+                formatted_event.started_at = str(started_at)
 
             if KEEP_CALCULATE_START_FIRING_TIME_ENABLED:
                 # calculate startFiring time
@@ -451,21 +438,21 @@ def __save_to_db(
                     limit=1,
                 )
                 previous_alert = convert_db_alerts_to_dto_alerts(previous_alert)
-                formatted_event.firingStartTime = calculated_start_firing_time(
+                formatted_event.firing_start_time = calculated_start_firing_time(
                     formatted_event, previous_alert
                 )
-                formatted_event.firingStartTimeSinceLastResolved = (
+                formatted_event.firing_start_time_since_last_resolved = (
                     calculate_firing_time_since_last_resolved(
                         formatted_event, previous_alert
                     )
                 )
 
                 # we now need to update the firing and unresolved counters
-                formatted_event.firingCounter = calculated_firing_counter(
+                formatted_event.firing_counter = calculated_firing_counter(
                     formatted_event, previous_alert
                 )
 
-                formatted_event.unresolvedCounter = calculated_unresolved_counter(
+                formatted_event.unresolved_counter = calculated_unresolved_counter(
                     formatted_event, previous_alert
                 )
 
@@ -474,7 +461,7 @@ def __save_to_db(
                 if formatted_event.status == AlertStatus.RESOLVED.value:
                     enrichments_bl.make_enrichments_permanent(
                         formatted_event.fingerprint,
-                        dispose_keys=["assignees", "status", "dismissed", "dismissUntil"],
+                        dispose_keys=["assignees", "status", "dismissed", "dismiss_until"],
                     )
                 else:
                     enrichments_bl.dispose_enrichments(formatted_event.fingerprint)
@@ -496,7 +483,7 @@ def __save_to_db(
                                 # If we have a valid assignee and it's not already assigned for this timestamp
                                 if (
                                     latest_assignee
-                                    and formatted_event.lastReceived not in assignees
+                                    and formatted_event.last_received not in assignees
                                 ):
                                     logger.info(
                                         f"Propagating assignment for {formatted_event.fingerprint} to {latest_assignee}",
@@ -510,7 +497,7 @@ def __save_to_db(
                                         fingerprint=formatted_event.fingerprint,
                                         enrichments={
                                             "assignees": {
-                                                formatted_event.lastReceived: latest_assignee
+                                                formatted_event.last_received: latest_assignee
                                             }
                                         },
                                         action_type=ActionType.GENERIC_ENRICH,
@@ -544,7 +531,7 @@ def __save_to_db(
                                 # If we have a valid assignee and it's not already assigned for this timestamp
                                 if (
                                     latest_assignee
-                                    and formatted_event.lastReceived not in assignees
+                                    and formatted_event.last_received not in assignees
                                 ):
                                     logger.info(
                                         f"Propagating assignment for {formatted_event.fingerprint} to {latest_assignee}",
@@ -558,7 +545,7 @@ def __save_to_db(
                                         fingerprint=formatted_event.fingerprint,
                                         enrichments={
                                             "assignees": {
-                                                formatted_event.lastReceived: latest_assignee
+                                                formatted_event.last_received: latest_assignee
                                             }
                                         },
                                         action_type=ActionType.GENERIC_ENRICH,
@@ -607,17 +594,43 @@ def __save_to_db(
                     else None,
                 },
             )
+            # Map AlertDto fields to native columns
+            event_dict = formatted_event.dict()
+            infra_cols = {"id", "tenant_id", "timestamp", "provider_type", "provider_id", "fingerprint", "alert_hash"}
+            
+            # Extract native columns defined in Alert model
+            native_cols = {
+                "application", "object", "node_name", "severity", "message", "operator",
+                "time_created", "network", "timezone", "custom_key", "expiry_in_minutes",
+                "source", "service", "key_field", "name", "status", "description",
+                "last_received", "is_full_duplicate", "is_partial_duplicate", "duplicate_reason",
+                "note", "assignee", "incident", "dismiss_until", "dismissed", 
+                "started_at", "firing_counter", "unresolved_counter",
+                "firing_start_time", "firing_start_time_since_last_resolved"
+            }
+            
             alert_args = {
                 "tenant_id": tenant_id,
                 "provider_type": (
                     provider_type if provider_type else formatted_event.source[0]
                 ),
-                "event": formatted_event.dict(),
                 "provider_id": provider_id,
                 "fingerprint": formatted_event.fingerprint,
                 "alert_hash": formatted_event.alert_hash,
             }
+            
+            # Map native fields from AlertDto
+            for key, value in event_dict.items():
+                if key in native_cols:
+                    alert_args[key] = value
+                # Non-native fields are dropped (no extra_data)
+            
             alert_args = sanitize_alert(alert_args)
+            # last_received column is TIMESTAMPTZ — bind as datetime, not ISO string
+            if isinstance(alert_args.get("last_received"), str):
+                alert_args["last_received"] = dateutil.parser.isoparse(
+                    alert_args["last_received"]
+                )
             if timestamp_forced is not None:
                 alert_args["timestamp"] = timestamp_forced
 
@@ -906,7 +919,7 @@ def __save_to_db(
             session.expire_on_commit = False
             incident_bl = IncidentBl(tenant_id, session)
             for alert in saved_alerts:
-                if alert.event.get("status") == AlertStatus.RESOLVED.value:
+                if alert.status == AlertStatus.RESOLVED.value:
                     logger.debug(
                         "Checking for alert with status resolved",
                         extra={
@@ -1095,11 +1108,11 @@ def __handle_formatted_events(
 
         # filter out the deduplicated events
         deduplicated_events = list(
-            filter(lambda event: event.isFullDuplicate, formatted_events)
+            filter(lambda event: event.is_full_duplicate, formatted_events)
         )
         dedup_count = len(deduplicated_events)
         formatted_events = list(
-            filter(lambda event: not event.isFullDuplicate, formatted_events)
+            filter(lambda event: not event.is_full_duplicate, formatted_events)
         )
         
         # record metrics
@@ -1153,8 +1166,8 @@ def __handle_formatted_events(
                 bulk_upsert_alert_fields(
                     tenant_id=tenant_id,
                     fields=fields,
-                    provider_id=enriched_formatted_event.providerId,
-                    provider_type=enriched_formatted_event.providerType,
+                    provider_id=enriched_formatted_event.provider_id,
+                    provider_type=enriched_formatted_event.provider_type,
                     session=session,
                 )
 

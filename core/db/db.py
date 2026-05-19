@@ -154,10 +154,10 @@ def get_alerts_data_for_incident(
     """
     with existed_or_new_session(session) as session:
         fields = (
-            get_json_extract_field(session, Alert.event, "service"),
+            Alert.service,
             Alert.provider_type,
             Alert.fingerprint,
-            get_json_extract_field(session, Alert.event, "severity"),
+            Alert.severity,
         )
 
         alerts_data = session.exec(
@@ -514,7 +514,7 @@ def get_alerts_by_fingerprint(
 
         if status:
             query = query.where(
-                get_json_extract_field(session, Alert.event, "status") == status
+                Alert.status == status
             )
 
         if limit:
@@ -1366,7 +1366,7 @@ def is_all_alerts_in_status(
         enriched_status_field = get_json_extract_field(
             session, AlertEnrichment.enrichments, "status"
         )
-        status_field = get_json_extract_field(session, Alert.event, "status")
+        status_field = Alert.status
 
         subquery = (
             select(
@@ -1706,9 +1706,7 @@ def add_alerts_to_incident(
             else:
                 alerts_count = alerts_data_for_incident["count"]
 
-            last_received_field = get_json_extract_field(
-                session, Alert.event, "lastReceived"
-            )
+            last_received_field = Alert.last_received
 
             started_at, last_seen_at = session.exec(
                 select(func.min(last_received_field), func.max(last_received_field))
@@ -1932,7 +1930,7 @@ def is_edge_incident_alert_resolved(
         enriched_status_field = get_json_extract_field(
             session, AlertEnrichment.enrichments, "status"
         )
-        status_field = get_json_extract_field(session, Alert.event, "status")
+        status_field = Alert.status
 
         finerprint, enriched_status, status = session.exec(
             select(Alert.fingerprint, enriched_status_field, status_field)
@@ -2011,7 +2009,7 @@ def remove_alerts_to_incident_by_incident_id(
             tenant_id, fingerprints, session=session
         )
 
-        service_field = get_json_extract_field(session, Alert.event, "service")
+        service_field = Alert.service
 
         # checking if services of removed alerts are still presented in alerts
         # which still assigned with the incident
@@ -2055,7 +2053,7 @@ def remove_alerts_to_incident_by_incident_id(
         )
         sources_existed = session.exec(existed_sources_query)
 
-        severity_field = get_json_extract_field(session, Alert.event, "severity")
+        severity_field = Alert.severity
         # checking if severities of removed alerts are still presented in alerts
         # which still assigned with the incident
         updated_severities_query = (
@@ -2091,9 +2089,7 @@ def remove_alerts_to_incident_by_incident_id(
             if source not in sources_existed
         ]
 
-        last_received_field = get_json_extract_field(
-            session, Alert.event, "lastReceived"
-        )
+        last_received_field = Alert.last_received
 
         started_at, last_seen_at = session.exec(
             select(func.min(last_received_field), func.max(last_received_field))
@@ -2251,7 +2247,7 @@ def get_alerts_by_status(
     status: AlertStatus, session: Optional[Session] = None
 ) -> List[Alert]:
     with existed_or_new_session(session) as session:
-        status_field = get_json_extract_field(session, Alert.event, "status")
+        status_field = Alert.status
         query = select(Alert).where(status_field == status.value)
         return session.exec(query).all()
 
@@ -2275,14 +2271,13 @@ def recover_prev_alert_status(alert: Alert, session: Optional[Session] = None):
     """
     with existed_or_new_session(session) as session:
         try:
-            status = alert.event.get("status")
-            prev_status = alert.event.get("previous_status")
-            alert.event["status"] = prev_status
-            alert.event["previous_status"] = status
+            status = alert.status
+            prev_status = alert.previous_status
+            alert.status = prev_status
+            alert.previous_status = status
         except KeyError:
             logger.warning(f"Alert {alert.id} does not have previous status.")
-        query = update(Alert).where(Alert.id == alert.id).values(event=alert.event)
-        session.exec(query)
+        session.add(alert)
         session.commit()
 
 
@@ -2293,15 +2288,14 @@ def set_maintenance_windows_trace(
     session: Optional[Session] = None,
 ):
     mw_id = str(maintenance_w.id)
-    if mw_id in alert.event.get("maintenance_windows_trace", []):
+    if not alert.maintenance_windows_trace:
+        alert.maintenance_windows_trace = []
+    if mw_id in alert.maintenance_windows_trace:
         return
     with existed_or_new_session(session) as session:
-        if "maintenance_windows_trace" in alert.event:
-            if mw_id not in alert.event["maintenance_windows_trace"]:
-                alert.event["maintenance_windows_trace"].append(mw_id)
-        else:
-            alert.event["maintenance_windows_trace"] = [mw_id]
-        flag_modified(alert, "event")
+        if mw_id not in alert.maintenance_windows_trace:
+            alert.maintenance_windows_trace = alert.maintenance_windows_trace + [mw_id]
+        flag_modified(alert, "maintenance_windows_trace")
         session.add(alert)
         session.commit()
 
