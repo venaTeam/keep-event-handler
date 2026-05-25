@@ -919,15 +919,16 @@ def set_last_alert(
 
                 elif not last_alert:
                     logger.info(f"No last alert for `{fingerprint}`, creating new")
-                    last_alert = LastAlert(
-                        tenant_id=tenant_id,
-                        fingerprint=alert.fingerprint,
-                        timestamp=alert.timestamp,
-                        first_timestamp=alert.timestamp,
-                        alert_id=alert.id,
-                        alert_hash=alert.alert_hash,
+                    session.add(
+                        LastAlert(
+                            tenant_id=tenant_id,
+                            fingerprint=alert.fingerprint,
+                            timestamp=alert.timestamp,
+                            first_timestamp=alert.timestamp,
+                            alert_id=alert.id,
+                            alert_hash=alert.alert_hash,
+                        )
                     )
-                    session.add(last_alert)
 
                 session.commit()
             except IntegrityError as ex:

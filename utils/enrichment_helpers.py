@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from opentelemetry import trace
@@ -15,11 +15,24 @@ tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
 
 
-def javascript_iso_format(last_received: str) -> str:
+def javascript_iso_format(last_received) -> str:
     """
     https://stackoverflow.com/a/63894149/12012756
+    Accepts either an ISO-format string or a datetime (since the ORM column
+    is now TIMESTAMPTZ and may bypass AlertDto's string-coercion validator).
     """
-    dt = datetime.fromisoformat(last_received)
+    if isinstance(last_received, datetime):
+        dt = last_received
+    else:
+        dt = datetime.fromisoformat(last_received)
+    # Normalize to UTC so the output is canonical "...Z" regardless of input TZ.
+    # Postgres TIMESTAMPTZ returns datetimes in the session TZ (often the server's
+    # local TZ, e.g. +03:00), which would otherwise emit "+03:00" suffix and break
+    # comparisons against enrichments that store canonical UTC "Z" strings.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
