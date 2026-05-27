@@ -17,7 +17,9 @@ from datetime import datetime, timezone
 import pytest
 
 from core.db.db import (
+    batch_enrich,
     enrich_entity,
+    get_enrichment_with_session,
     get_last_alert_by_fingerprint,
     normalize_enrichments,
     set_last_alert,
@@ -25,7 +27,7 @@ from core.db.db import (
 from core.dependencies import SINGLE_TENANT_UUID
 from models.action_type import ActionType
 from models.alert import AlertStatus
-from models.db.alert import Alert, AlertAudit, LastAlert
+from models.db.alert import Alert, AlertAudit, AlertEnrichment, LastAlert
 
 
 def _make_alert(fingerprint, status, ts=None):
@@ -276,3 +278,91 @@ def test_tracking_columns_written(db_session):
     assert la.unresolved_counter == 2
     assert la.started_at == "2026-01-01T00:00:00Z"
     assert la.last_received is not None
+
+
+# --------------------------------------------------------------------------- #
+# Incident enrichment stays on AlertEnrichment (EH-3b) — preserved until Phase 3
+# --------------------------------------------------------------------------- #
+def test_incident_enrich_writes_alertenrichment_not_lastalert(db_session):
+    """Incident enrichment (entity_type='incident') must write the legacy
+    AlertEnrichment JSONB row keyed by the incident UUID, and must NOT create a
+    LastAlert row (incidents have none)."""
+    incident_id = str(uuid.uuid4())
+    enrich_entity(
+        SINGLE_TENANT_UUID,
+        incident_id,
+        # arbitrary keys that have NO typed LastAlert column must be allowed
+        {"status": "acknowledged", "ticket_url": "https://x/1", "severity": "high"},
+        action_type=ActionType.GENERIC_ENRICH,
+        action_callee="bob",
+        action_description="incident enrich",
+        session=db_session,
+        entity_type="incident",
+    )
+    # AlertEnrichment row exists with arbitrary keys preserved (no rejection)
+    enr = get_enrichment_with_session(db_session, SINGLE_TENANT_UUID, incident_id)
+    assert enr is not None
+    assert enr.enrichments["status"] == "acknowledged"
+    assert enr.enrichments["ticket_url"] == "https://x/1"
+    assert enr.enrichments["severity"] == "high"
+    # no LastAlert created for the incident UUID
+    assert (
+        get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, incident_id, session=db_session)
+        is None
+    )
+    # audit preserved
+    audits = (
+        db_session.query(AlertAudit)
+        .filter(AlertAudit.fingerprint == incident_id)
+        .all()
+    )
+    assert len(audits) == 1
+
+
+def test_incident_enrich_merges_without_dismissed_translation(db_session):
+    """A second incident enrich merges into the existing JSONB and performs NO
+    dismissed -> dismiss_mode translation (legacy behavior)."""
+    incident_id = str(uuid.uuid4())
+    enrich_entity(
+        SINGLE_TENANT_UUID, incident_id, {"note": "first"},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session, entity_type="incident",
+    )
+    enrich_entity(
+        SINGLE_TENANT_UUID, incident_id, {"dismissed": True},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session, entity_type="incident",
+    )
+    enr = get_enrichment_with_session(db_session, SINGLE_TENANT_UUID, incident_id)
+    # merge preserved the first key
+    assert enr.enrichments["note"] == "first"
+    # raw dismissed kept as-is; no translation to status/dismiss_mode
+    assert enr.enrichments["dismissed"] is True
+    assert "dismiss_mode" not in enr.enrichments
+
+
+def test_incident_batch_enrich_writes_alertenrichment(db_session):
+    incident_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    batch_enrich(
+        SINGLE_TENANT_UUID,
+        incident_ids,
+        {"status": "resolved"},
+        action_type=ActionType.GENERIC_ENRICH,
+        action_callee="bob",
+        action_description="t",
+        session=db_session,
+        entity_type="incident",
+    )
+    rows = (
+        db_session.query(AlertEnrichment)
+        .filter(AlertEnrichment.alert_fingerprint.in_(incident_ids))
+        .all()
+    )
+    assert len(rows) == 2
+    assert all(r.enrichments["status"] == "resolved" for r in rows)
+    # no LastAlert rows created for incident UUIDs
+    for iid in incident_ids:
+        assert (
+            get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, iid, session=db_session)
+            is None
+        )

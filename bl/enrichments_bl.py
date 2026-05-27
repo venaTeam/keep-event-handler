@@ -666,6 +666,7 @@ class EnrichmentsBl:
         action_description: str,
         dispose_on_new_alert=False,
         audit_enabled=True,
+        entity_type: str = "alert",
     ):
         self.logger.debug(
             "enriching multiple fingerprints",
@@ -684,6 +685,7 @@ class EnrichmentsBl:
             audit_enabled=audit_enabled,
             session=self.db_session,
             strict=False,
+            entity_type=entity_type,
         )
 
     def enrich_entity(
@@ -697,11 +699,14 @@ class EnrichmentsBl:
         dispose_on_new_alert=False,
         force=False,
         audit_enabled=True,
+        entity_type: str = "alert",
     ):
         """
         should_exist = False only in mapping where the alert is not yet in elastic
         action_type = AlertActionType - the action type of the enrichment
         action_callee = the action callee of the enrichment
+        entity_type = "alert" (typed LastAlert columns) or "incident" (legacy
+            AlertEnrichment JSONB, kept until Phase 3)
 
         Enrich the alert with extraction and mapping rules
         """
@@ -729,6 +734,7 @@ class EnrichmentsBl:
             force=force,
             audit_enabled=audit_enabled,
             strict=False,
+            entity_type=entity_type,
         )
 
         self.logger.debug(
@@ -738,8 +744,8 @@ class EnrichmentsBl:
         # enrich elastic only if should exist, since
         #   in elastic the alertdto is being kept which is alert + enrichments
         # so for example, in mapping, the enrichment happens before the alert is indexed in elastic
-        #
-        if should_exist:
+        # Incidents are not indexed as alerts in elastic, so skip elastic for them.
+        if should_exist and entity_type == "alert":
             try:
                 self.elastic_client.enrich_alert(
                     alert_fingerprint=fingerprint,
