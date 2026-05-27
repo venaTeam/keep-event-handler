@@ -203,7 +203,7 @@ def enrich_incidents_with_alerts(
 ):
     with existed_or_new_session(session) as session:
         incident_alerts = session.exec(
-            select(LastAlertToIncident.incident_id, Alert)
+            select(LastAlertToIncident.incident_id, Alert, LastAlert)
             .select_from(LastAlert)
             .join(
                 LastAlertToIncident,
@@ -222,8 +222,40 @@ def enrich_incidents_with_alerts(
             )
         ).all()
 
+        # Phase 2: the cross-occurrence tracking + user-state fields were
+        # relocated from alert to lastalert. Attach them as runtime attributes
+        # on the raw Alert so existing consumers that read e.g.
+        # alert.unresolved_counter / alert.status keep working.
+        # Tracking counters are always taken from lastalert; user-state columns
+        # (status override, assignee, note, ...) only override when set so the
+        # provider's alert.status is preserved when there is no override.
+        _tracking_attrs = (
+            "last_received",
+            "firing_counter",
+            "unresolved_counter",
+            "started_at",
+            "firing_start_time",
+            "firing_start_time_since_last_resolved",
+        )
+        _user_state_attrs = (
+            "status",
+            "assignee",
+            "note",
+            "dismiss_mode",
+            "dismissed_until",
+        )
         alerts_per_incident = defaultdict(list)
-        for incident_id, alert in incident_alerts:
+        for incident_id, alert, last_alert in incident_alerts:
+            # The relocated fields are no longer mapped columns on Alert, so set
+            # them as plain Python attributes (bypass SQLModel/Pydantic field
+            # validation via object.__setattr__).
+            for _attr in _tracking_attrs:
+                object.__setattr__(alert, _attr, getattr(last_alert, _attr, None))
+            for _attr in _user_state_attrs:
+                _val = getattr(last_alert, _attr, None)
+                if _val is not None:
+                    object.__setattr__(alert, _attr, _val)
+            object.__setattr__(alert, "deleted", bool(last_alert.deleted))
             alerts_per_incident[incident_id].append(alert)
 
         for incident in incidents:
