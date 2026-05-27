@@ -33,7 +33,6 @@ from models.action_type import ActionType
 from models.alert import AlertDto, AlertSeverity, AlertStatus
 from models.db.topology import TopologyServiceInDto
 from models.incident import IncidentDto
-from utils.enrichment_helpers import parse_and_enrich_deleted_and_assignees
 from contextmanager.contextmanager import ContextManager
 from providers.models.provider_config import ProviderConfig, ProviderScope
 from providers.models.provider_method import ProviderMethod
@@ -335,9 +334,13 @@ class BaseProvider(metaclass=abc.ABCMeta):
 
             # todo: incidents do not have disposable enrichments
             if disposable_enrichments and entity_type == "alert":
-                # enrich with disposable enrichments
-                enrichments_bl.disposable_enrich_entity(
+                # Phase 2: "dispose on new alert" is now the typed
+                # status_disposable flag on LastAlert (cleared on the next
+                # non-resolved re-fire in set_last_alert), routed through the
+                # same typed enrich path.
+                enrichments_bl.enrich_entity(
                     enrichments=disposable_enrichments,
+                    dispose_on_new_alert=True,
                     action_description=f"Workflow enriched the {entity_type} with {disposable_enrichment_string}",
                     **common_kwargs,
                 )
@@ -607,9 +610,8 @@ class BaseProvider(metaclass=abc.ABCMeta):
                         alert_enrichment.alert_fingerprint
                     )
                     for alert_to_enrich in alerts_to_enrich:
-                        parse_and_enrich_deleted_and_assignees(
-                            alert_to_enrich, alert_enrichment.enrichments
-                        )
+                        # Phase 2: enrichment dict (incl. assignee/deleted/
+                        # dismissed) is sourced from LastAlert typed columns.
                         for enrichment in alert_enrichment.enrichments:
                             # set the enrichment
                             setattr(
