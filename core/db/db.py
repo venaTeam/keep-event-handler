@@ -1774,7 +1774,9 @@ def add_alerts_to_incident(
             else:
                 alerts_count = alerts_data_for_incident["count"]
 
-            last_received_field = Alert.last_received
+            # Phase 2: alert.last_received was relocated to lastalert; aggregate
+            # over occurrence timestamps for the incident start/last-seen window.
+            last_received_field = Alert.timestamp
 
             started_at, last_seen_at = session.exec(
                 select(func.min(last_received_field), func.max(last_received_field))
@@ -2156,7 +2158,8 @@ def remove_alerts_to_incident_by_incident_id(
             if source not in sources_existed
         ]
 
-        last_received_field = Alert.last_received
+        # Phase 2: last_received was relocated from alert to lastalert.
+        last_received_field = LastAlert.last_received
 
         started_at, last_seen_at = session.exec(
             select(func.min(last_received_field), func.max(last_received_field))
