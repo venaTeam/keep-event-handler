@@ -309,9 +309,9 @@ LASTALERT_ENRICHMENT_COLUMNS = {
 _LEGACY_ENRICHMENT_KEYS = {"dismissed", "dismiss_until"}
 
 
-def normalize_enrichments(enrichments: dict) -> dict:
-    """Translate legacy enrichment keys to the typed-column model and reject
-    any unknown key.
+def normalize_enrichments(enrichments: dict, strict: bool = True) -> dict:
+    """Translate legacy enrichment keys to the typed-column model and handle
+    unknown keys.
 
     Translation rules (see ALERTENRICHMENT_REMOVAL_SPEC §"Dismiss"):
       - dismissed: true  -> status='suppressed', dismiss_mode='permanent'
@@ -320,8 +320,10 @@ def normalize_enrichments(enrichments: dict) -> dict:
       - dismissed: false -> status=None, dismiss_mode=None, dismissed_until=None
       - dismiss_mode/dismissed_until forwarded directly.
 
-    Raises ValueError on any key that is not a known typed column or a legacy
-    key (surfaced as HTTP 422 at the route layer in api-gateway).
+    Unknown keys (e.g. arbitrary extraction/mapping fields, which have no
+    destination in the strict schema):
+      - strict=True (route-driven writes): raise ValueError -> HTTP 422.
+      - strict=False (internal system writes): discard with a warning.
     """
     normalized = dict(enrichments)
 
@@ -352,10 +354,17 @@ def normalize_enrichments(enrichments: dict) -> dict:
 
     unknown = set(normalized) - LASTALERT_ENRICHMENT_COLUMNS
     if unknown:
-        raise ValueError(
-            f"Unknown enrichment key(s): {sorted(unknown)}. "
-            f"Allowed: {sorted(LASTALERT_ENRICHMENT_COLUMNS | _LEGACY_ENRICHMENT_KEYS)}"
+        if strict:
+            raise ValueError(
+                f"Unknown enrichment key(s): {sorted(unknown)}. "
+                f"Allowed: {sorted(LASTALERT_ENRICHMENT_COLUMNS | _LEGACY_ENRICHMENT_KEYS)}"
+            )
+        logger.warning(
+            "phase2.discard_unknown_enrichment_keys",
+            extra={"keys": sorted(unknown)},
         )
+        for key in unknown:
+            normalized.pop(key, None)
     return normalized
 
 
@@ -404,18 +413,20 @@ def _enrich_entity(
     action_description: str,
     force=False,
     audit_enabled=True,
+    strict=True,
 ):
     """
     Enrich an alert by writing typed columns on its LastAlert row.
 
     Phase 2: user-enrichment state lives on LastAlert typed columns, not on the
     alertenrichment JSONB. The legacy `dismissed`/`dismiss_until` keys are
-    translated and unknown keys are rejected (ValueError -> 422 at the route).
+    translated. Unknown keys are rejected (strict, ValueError -> 422 at the
+    route) or discarded (strict=False, internal system writes).
 
     D1: if no LastAlert row exists for the fingerprint, the column UPDATE is
     skipped (logged) but the AlertAudit row is still created.
     """
-    normalized = normalize_enrichments(enrichments)
+    normalized = normalize_enrichments(enrichments, strict=strict)
 
     last_alert = get_last_alert_by_fingerprint(
         tenant_id, fingerprint, session, for_update=True
@@ -461,6 +472,7 @@ def enrich_entity(
     session=None,
     force=False,
     audit_enabled=True,
+    strict=True,
 ):
     with existed_or_new_session(session) as session:
         return _enrich_entity(
@@ -473,6 +485,7 @@ def enrich_entity(
             action_description,
             force=force,
             audit_enabled=audit_enabled,
+            strict=strict,
         )
 
 @retry(exceptions=(Exception,), tries=3, delay=0.1, backoff=2)
@@ -1236,6 +1249,7 @@ def batch_enrich(
     action_description: str,
     session=None,
     audit_enabled=True,
+    strict=True,
 ):
     """
     Batch enrich multiple alerts with the same enrichments in a single transaction.
@@ -1254,9 +1268,9 @@ def batch_enrich(
     Returns:
         List[AlertEnrichment]: List of enriched alert objects.
     """
-    # Phase 2: write typed LastAlert columns. Translate legacy keys / reject
+    # Phase 2: write typed LastAlert columns. Translate legacy keys / handle
     # unknown keys once for the whole batch (same enrichments for all fps).
-    normalized = normalize_enrichments(enrichments)
+    normalized = normalize_enrichments(enrichments, strict=strict)
 
     with existed_or_new_session(session) as session:
         existing_last_alerts = {

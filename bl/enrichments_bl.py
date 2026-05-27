@@ -19,10 +19,8 @@ from config.consts import ENRICHMENT_DISABLED
 from core.db.db import (
     batch_enrich,
     get_alert_by_event_id,
-    get_enrichment_with_session,
     get_extraction_rule_by_id,
     get_incidents_by_alert_fingerprint,
-    get_last_alert_by_fingerprint,
     get_mapping_rule_by_id,
     get_session_sync,
     get_topology_data_by_dynamic_matcher,
@@ -649,6 +647,16 @@ class EnrichmentsBl:
             should_check_incidents_resolution,
         )
 
+    @staticmethod
+    def _apply_dispose_on_new_alert(enrichments: dict, dispose_on_new_alert: bool) -> dict:
+        """Phase 2: 'dispose on new alert' for status is now expressed via the
+        typed `status_disposable` flag (cleared on the next non-resolved re-fire
+        in set_last_alert), not a disposable_* JSONB wrapper.
+        """
+        if dispose_on_new_alert and "status" in enrichments:
+            enrichments = {**enrichments, "status_disposable": True}
+        return enrichments
+
     def batch_enrich(
         self,
         fingerprints: list[str],
@@ -663,23 +671,9 @@ class EnrichmentsBl:
             "enriching multiple fingerprints",
             extra={"fingerprints": fingerprints, "tenant_id": self.tenant_id},
         )
-        # if these enrichments are disposable, manipulate them with a timestamp
-        #   so they can be disposed of later
-        if dispose_on_new_alert:
-            self.logger.info(
-                "Enriching disposable enrichments",
-                extra={"fingerprints": fingerprints, "tenant_id": self.tenant_id},
-            )
-            # for every key, add a disposable key with the value and a timestamp
-            disposable_enrichments = {}
-            for key, value in enrichments.items():
-                disposable_enrichments[f"disposable_{key}"] = {
-                    "value": value,
-                    "timestamp": datetime.datetime.now(
-                        tz=datetime.timezone.utc
-                    ).timestamp(),  # timestamp for disposal [for future use]
-                }
-            enrichments.update(disposable_enrichments)
+        enrichments = self._apply_dispose_on_new_alert(
+            enrichments, dispose_on_new_alert
+        )
         batch_enrich(
             self.tenant_id,
             fingerprints,
@@ -689,46 +683,8 @@ class EnrichmentsBl:
             action_description,
             audit_enabled=audit_enabled,
             session=self.db_session,
+            strict=False,
         )
-
-    def disposable_enrich_entity(
-        self,
-        fingerprint: str,
-        enrichments: dict,
-        action_type: ActionType,
-        action_callee: str,
-        action_description: str,
-        should_exist=True,
-        force=False,
-        audit_enabled=True,
-    ):
-        common_kwargs = {
-            "enrichments": enrichments,
-            "action_type": action_type,
-            "action_callee": action_callee,
-            "action_description": action_description,
-            "should_exist": should_exist,
-            "force": force,
-        }
-
-        self.enrich_entity(
-            fingerprint=fingerprint,
-            dispose_on_new_alert=True,
-            audit_enabled=audit_enabled,
-            **common_kwargs,
-        )
-
-        last_alert = get_last_alert_by_fingerprint(
-            self.tenant_id, fingerprint, session=self.db_session
-        )
-        # Create instance-wide enrichment for history
-        # For better database-native UUID support
-        alert_id = UUIDType(binary=False).process_bind_param(
-            last_alert.alert_id, self.db_session.bind.dialect
-        )
-        # For elastic we do not save instance-level enrichments
-        common_kwargs["should_exist"] = False
-        self.enrich_entity(fingerprint=alert_id, audit_enabled=False, **common_kwargs)
 
     def enrich_entity(
         self,
@@ -758,22 +714,9 @@ class EnrichmentsBl:
             "enriching alert db",
             extra={"fingerprint": fingerprint, "tenant_id": self.tenant_id},
         )
-        # if these enrichments are disposable, manipulate them with a timestamp
-        #   so they can be disposed of later
-        if dispose_on_new_alert:
-            self.logger.info(
-                "Enriching disposable enrichments", extra={"fingerprint": fingerprint}
-            )
-            # for every key, add a disposable key with the value and a timestamp
-            disposable_enrichments = {}
-            for key, value in enrichments.items():
-                disposable_enrichments[f"disposable_{key}"] = {
-                    "value": value,
-                    "timestamp": datetime.datetime.now(
-                        tz=datetime.timezone.utc
-                    ).timestamp(),  # timestamp for disposal [for future use]
-                }
-            enrichments.update(disposable_enrichments)
+        enrichments = self._apply_dispose_on_new_alert(
+            enrichments, dispose_on_new_alert
+        )
 
         enrich_alert_db(
             self.tenant_id,
@@ -785,6 +728,7 @@ class EnrichmentsBl:
             session=self.db_session,
             force=force,
             audit_enabled=audit_enabled,
+            strict=False,
         )
 
         self.logger.debug(
@@ -857,174 +801,6 @@ class EnrichmentsBl:
             EnrichmentLog.tenant_id == self.tenant_id,
         )
         return self.db_session.exec(query).all()
-
-    def dispose_enrichments(self, fingerprint: str):
-        """
-        Dispose of enrichments from the alert
-        """
-        if EnrichmentsBl.ENRICHMENT_DISABLED:
-            self.logger.debug("Enrichment is disabled, skipping dispose enrichments")
-            return
-
-        self.logger.debug("disposing enrichments", extra={"fingerprint": fingerprint})
-        enrichments = get_enrichment_with_session(
-            self.db_session, self.tenant_id, fingerprint
-        )
-        if not enrichments or not enrichments.enrichments:
-            self.logger.debug(
-                "no enrichments to dispose", extra={"fingerprint": fingerprint}
-            )
-            return
-        # Remove all disposable enrichments
-        new_enrichments = {}
-        disposed = False
-        for key, val in enrichments.enrichments.items():
-            if key.startswith("disposable_"):
-                disposed = True
-                continue
-            elif f"disposable_{key}" not in enrichments.enrichments:
-                new_enrichments[key] = val
-        # Only update the alert if there are disposable enrichments to dispose
-        disposed_keys = set(enrichments.enrichments.keys()) - set(
-            new_enrichments.keys()
-        )
-        if "dismissed" in disposed_keys:
-            # Ensure alerts are explicitly marked as not dismissed after disposal.
-            # Some alert payloads may still carry the dismissed flag, so we reset it here.
-            new_enrichments["dismissed"] = False
-        if "dismiss_until" in disposed_keys:
-            # Clear any lingering dismissal deadline metadata.
-            new_enrichments["dismiss_until"] = None
-        if disposed:
-            enrich_alert_db(
-                self.tenant_id,
-                fingerprint,
-                new_enrichments,
-                session=self.db_session,
-                action_callee="system",
-                action_type=ActionType.DISPOSE_ENRICHED_ALERT,
-                action_description=f"Disposing enrichments from alert - {disposed_keys}",
-                force=True,
-            )
-
-            if self.elastic_client:
-                try:
-                    latest_alert = self.db_session.exec(
-                        select(Alert)
-                        .where(Alert.tenant_id == self.tenant_id)
-                        .where(Alert.fingerprint == fingerprint)
-                        .order_by(Alert.timestamp.desc())
-                        .limit(1)
-                    ).first()
-
-                    if latest_alert:
-                        alert_data = latest_alert.dict()
-                        alert_data.update(
-                            {
-                                key: value
-                                for key, value in new_enrichments.items()
-                                if value is not None
-                                or key in {"dismissed", "dismiss_until"}
-                            }
-                        )
-                        alert_dto = AlertDto(**alert_data)
-                        self.elastic_client.index_alert(alert_dto)
-                    else:
-                        self.elastic_client.enrich_alert(fingerprint, new_enrichments)
-                except Exception:
-                    self.logger.exception(
-                        "Failed to reindex alert after disposing enrichments",
-                        extra={
-                            "fingerprint": fingerprint,
-                            "tenant_id": self.tenant_id,
-                        },
-                    )
-            self.logger.debug(
-                "enrichments disposed", extra={"fingerprint": fingerprint}
-            )
-
-    def make_enrichments_permanent(
-        self, fingerprint: str, dispose_keys: list[str] = None
-    ):
-        """
-        Convert disposable enrichments to permanent enrichments
-        """
-        if EnrichmentsBl.ENRICHMENT_DISABLED:
-            return
-
-        self.logger.debug(
-            "making enrichments permanent", extra={"fingerprint": fingerprint}
-        )
-        enrichments = get_enrichment_with_session(
-            self.db_session, self.tenant_id, fingerprint
-        )
-        if not enrichments or not enrichments.enrichments:
-            return
-
-        dispose_keys = dispose_keys or []
-        new_enrichments = {}
-        changed = False
-        for key, val in enrichments.enrichments.items():
-            if key in dispose_keys:
-                changed = True
-                continue
-
-            if key.startswith("disposable_"):
-                # Remove prefix
-                real_key = key.replace("disposable_", "")
-                if real_key in dispose_keys:
-                    changed = True
-                    continue
-
-                # Extract the actual value from the disposable wrapper
-                if isinstance(val, dict) and "value" in val:
-                    new_enrichments[real_key] = val["value"]
-                else:
-                    new_enrichments[real_key] = val
-                changed = True
-            else:
-                new_enrichments[key] = val
-
-        if changed:
-            enrich_alert_db(
-                self.tenant_id,
-                fingerprint,
-                new_enrichments,
-                session=self.db_session,
-                action_callee="system",
-                action_type=ActionType.GENERIC_ENRICH,
-                action_description="Enrichments made permanent due to resolution",
-                force=True,
-            )
-
-            if self.elastic_client:
-                try:
-                    latest_alert = self.db_session.exec(
-                        select(Alert)
-                        .where(Alert.tenant_id == self.tenant_id)
-                        .where(Alert.fingerprint == fingerprint)
-                        .order_by(Alert.timestamp.desc())
-                        .limit(1)
-                    ).first()
-
-                    if latest_alert:
-                        alert_data = latest_alert.dict()
-                        alert_data.update(new_enrichments)
-                        alert_dto = AlertDto(**alert_data)
-                        self.elastic_client.index_alert(alert_dto)
-                    else:
-                        self.elastic_client.enrich_alert(fingerprint, new_enrichments)
-                except Exception:
-                    self.logger.exception(
-                        "Failed to reindex alert after making enrichments permanent",
-                        extra={
-                            "fingerprint": fingerprint,
-                            "tenant_id": self.tenant_id,
-                        },
-                    )
-            self.logger.debug(
-                "enrichments made permanent", extra={"fingerprint": fingerprint}
-            )
 
     def _track_enrichment_event(
         self,
