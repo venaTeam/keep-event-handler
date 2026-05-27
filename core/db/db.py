@@ -359,6 +359,26 @@ def normalize_enrichments(enrichments: dict) -> dict:
     return normalized
 
 
+def last_alert_enrichments_dict(last_alert: "LastAlert") -> dict:
+    """Build the user-enrichment dict (status/assignee/note/dismiss/deleted)
+    from a LastAlert row's typed columns. NULL columns are omitted so callers
+    fall back to the provider value. Always includes the derived `dismissed`
+    compat field.
+    """
+    data: dict = {}
+    for col_name in ("status", "assignee", "note", "dismiss_mode"):
+        val = getattr(last_alert, col_name, None)
+        if val is not None:
+            data[col_name] = val
+    if last_alert.dismissed_until is not None:
+        data["dismissed_until"] = last_alert.dismissed_until
+    if last_alert.deleted:
+        data["deleted"] = True
+    # derived compat field for existing consumers
+    data["dismissed"] = last_alert.status == "suppressed"
+    return data
+
+
 def _apply_enrichments_to_last_alert(last_alert: LastAlert, enrichments: dict, force=False):
     """Write normalized enrichment keys onto LastAlert typed columns.
 
@@ -511,10 +531,12 @@ def get_alerts_by_fingerprint(
     fingerprint: str,
     limit=1,
     status=None,
-    with_alert_instance_enrichment=False,
 ) -> List[Alert]:
     """
     Get all alerts for a given fingerprint.
+
+    Phase 2: alert enrichment state now lives on LastAlert typed columns, so no
+    alertenrichment eager-load is needed here.
 
     Args:
         tenant_id (str): The tenant_id to filter the alerts by.
@@ -525,10 +547,7 @@ def get_alerts_by_fingerprint(
     """
     with Session(engine) as session:
         # Create the query using select() instead of session.query()
-        query = select(Alert).options(subqueryload(Alert.alert_enrichment))
-
-        if with_alert_instance_enrichment:
-            query = query.options(subqueryload(Alert.alert_instance_enrichment))
+        query = select(Alert)
 
         # Filter by tenant_id
         query = query.where(Alert.tenant_id == tenant_id)
@@ -1127,7 +1146,6 @@ def get_incident_alerts_and_links_by_incident_id(
                 LastAlertToIncident.incident_id == incident_id,
             )
             .order_by(col(LastAlert.timestamp).desc())
-            .options(joinedload(Alert.alert_enrichment))
         )
         if not include_unlinked:
             query = query.filter(
@@ -1174,23 +1192,39 @@ def get_tenants_configurations(only_with_config=False) -> dict:
 
     return tenants_configurations
 
+class _FingerprintEnrichments:
+    """Lightweight read-only view exposing the same `.alert_fingerprint` /
+    `.enrichments` shape that consumers expect, but sourced from LastAlert
+    typed columns (Phase 2)."""
+
+    __slots__ = ("alert_fingerprint", "enrichments")
+
+    def __init__(self, alert_fingerprint: str, enrichments: dict):
+        self.alert_fingerprint = alert_fingerprint
+        self.enrichments = enrichments
+
+
 def get_enrichments(
     tenant_id: int, fingerprints: List[str]
-) -> List[Optional[AlertEnrichment]]:
+) -> List[Optional["_FingerprintEnrichments"]]:
     """
-    Get a list of alert enrichments for a list of fingerprints using a single DB query.
+    Get the user-enrichment state for a list of fingerprints from LastAlert
+    typed columns (Phase 2).
 
-    :param tenant_id: The tenant ID to filter the alert enrichments by.
-    :param fingerprints: A list of fingerprints to get the alert enrichments for.
-    :return: A list of AlertEnrichment objects or None for each fingerprint.
+    :param tenant_id: The tenant ID to filter the alerts by.
+    :param fingerprints: A list of fingerprints to get the enrichments for.
+    :return: A list of objects exposing `.alert_fingerprint` and `.enrichments`.
     """
     with Session(engine) as session:
-        result = session.exec(
-            select(AlertEnrichment)
-            .where(AlertEnrichment.tenant_id == tenant_id)
-            .where(AlertEnrichment.alert_fingerprint.in_(fingerprints))
+        rows = session.exec(
+            select(LastAlert)
+            .where(LastAlert.tenant_id == tenant_id)
+            .where(LastAlert.fingerprint.in_(fingerprints))
         ).all()
-    return result
+    return [
+        _FingerprintEnrichments(la.fingerprint, last_alert_enrichments_dict(la))
+        for la in rows
+    ]
 
 
 def batch_enrich(
@@ -1282,7 +1316,6 @@ def get_alert_by_event_id(
             .filter(Alert.tenant_id == tenant_id)
             .filter(Alert.id == uuid.UUID(event_id))
         )
-        query = query.options(subqueryload(Alert.alert_enrichment))
         alert = session.exec(query).first()
     return alert
 
@@ -1392,9 +1425,8 @@ def is_all_alerts_in_status(
         return False
 
     with existed_or_new_session(session) as session:
-        enriched_status_field = get_json_extract_field(
-            session, AlertEnrichment.enrichments, "status"
-        )
+        # Phase 2: enriched status override lives on LastAlert.status
+        enriched_status_field = LastAlert.status
         status_field = Alert.status
 
         subquery = (
@@ -1404,13 +1436,6 @@ def is_all_alerts_in_status(
             )
             .select_from(LastAlert)
             .join(Alert, LastAlert.alert_id == Alert.id)
-            .outerjoin(
-                AlertEnrichment,
-                and_(
-                    Alert.tenant_id == AlertEnrichment.tenant_id,
-                    Alert.fingerprint == AlertEnrichment.alert_fingerprint,
-                ),
-            )
         )
 
         if fingerprints:
@@ -1956,19 +1981,18 @@ def is_edge_incident_alert_resolved(
         return False
 
     with existed_or_new_session(session) as session:
-        enriched_status_field = get_json_extract_field(
-            session, AlertEnrichment.enrichments, "status"
-        )
+        # Phase 2: enriched status override lives on LastAlert.status
+        enriched_status_field = LastAlert.status
         status_field = Alert.status
 
         finerprint, enriched_status, status = session.exec(
             select(Alert.fingerprint, enriched_status_field, status_field)
             .select_from(Alert)
             .outerjoin(
-                AlertEnrichment,
+                LastAlert,
                 and_(
-                    Alert.tenant_id == AlertEnrichment.tenant_id,
-                    Alert.fingerprint == AlertEnrichment.alert_fingerprint,
+                    Alert.tenant_id == LastAlert.tenant_id,
+                    Alert.fingerprint == LastAlert.fingerprint,
                 ),
             )
             .join(
