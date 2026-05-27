@@ -39,7 +39,7 @@ from sqlalchemy import (
     update,
 )
 
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, InternalError, OperationalError
 from sqlalchemy.orm import subqueryload
 from sqlmodel import Session, col, or_, select, text
 
@@ -154,10 +154,10 @@ def get_alerts_data_for_incident(
     """
     with existed_or_new_session(session) as session:
         fields = (
-            get_json_extract_field(session, Alert.event, "service"),
+            Alert.service,
             Alert.provider_type,
             Alert.fingerprint,
-            get_json_extract_field(session, Alert.event, "severity"),
+            Alert.severity,
         )
 
         alerts_data = session.exec(
@@ -323,13 +323,17 @@ def _enrich_entity(
         else:
             new_enrichment_data = {**enrichment.enrichments, **enrichments}
         # Preserve existing note if incoming note is empty/None/not provided
-        incoming_note = enrichments.get("note")
-        if not incoming_note or (
-            isinstance(incoming_note, str) and not incoming_note.strip()
-        ):
-            existing_note = enrichment.enrichments.get("note")
-            if existing_note:
-                new_enrichment_data["note"] = existing_note
+
+        # BUT only when NOT forcing — force=True means the caller (e.g. unenrich)
+        # explicitly wants to replace all enrichments, including removing the note.
+        if not force:
+            incoming_note = enrichments.get("note")
+            if not incoming_note or (
+                isinstance(incoming_note, str) and not incoming_note.strip()
+            ):
+                existing_note = enrichment.enrichments.get("note")
+                if existing_note:
+                    new_enrichment_data["note"] = existing_note
         # Remove keys with None values (e.g., status=None when undismissing)
         # This allows the alert to revert to its original value from event data
         for key, value in list(enrichments.items()):
@@ -510,7 +514,7 @@ def get_alerts_by_fingerprint(
 
         if status:
             query = query.where(
-                get_json_extract_field(session, Alert.event, "status") == status
+                Alert.status == status
             )
 
         if limit:
@@ -898,8 +902,8 @@ def set_last_alert(
                 # For example if older alert failed to process
                 # and retried after new one
                 if last_alert and last_alert.timestamp.replace(
-                    tzinfo=tz.UTC
-                ) < alert.timestamp.replace(tzinfo=tz.UTC):
+                    tzinfo=timezone.utc
+                ) < alert.timestamp.replace(tzinfo=timezone.utc):
                     logger.info(
                         f"Update last alert for `{fingerprint}`: {last_alert.alert_id} -> {alert.id}",
                         extra={
@@ -915,15 +919,16 @@ def set_last_alert(
 
                 elif not last_alert:
                     logger.info(f"No last alert for `{fingerprint}`, creating new")
-                    last_alert = LastAlert(
-                        tenant_id=tenant_id,
-                        fingerprint=alert.fingerprint,
-                        timestamp=alert.timestamp,
-                        first_timestamp=alert.timestamp,
-                        alert_id=alert.id,
-                        alert_hash=alert.alert_hash,
+                    session.add(
+                        LastAlert(
+                            tenant_id=tenant_id,
+                            fingerprint=alert.fingerprint,
+                            timestamp=alert.timestamp,
+                            first_timestamp=alert.timestamp,
+                            alert_id=alert.id,
+                            alert_hash=alert.alert_hash,
+                        )
                     )
-                    session.add(last_alert)
 
                 session.commit()
             except IntegrityError as ex:
@@ -969,7 +974,7 @@ def set_last_alert(
                 # Small delay before retry to avoid hammering the database
                 time.sleep(0.1 * attempt)
                 continue
-            except NoActiveSqlTransaction as ex:
+            except InternalError as ex:
                 session.rollback()
                 logger.exception(
                     f"No active sql transaction while updating lastalert for `{fingerprint}`, retry #{attempt}",
@@ -1362,7 +1367,7 @@ def is_all_alerts_in_status(
         enriched_status_field = get_json_extract_field(
             session, AlertEnrichment.enrichments, "status"
         )
-        status_field = get_json_extract_field(session, Alert.event, "status")
+        status_field = Alert.status
 
         subquery = (
             select(
@@ -1702,9 +1707,7 @@ def add_alerts_to_incident(
             else:
                 alerts_count = alerts_data_for_incident["count"]
 
-            last_received_field = get_json_extract_field(
-                session, Alert.event, "lastReceived"
-            )
+            last_received_field = Alert.last_received
 
             started_at, last_seen_at = session.exec(
                 select(func.min(last_received_field), func.max(last_received_field))
@@ -1928,7 +1931,7 @@ def is_edge_incident_alert_resolved(
         enriched_status_field = get_json_extract_field(
             session, AlertEnrichment.enrichments, "status"
         )
-        status_field = get_json_extract_field(session, Alert.event, "status")
+        status_field = Alert.status
 
         finerprint, enriched_status, status = session.exec(
             select(Alert.fingerprint, enriched_status_field, status_field)
@@ -2007,7 +2010,7 @@ def remove_alerts_to_incident_by_incident_id(
             tenant_id, fingerprints, session=session
         )
 
-        service_field = get_json_extract_field(session, Alert.event, "service")
+        service_field = Alert.service
 
         # checking if services of removed alerts are still presented in alerts
         # which still assigned with the incident
@@ -2051,7 +2054,7 @@ def remove_alerts_to_incident_by_incident_id(
         )
         sources_existed = session.exec(existed_sources_query)
 
-        severity_field = get_json_extract_field(session, Alert.event, "severity")
+        severity_field = Alert.severity
         # checking if severities of removed alerts are still presented in alerts
         # which still assigned with the incident
         updated_severities_query = (
@@ -2087,9 +2090,7 @@ def remove_alerts_to_incident_by_incident_id(
             if source not in sources_existed
         ]
 
-        last_received_field = get_json_extract_field(
-            session, Alert.event, "lastReceived"
-        )
+        last_received_field = Alert.last_received
 
         started_at, last_seen_at = session.exec(
             select(func.min(last_received_field), func.max(last_received_field))
@@ -2247,7 +2248,7 @@ def get_alerts_by_status(
     status: AlertStatus, session: Optional[Session] = None
 ) -> List[Alert]:
     with existed_or_new_session(session) as session:
-        status_field = get_json_extract_field(session, Alert.event, "status")
+        status_field = Alert.status
         query = select(Alert).where(status_field == status.value)
         return session.exec(query).all()
 
@@ -2271,14 +2272,13 @@ def recover_prev_alert_status(alert: Alert, session: Optional[Session] = None):
     """
     with existed_or_new_session(session) as session:
         try:
-            status = alert.event.get("status")
-            prev_status = alert.event.get("previous_status")
-            alert.event["status"] = prev_status
-            alert.event["previous_status"] = status
+            status = alert.status
+            prev_status = alert.previous_status
+            alert.status = prev_status
+            alert.previous_status = status
         except KeyError:
             logger.warning(f"Alert {alert.id} does not have previous status.")
-        query = update(Alert).where(Alert.id == alert.id).values(event=alert.event)
-        session.exec(query)
+        session.add(alert)
         session.commit()
 
 
@@ -2289,15 +2289,14 @@ def set_maintenance_windows_trace(
     session: Optional[Session] = None,
 ):
     mw_id = str(maintenance_w.id)
-    if mw_id in alert.event.get("maintenance_windows_trace", []):
+    if not alert.maintenance_windows_trace:
+        alert.maintenance_windows_trace = []
+    if mw_id in alert.maintenance_windows_trace:
         return
     with existed_or_new_session(session) as session:
-        if "maintenance_windows_trace" in alert.event:
-            if mw_id not in alert.event["maintenance_windows_trace"]:
-                alert.event["maintenance_windows_trace"].append(mw_id)
-        else:
-            alert.event["maintenance_windows_trace"] = [mw_id]
-        flag_modified(alert, "event")
+        if mw_id not in alert.maintenance_windows_trace:
+            alert.maintenance_windows_trace = alert.maintenance_windows_trace + [mw_id]
+        flag_modified(alert, "maintenance_windows_trace")
         session.add(alert)
         session.commit()
 

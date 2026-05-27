@@ -128,11 +128,43 @@ incident_field_configurations = [
         map_to="incident.affected_services",
         data_type=DataType.ARRAY,
     ),
+]
+
+_INFRA_COLUMNS = {"id", "tenant_id", "timestamp", "provider_type", "provider_id",
+                  "fingerprint", "alert_hash"}
+
+_SPECIAL_FIELDS = {
+    "severity": {"data_type": DataType.STRING},
+    "status": {"data_type": DataType.STRING},
+    "last_received": {"data_type": DataType.DATETIME},
+    "dismissed": {"data_type": DataType.BOOLEAN},
+    "firing_counter": {"data_type": DataType.INTEGER},
+    "unresolved_counter": {"data_type": DataType.INTEGER},
+}
+
+for col_item in Alert.__table__.columns:
+    if col_item.name in _INFRA_COLUMNS:
+        continue
+    
+    spec = _SPECIAL_FIELDS.get(col_item.name, {})
+    data_type = spec.get("data_type", DataType.STRING)
+    enum_values = spec.get("enum_values", None)
+    
+    incident_field_configurations.append(
+        FieldMappingConfiguration(
+            map_from_pattern=f"alert.{col_item.name}",
+            map_to=[f"alert.{col_item.name}"],
+            data_type=data_type,
+            enum_values=enum_values,
+        )
+    )
+
+incident_field_configurations.append(
     FieldMappingConfiguration(
         map_from_pattern="alert.*",
-        map_to=["JSON(alertenrichment.enrichments).*", "JSON(alert.event).*"],
-    ),
-]
+        map_to=["JSON(alertenrichment.enrichments).*"],
+    )
+)
 
 properties_metadata = PropertiesMetadata(incident_field_configurations)
 

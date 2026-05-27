@@ -1,10 +1,9 @@
-import asyncio
-import functools
 import logging
 
 from event_management.process_event_task import process_event
 
 from models.event_dto import EventDTO
+from models.action_type import ActionType
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -12,6 +11,68 @@ logger = logging.getLogger(__name__)
 class EventType(str, Enum):
     ALERT = "alert"
     INCIDENT = "incident"
+    ENRICH = "enrich"
+    BATCH_ENRICH = "batch_enrich"
+
+
+def _process_enrich_event(event_dto: EventDTO):
+    from core.db.db import enrich_entity
+
+    logger.info(
+        f"Processing enrich event",
+        extra={
+            "tenant_id": event_dto.tenant_id,
+            "fingerprint": event_dto.fingerprint,
+        "event": event_dto.event,
+        },
+    )
+    # Extract metadata AND cast action_type string back into an ActionType Enum
+    # so we don't crash with "'str' has no attribute 'value'" in enrich_entity.
+    action_type = ActionType(event_dto.event.pop("action_type"))
+    action_callee = event_dto.event.pop("action_callee", "unknown")
+    action_description = event_dto.event.pop("action_description", "")
+    audit_enabled = event_dto.event.pop("audit_enabled", False)
+    force = event_dto.event.pop("force", False)
+
+    enrich_entity(
+            event_dto.tenant_id,
+            event_dto.fingerprint,
+            event_dto.event,
+            action_type,
+            action_callee,
+            action_description,
+            audit_enabled=audit_enabled,
+            session=None,
+            force=force,
+        )
+
+def _process_batch_enrich_event(event_dto: EventDTO):
+    from core.db.db import batch_enrich
+
+    logger.info(
+        f"Processing batch enrich event",
+        extra={
+            "tenant_id": event_dto.tenant_id,
+            "fingerprint": event_dto.fingerprint,
+        },
+    )
+
+    action_type = ActionType(event_dto.event.pop("action_type"))
+    action_callee = event_dto.event.pop("action_callee", "unknown")
+    action_description = event_dto.event.pop("action_description", "")
+    audit_enabled = event_dto.event.pop("audit_enabled", False)
+
+    batch_enrich(
+            event_dto.tenant_id,
+            event_dto.fingerprint,
+            event_dto.event,
+            action_type,
+            action_callee,
+            action_description,
+            audit_enabled=audit_enabled,
+            session=None,
+        )
+
 
 
 def _process_incident_event(event_dto: EventDTO):
@@ -106,6 +167,14 @@ def _process_alert_event(event_dto: EventDTO):
     return resp
 
 
+FUNC_MAP = {
+    EventType.ALERT: _process_alert_event,
+    EventType.INCIDENT: _process_incident_event,
+    EventType.ENRICH: _process_enrich_event,
+    EventType.BATCH_ENRICH: _process_batch_enrich_event
+}
+
+
 def process_event_sync(event_dto: EventDTO):
     """
     Synchronous wrapper for processing events.
@@ -114,6 +183,7 @@ def process_event_sync(event_dto: EventDTO):
     logger.info(
         f"Processing event: {event_dto.trace_id}",
         extra={
+            "event_type": event_dto.event_type,
             "tenant_id": event_dto.tenant_id,
             "provider_type": event_dto.provider_type,
             "provider_id": event_dto.provider_id,
@@ -122,10 +192,8 @@ def process_event_sync(event_dto: EventDTO):
         },
     )
 
-    if event_dto.event_type == EventType.INCIDENT:
-        return _process_incident_event(event_dto)
-    elif event_dto.event_type == EventType.ALERT:
-        return _process_alert_event(event_dto)
+    if event_dto.event_type in FUNC_MAP:
+        return FUNC_MAP[event_dto.event_type](event_dto)
     else:
         raise logger.warning(f"Unknown event type: {event_dto.event_type}, ignoring event")
 

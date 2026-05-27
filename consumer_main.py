@@ -92,8 +92,8 @@ def main():
     
     # Get configuration
     messaging_type = config("MESSAGING_TYPE", default="KAFKA").upper()
-    metrics_port = int(config("PROMETHEUS_METRICS_PORT", default="8083"))
-    health_port = int(config("HEALTH_CHECK_PORT", default="8082"))
+    metrics_port = int(config("PROMETHEUS_METRICS_PORT", default="8094"))
+    health_port = int(config("HEALTH_CHECK_PORT", default="8092"))
     
     if messaging_type != "KAFKA":
         logger.error(f"This entrypoint only supports KAFKA messaging, got: {messaging_type}")

@@ -51,7 +51,7 @@ class KafkaEventConsumer(EventConsumer):
 
         # Parse bootstrap servers
         bootstrap_servers = config(
-            "KAFKA_BOOTSTRAP_SERVERS", default="localhost:9092"
+            "KAFKA_BOOTSTRAP_SERVERS", default="localhost:29092"
         )
         try:
             parsed = json.loads(bootstrap_servers)
@@ -237,6 +237,7 @@ class KafkaEventConsumer(EventConsumer):
                 fingerprint=payload.get("fingerprint"),
                 api_key_name=payload.get("api_key_name"),
                 provider_name=payload.get("provider_name"),
+                event_type=payload.get("event_type"),
             )
 
             # Process with retries and timing

@@ -2,8 +2,8 @@ import os
 import time
 from typing import Dict, Tuple
 
-# Get polling interval from env
-POLLING_INTERVAL = int(os.getenv("PUSHER_POLLING_INTERVAL", "15"))
+# Get notification interval from env (how often to send SSE notifications)
+SSE_NOTIFICATION_INTERVAL = int(os.getenv("SSE_NOTIFICATION_INTERVAL", "1"))
 
 
 class NotificationCache:
@@ -29,7 +29,7 @@ class NotificationCache:
             return True
 
         last_time = self.cache[cache_key]
-        if current_time - last_time >= POLLING_INTERVAL:
+        if current_time - last_time >= SSE_NOTIFICATION_INTERVAL:
             self.cache[cache_key] = current_time
             return True
 
