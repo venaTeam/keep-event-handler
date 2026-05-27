@@ -199,21 +199,10 @@ class Alert(SQLModel, table=True):
     status: str | None = Field(sa_column=Column(String(50), nullable=True))
     description: str | None = Field(sa_column=Column(TEXT, nullable=True))
 
-    # === Source 3: Keep Platform Fields (14) ===
-    last_received: datetime | None = Field(sa_column=Column(DateTime(timezone=True), nullable=True))
+    # === Source 3: Keep Platform Fields ===
     is_full_duplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
     is_partial_duplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
     duplicate_reason: str | None = Field(sa_column=Column(String(255), nullable=True))
-    note: str | None = Field(sa_column=Column(TEXT, nullable=True))
-    assignee: str | None = Field(sa_column=Column(String(255), nullable=True))
-    incident: str | None = Field(sa_column=Column(String(255), nullable=True))
-    dismiss_until: str | None = Field(sa_column=Column(String(255), nullable=True))
-    dismissed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
-    started_at: str | None = Field(sa_column=Column(String(255), nullable=True))
-    firing_counter: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
-    unresolved_counter: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
-    firing_start_time: str | None = Field(sa_column=Column(String(255), nullable=True))
-    firing_start_time_since_last_resolved: str | None = Field(sa_column=Column(String(255), nullable=True))
 
     fingerprint: str = Field(index=True)  # Add the fingerprint field with an index
 
@@ -221,22 +210,6 @@ class Alert(SQLModel, table=True):
     #            and it is used for deduplication.
     #            alert can be different but have the same fingerprint (e.g. different "firing" and "resolved" will have the same fingerprint but not the same alert_hash)
     alert_hash: str | None
-
-    # Define a one-to-one relationship to AlertEnrichment using alert_fingerprint
-    alert_enrichment: "AlertEnrichment" = Relationship(
-        sa_relationship_kwargs={
-            "primaryjoin": "and_(Alert.fingerprint == foreign(AlertEnrichment.alert_fingerprint), Alert.tenant_id == AlertEnrichment.tenant_id)",
-            "uselist": False,
-        }
-    )
-
-    alert_instance_enrichment: "AlertEnrichment" = Relationship(
-        sa_relationship_kwargs={
-            "primaryjoin": "and_(cast(Alert.id, String) == foreign(AlertEnrichment.alert_fingerprint), Alert.tenant_id == AlertEnrichment.tenant_id)",
-            "uselist": False,
-            "viewonly": True,
-        },
-    )
 
     _incidents: List["Incident"] = PrivateAttr(default_factory=list)
 
@@ -278,6 +251,40 @@ class LastAlert(SQLModel, table=True):
     first_timestamp: datetime = Field(nullable=False, index=True)
     alert_hash: str | None = Field(nullable=True, index=True)
 
+    # === Phase 2: user enrichment state (relocated from alertenrichment) ===
+    status: str | None = Field(default=None, sa_column=Column(String(50), nullable=True))
+    status_disposable: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
+    dismiss_mode: str | None = Field(default=None, sa_column=Column(String(20), nullable=True))
+    dismissed_until: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    assignee: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
+    note: str | None = Field(default=None, sa_column=Column(TEXT, nullable=True))
+    deleted: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
+    # === Phase 2: system tracking fields (relocated from alert) ===
+    last_received: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    firing_counter: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0")
+    )
+    unresolved_counter: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0")
+    )
+    started_at: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
+    firing_start_time: str | None = Field(
+        default=None, sa_column=Column(String(255), nullable=True)
+    )
+    firing_start_time_since_last_resolved: str | None = Field(
+        default=None, sa_column=Column(String(255), nullable=True)
+    )
+
     __table_args__ = (
         # Original indexes from MySQL
         Index("idx_lastalert_tenant_timestamp", "tenant_id", "first_timestamp"),
@@ -303,16 +310,6 @@ class AlertEnrichment(SQLModel, table=True):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     alert_fingerprint: str = Field(unique=True)
     enrichments: dict = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql")))
-
-    # @tb: we need to think what to do about this relationship.
-    alerts: list[Alert] = Relationship(
-        back_populates="alert_enrichment",
-        sa_relationship_kwargs={
-            "primaryjoin": "and_(Alert.fingerprint == AlertEnrichment.alert_fingerprint, Alert.tenant_id == AlertEnrichment.tenant_id)",
-            "foreign_keys": "[AlertEnrichment.alert_fingerprint, AlertEnrichment.tenant_id]",
-            "uselist": True,
-        },
-    )
 
     class Config:
         arbitrary_types_allowed = True
