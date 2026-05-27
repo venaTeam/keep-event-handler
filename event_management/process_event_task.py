@@ -28,8 +28,9 @@ from core.db.db import (
     enrich_alerts_with_incidents,
     get_alerts_by_fingerprint,
     get_all_presets_dtos,
-    get_enrichment_with_session, 
+    get_last_alert_by_fingerprint,
     get_last_alert_hashes_by_fingerprints,
+    last_alert_enrichments_dict,
     get_provider_by_name,
     get_session_sync,
     get_started_at_for_alerts,
@@ -285,36 +286,11 @@ def __save_to_db(
                 session.add(audit)
 
                 __validate_last_received(event)
-                enrichments_bl.enrich_entity(
-                    event.fingerprint,
-                    enrichments={"last_received": event.last_received},
-                    dispose_on_new_alert=True,
-                    action_type=ActionType.GENERIC_ENRICH,
-                    action_callee="system",
-                    action_description="Alert last_received enriched on deduplication",
-                )
-                try:
-                    if event.status == AlertStatus.RESOLVED.value:
-                        # Resolved alerts should clear "kept" enrichments
-                        # (e.g., acknowledged/suppressed status) to honor
-                        # the alert lifecycle even when the user chose
-                        # "keep on new alerts".
-                        enrichments_bl.make_enrichments_permanent(
-                            event.fingerprint,
-                            dispose_keys=["assignees", "status", "dismissed", "dismiss_until"],
-                        )
-                    else:
-                        enrichments_bl.dispose_enrichments(event.fingerprint)
-                except Exception:
-                    logger.exception(
-                        "Failed to dispose enrichments for deduplicated alert",
-                        extra={
-                            "tenant_id": tenant_id,
-                            "fingerprint": event.fingerprint,
-                        },
-                    )
 
-                # Update the existing alert record's last_received field
+                # Phase 2: deduplicated events don't create a new Alert row and
+                # don't call set_last_alert, so update the LastAlert tracking
+                # column (last_received) directly here. Status/dismiss clearing
+                # for re-fires happens in set_last_alert on real occurrences.
                 try:
                     logger.debug(
                         "Updating last_received for deduplicated alert",
@@ -324,32 +300,19 @@ def __save_to_db(
                             "last_received": event.last_received,
                         },
                     )
-                    # Query the most recent alert for this fingerprint using the existing session
-                    query = (
-                        select(Alert)
-                        .where(Alert.tenant_id == tenant_id)
-                        .where(Alert.fingerprint == event.fingerprint)
-                        .order_by(Alert.timestamp.desc())
-                        .limit(1)
+                    last_alert = get_last_alert_by_fingerprint(
+                        tenant_id, event.fingerprint, session=session, for_update=True
                     )
-                    existing_alert = session.exec(query).first()
-                    if existing_alert:
-                        # Update the last_received field
-                        existing_alert.last_received = event.last_received
-                        session.add(existing_alert)
+                    if last_alert:
+                        last_received = event.last_received
+                        if isinstance(last_received, str):
+                            last_received = dateutil.parser.isoparse(last_received)
+                        last_alert.last_received = last_received
+                        session.add(last_alert)
                         session.flush()
-                        logger.debug(
-                            "Updated last_received for deduplicated alert",
-                            extra={
-                                "tenant_id": tenant_id,
-                                "fingerprint": event.fingerprint,
-                                "alert_id": str(existing_alert.id),
-                                "last_received": event.last_received,
-                            },
-                        )
                     else:
                         logger.warning(
-                            "No existing alert found to update last_received",
+                            "No last alert found to update last_received",
                             extra={
                                 "tenant_id": tenant_id,
                                 "fingerprint": event.fingerprint,
@@ -456,119 +419,10 @@ def __save_to_db(
                     formatted_event, previous_alert
                 )
 
-            # Dispose enrichments that needs to be disposed
-            try:
-                if formatted_event.status == AlertStatus.RESOLVED.value:
-                    enrichments_bl.make_enrichments_permanent(
-                        formatted_event.fingerprint,
-                        dispose_keys=["assignees", "status", "dismissed", "dismiss_until"],
-                    )
-                else:
-                    enrichments_bl.dispose_enrichments(formatted_event.fingerprint)
-                    # Propagate permanent assignments to the new event
-                    try:
-                        current_enrichment = get_enrichment_with_session(
-                            session, tenant_id, formatted_event.fingerprint
-                        )
-                        if current_enrichment:
-                            assignees = current_enrichment.enrichments.get(
-                                "assignees", {}
-                            )
-                            if assignees:
-                                # Find the latest assignment
-                                sorted_timestamps = sorted(assignees.keys())
-                                latest_ts = sorted_timestamps[-1]
-                                latest_assignee = assignees[latest_ts]
-
-                                # If we have a valid assignee and it's not already assigned for this timestamp
-                                if (
-                                    latest_assignee
-                                    and formatted_event.last_received not in assignees
-                                ):
-                                    logger.info(
-                                        f"Propagating assignment for {formatted_event.fingerprint} to {latest_assignee}",
-                                        extra={
-                                            "tenant_id": tenant_id,
-                                            "fingerprint": formatted_event.fingerprint,
-                                            "assignee": latest_assignee,
-                                        },
-                                    )
-                                    enrichments_bl.enrich_entity(
-                                        fingerprint=formatted_event.fingerprint,
-                                        enrichments={
-                                            "assignees": {
-                                                formatted_event.last_received: latest_assignee
-                                            }
-                                        },
-                                        action_type=ActionType.GENERIC_ENRICH,
-                                        action_callee="system",
-                                        action_description="Propagating assignment to new event",
-                                        dispose_on_new_alert=False,
-                                    )
-                    except Exception:
-                        logger.exception(
-                            "Failed to propagate assignment",
-                            extra={
-                                "tenant_id": tenant_id,
-                                "fingerprint": formatted_event.fingerprint,
-                            },
-                        )
-                    # Propagate permanent assignments to the new event
-                    try:
-                        current_enrichment = get_enrichment_with_session(
-                            session, tenant_id, formatted_event.fingerprint
-                        )
-                        if current_enrichment:
-                            assignees = current_enrichment.enrichments.get(
-                                "assignees", {}
-                            )
-                            if assignees:
-                                # Find the latest assignment
-                                sorted_timestamps = sorted(assignees.keys())
-                                latest_ts = sorted_timestamps[-1]
-                                latest_assignee = assignees[latest_ts]
-
-                                # If we have a valid assignee and it's not already assigned for this timestamp
-                                if (
-                                    latest_assignee
-                                    and formatted_event.last_received not in assignees
-                                ):
-                                    logger.info(
-                                        f"Propagating assignment for {formatted_event.fingerprint} to {latest_assignee}",
-                                        extra={
-                                            "tenant_id": tenant_id,
-                                            "fingerprint": formatted_event.fingerprint,
-                                            "assignee": latest_assignee,
-                                        },
-                                    )
-                                    enrichments_bl.enrich_entity(
-                                        fingerprint=formatted_event.fingerprint,
-                                        enrichments={
-                                            "assignees": {
-                                                formatted_event.last_received: latest_assignee
-                                            }
-                                        },
-                                        action_type=ActionType.GENERIC_ENRICH,
-                                        action_callee="system",
-                                        action_description="Propagating assignment to new event",
-                                        dispose_on_new_alert=False,
-                                    )
-                    except Exception:
-                        logger.exception(
-                            "Failed to propagate assignment",
-                            extra={
-                                "tenant_id": tenant_id,
-                                "fingerprint": formatted_event.fingerprint,
-                            },
-                        )
-            except Exception:
-                logger.exception(
-                    "Failed to dispose enrichments",
-                    extra={
-                        "tenant_id": tenant_id,
-                        "fingerprint": formatted_event.fingerprint,
-                    },
-                )
+            # Phase 2: status/dismiss clearing on re-fire/resolve now happens in
+            # set_last_alert (typed columns). assignee persists automatically on
+            # lastalert.assignee, so the old dispose/make-permanent +
+            # assignees-timestamp-dict propagation logic is removed.
 
             # Post format enrichment
             try:
@@ -599,16 +453,18 @@ def __save_to_db(
             infra_cols = {"id", "tenant_id", "timestamp", "provider_type", "provider_id", "fingerprint", "alert_hash"}
             
             # Extract native columns defined in Alert model
+            # Phase 2: the relocated tracking + user-state fields (last_received,
+            # note, assignee, incident, dismiss_until, dismissed, started_at,
+            # firing_counter, unresolved_counter, firing_start_time,
+            # firing_start_time_since_last_resolved) no longer live on Alert —
+            # they go to LastAlert via set_last_alert(tracking=...).
             native_cols = {
                 "application", "object", "node_name", "severity", "message", "operator",
                 "time_created", "network", "timezone", "custom_key", "expiry_in_minutes",
                 "source", "service", "key_field", "name", "status", "description",
-                "last_received", "is_full_duplicate", "is_partial_duplicate", "duplicate_reason",
-                "note", "assignee", "incident", "dismiss_until", "dismissed", 
-                "started_at", "firing_counter", "unresolved_counter",
-                "firing_start_time", "firing_start_time_since_last_resolved"
+                "is_full_duplicate", "is_partial_duplicate", "duplicate_reason",
             }
-            
+
             alert_args = {
                 "tenant_id": tenant_id,
                 "provider_type": (
@@ -618,19 +474,34 @@ def __save_to_db(
                 "fingerprint": formatted_event.fingerprint,
                 "alert_hash": formatted_event.alert_hash,
             }
-            
+
             # Map native fields from AlertDto
             for key, value in event_dict.items():
                 if key in native_cols:
                     alert_args[key] = value
                 # Non-native fields are dropped (no extra_data)
-            
+
             alert_args = sanitize_alert(alert_args)
-            # last_received column is TIMESTAMPTZ — bind as datetime, not ISO string
-            if isinstance(alert_args.get("last_received"), str):
-                alert_args["last_received"] = dateutil.parser.isoparse(
-                    alert_args["last_received"]
+
+            # Phase 2: build tracking dict for LastAlert (relocated from Alert).
+            last_received_val = formatted_event.last_received
+            if isinstance(last_received_val, str):
+                last_received_val = dateutil.parser.isoparse(last_received_val)
+            tracking = {
+                "last_received": last_received_val,
+                "firing_counter": getattr(formatted_event, "firing_counter", 0) or 0,
+                "unresolved_counter": getattr(
+                    formatted_event, "unresolved_counter", 0
                 )
+                or 0,
+                "started_at": getattr(formatted_event, "started_at", None),
+                "firing_start_time": getattr(
+                    formatted_event, "firing_start_time", None
+                ),
+                "firing_start_time_since_last_resolved": getattr(
+                    formatted_event, "firing_start_time_since_last_resolved", None
+                ),
+            }
             if timestamp_forced is not None:
                 alert_args["timestamp"] = timestamp_forced
 
@@ -784,7 +655,7 @@ def __save_to_db(
                         else None,
                     },
                 )
-                set_last_alert(tenant_id, alert, session=session)
+                set_last_alert(tenant_id, alert, session=session, tracking=tracking)
                 logger.debug(
                     "Last alert set",
                     extra={
@@ -829,12 +700,14 @@ def __save_to_db(
                 },
             )
             try:
-                alert_enrichment = get_enrichment_with_session(
-                    session=session,
-                    tenant_id=tenant_id,
-                    fingerprint=formatted_event.fingerprint,
+                # Phase 2: enrichment state is on LastAlert typed columns.
+                last_alert = get_last_alert_by_fingerprint(
+                    tenant_id, formatted_event.fingerprint, session=session
                 )
-                if alert_enrichment:
+                enrichments = (
+                    last_alert_enrichments_dict(last_alert) if last_alert else {}
+                )
+                if enrichments:
                     logger.debug(
                         "Enrichment found, applying to alert",
                         extra={
@@ -843,14 +716,11 @@ def __save_to_db(
                             "fingerprint": formatted_event.fingerprint
                             if hasattr(formatted_event, "fingerprint")
                             else None,
-                            "enrichment_keys": list(alert_enrichment.enrichments.keys())
-                            if hasattr(alert_enrichment, "enrichments")
-                            else None,
+                            "enrichment_keys": list(enrichments.keys()),
                         },
                     )
-                    for enrichment in alert_enrichment.enrichments:
+                    for enrichment, value in enrichments.items():
                         # set the enrichment
-                        value = alert_enrichment.enrichments[enrichment]
                         if isinstance(value, str):
                             value = value.strip()
                         setattr(formatted_event, enrichment, value)
