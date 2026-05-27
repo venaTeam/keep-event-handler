@@ -659,6 +659,7 @@ def test_topology_mapping_rule_enrichment(mock_session, mock_alert_dto):
                 session=mock_session,
                 force=False,
                 audit_enabled=True,
+                strict=False,
             )
 
 
