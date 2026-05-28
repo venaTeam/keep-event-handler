@@ -600,11 +600,12 @@ def __save_to_db(
             
             # Extract native columns defined in Alert model
             native_cols = {
-                "application", "object", "node_name", "severity", "message", "operator",
+                "application", "object", "site", "impact", "runbook_url", "alert_rule_url",
+                "node_name", "severity", "operator",
                 "time_created", "network", "timezone", "custom_key", "expiry_in_minutes",
                 "source", "service", "key_field", "name", "status", "description",
                 "last_received", "is_full_duplicate", "is_partial_duplicate", "duplicate_reason",
-                "note", "assignee", "incident", "dismiss_until", "dismissed", 
+                "note", "assignee", "incident", "dismiss_until", "dismissed",
                 "started_at", "firing_counter", "unresolved_counter",
                 "firing_start_time", "firing_start_time_since_last_resolved"
             }

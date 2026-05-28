@@ -183,13 +183,16 @@ class Alert(SQLModel, table=True):
     object: str | None = Field(sa_column=Column(String(200), nullable=True))
     node_name: str | None = Field(sa_column=Column(String(200), nullable=True))
     severity: str | None = Field(sa_column=Column(String(50), nullable=True))
-    message: str | None = Field(sa_column=Column(String(800), nullable=True))
     operator: str | None = Field(sa_column=Column(String(100), nullable=True))
     time_created: str | None = Field(sa_column=Column(String(50), nullable=True))
     network: str | None = Field(default="nh", sa_column=Column(String(50), nullable=True, default="nh"))
     timezone: str | None = Field(default="Asia/Jerusalem", sa_column=Column(String(50), nullable=True, default="Asia/Jerusalem"))
     custom_key: str | None = Field(sa_column=Column(String(255), nullable=True))
     expiry_in_minutes: int | None = Field(sa_column=Column(Integer, nullable=True))
+    site: str | None = Field(sa_column=Column(String(100), nullable=True))
+    impact: str | None = Field(sa_column=Column(TEXT, nullable=True))
+    runbook_url: str | None = Field(sa_column=Column(TEXT, nullable=True))
+    alert_rule_url: str | None = Field(sa_column=Column(TEXT, nullable=True))
 
     # === Source 2: Appchi System Fields (5) ===
     source: str | None = Field(sa_column=Column(String(255), nullable=True))
@@ -221,6 +224,11 @@ class Alert(SQLModel, table=True):
     #            and it is used for deduplication.
     #            alert can be different but have the same fingerprint (e.g. different "firing" and "resolved" will have the same fingerprint but not the same alert_hash)
     alert_hash: str | None
+
+    @property
+    def component(self) -> str | None:
+        """Read-only alias for the legacy `object` column (writes go through `object`)."""
+        return self.object
 
     # Define a one-to-one relationship to AlertEnrichment using alert_fingerprint
     alert_enrichment: "AlertEnrichment" = Relationship(
