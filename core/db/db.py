@@ -1283,6 +1283,9 @@ def set_last_alert(
                 )
                 break
         else:
+            # REVIEW-TODO: defensive belt — currently unreachable because every
+            # exception branch above re-raises on `attempt == max_retries`. Kept
+            # as a guard against future refactors silently dropping the re-raise.
             raise RuntimeError(
                 f"Failed to set last alert for `{fingerprint}` after {max_retries} attempts"
             )
