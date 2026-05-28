@@ -11,6 +11,7 @@ the in-memory sqlite db_session fixture (no elastic / arq / API gateway needed):
 - unknown enrichment key rejected (strict) / discarded (non-strict)
 """
 
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -21,6 +22,7 @@ from core.db.db import (
     enrich_entity,
     get_enrichment_with_session,
     get_last_alert_by_fingerprint,
+    last_alert_enrichments_dict,
     normalize_enrichments,
     set_last_alert,
 )
@@ -94,6 +96,29 @@ def test_unknown_key_discarded_non_strict():
         {"status": "acknowledged", "unknown_field": "x"}, strict=False
     )
     assert out == {"status": "acknowledged"}
+
+
+# --------------------------------------------------------------------------- #
+# Read-path coercion: dismissed_until typed DateTime -> canonical wire string
+# --------------------------------------------------------------------------- #
+def test_last_alert_enrichments_dict_dismissed_until_is_wire_string():
+    """`last_alert_enrichments_dict` must coerce the typed DateTime column to the
+    legacy ISO "...%f.Z" wire string so JSON consumers (Elastic, SSE notify,
+    Kafka, AlertDto.validate_dismissed) all see one canonical, serializable
+    format. A raw datetime would break json.dumps and the strptime validator."""
+    la = LastAlert()
+    la.status = "suppressed"
+    la.dismiss_mode = "dismiss_until"
+    la.dismissed_until = datetime(2026, 6, 1, 12, 30, 45, 123456, tzinfo=timezone.utc)
+
+    out = last_alert_enrichments_dict(la)
+    val = out["dismissed_until"]
+
+    assert isinstance(val, str)
+    assert "T" in val
+    assert val.endswith("Z")
+    assert "+" not in val
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$", val)
 
 
 # --------------------------------------------------------------------------- #

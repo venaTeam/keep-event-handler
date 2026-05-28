@@ -24,7 +24,8 @@ from core.db.db import (
     get_mapping_rule_by_id,
     get_session_sync,
     get_topology_data_by_dynamic_matcher,
-    is_all_alerts_resolved
+    is_all_alerts_resolved,
+    normalize_enrichments,
 )
 from core.db.db import enrich_entity as enrich_alert_db
 from core.elastic import ElasticClient
@@ -722,6 +723,13 @@ class EnrichmentsBl:
         enrichments = self._apply_dispose_on_new_alert(
             enrichments, dispose_on_new_alert
         )
+
+        if entity_type != "incident":
+            # Phase 2: normalize ONCE so the dict pushed to Elasticsearch carries the same
+            # typed keys the DB layer writes (raw legacy keys like `dismissed` must not reach ES).
+            # event-handler enrich_entity has no `strict` param; the DB write below uses
+            # strict=False (system writes discard unknown keys), so normalize matches it.
+            enrichments = normalize_enrichments(enrichments, strict=False)
 
         enrich_alert_db(
             self.tenant_id,

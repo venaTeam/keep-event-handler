@@ -438,7 +438,13 @@ def last_alert_enrichments_dict(last_alert: "LastAlert") -> dict:
         if val is not None:
             data[col_name] = val
     if last_alert.dismissed_until is not None:
-        data["dismissed_until"] = last_alert.dismissed_until
+        ts = last_alert.dismissed_until
+        if isinstance(ts, datetime):
+            # Match the legacy "...%f.Z" wire format AlertDto.validate_dismissed parses
+            # (strptime "%Y-%m-%dT%H:%M:%S.%fZ"); plain .isoformat() yields "...+00:00"
+            # which the validator rejects and json.dumps cannot serialize a raw datetime.
+            ts = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        data["dismissed_until"] = ts
     if last_alert.deleted:
         data["deleted"] = True
     # derived compat field for existing consumers

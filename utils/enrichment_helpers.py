@@ -174,7 +174,13 @@ def _last_alert_to_dto_payload(last_alert) -> dict:
     if last_alert.dismiss_mode is not None:
         payload["dismiss_mode"] = last_alert.dismiss_mode
     if last_alert.dismissed_until is not None:
-        payload["dismissed_until"] = last_alert.dismissed_until
+        ts = last_alert.dismissed_until
+        if isinstance(ts, datetime):
+            # Match the legacy "...%f.Z" wire format AlertDto.validate_dismissed parses
+            # (strptime "%Y-%m-%dT%H:%M:%S.%fZ"); plain .isoformat() yields "...+00:00"
+            # which the validator rejects and json.dumps cannot serialize a raw datetime.
+            ts = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        payload["dismissed_until"] = ts
     payload["deleted"] = bool(last_alert.deleted)
     # relocated tracking fields
     if last_alert.last_received is not None:
