@@ -340,6 +340,18 @@ LASTALERT_ENRICHMENT_COLUMNS = {
 # Legacy keys accepted at the write boundary and translated below.
 _LEGACY_ENRICHMENT_KEYS = {"dismissed", "dismiss_until"}
 
+# System tracking columns owned by set_last_alert (relocated from alert).
+# Used as a strict allow-list for the set_last_alert(tracking=...) param to
+# prevent accidental clobber of user-enrichment columns via the tracking path.
+LASTALERT_TRACKING_COLUMNS = {
+    "last_received",
+    "firing_counter",
+    "unresolved_counter",
+    "started_at",
+    "firing_start_time",
+    "firing_start_time_since_last_resolved",
+}
+
 
 def normalize_enrichments(enrichments: dict, strict: bool = True) -> dict:
     """Translate legacy enrichment keys to the typed-column model and handle
@@ -1138,9 +1150,22 @@ def set_last_alert(
                     last_alert.alert_id = alert.id
                     last_alert.alert_hash = alert.alert_hash
 
-                    # Phase 2: write relocated tracking columns when provided
+                    # Phase 2: write relocated tracking columns when provided.
+                    # Strict allow-list — never let `tracking` clobber user-
+                    # enrichment columns (status/assignee/note/dismiss_*) which
+                    # the enrich path owns.
                     if tracking is not None:
                         for _col, _val in tracking.items():
+                            if _col not in LASTALERT_TRACKING_COLUMNS:
+                                logger.warning(
+                                    "phase2.set_last_alert.ignored_tracking_key",
+                                    extra={
+                                        "tenant_id": tenant_id,
+                                        "fingerprint": fingerprint,
+                                        "key": _col,
+                                    },
+                                )
+                                continue
                             setattr(last_alert, _col, _val)
 
                     # Phase 2: status/dismiss clearing on this occurrence's
@@ -1171,9 +1196,20 @@ def set_last_alert(
                         alert_id=alert.id,
                         alert_hash=alert.alert_hash,
                     )
-                    # Phase 2: write relocated tracking columns when provided
+                    # Phase 2: write relocated tracking columns when provided.
+                    # Strict allow-list — see comment above.
                     if tracking is not None:
                         for _col, _val in tracking.items():
+                            if _col not in LASTALERT_TRACKING_COLUMNS:
+                                logger.warning(
+                                    "phase2.set_last_alert.ignored_tracking_key",
+                                    extra={
+                                        "tenant_id": tenant_id,
+                                        "fingerprint": fingerprint,
+                                        "key": _col,
+                                    },
+                                )
+                                continue
                             setattr(new_last_alert, _col, _val)
                     session.add(new_last_alert)
 
@@ -1482,11 +1518,9 @@ def _batch_enrich_incident_alertenrichment(
 
     session.commit()
 
-    return session.exec(
-        select(AlertEnrichment)
-        .where(AlertEnrichment.tenant_id == tenant_id)
-        .where(AlertEnrichment.alert_fingerprint.in_(fingerprints))
-    ).all()
+    # No callers consume the return value; the legacy implementation re-queried
+    # all rows here but the result was always discarded. Drop the round-trip.
+    return None
 
 
 def batch_enrich(

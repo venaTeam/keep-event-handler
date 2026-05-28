@@ -319,6 +319,19 @@ def __save_to_db(
                             },
                         )
                 except Exception as e:
+                    # Rollback so a deadlock / integrity error on this single
+                    # deduplicated event doesn't poison the session for the
+                    # rest of the batch (we already swallow the error).
+                    try:
+                        session.rollback()
+                    except Exception:
+                        logger.exception(
+                            "Failed to rollback session after dedup last_received update",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "fingerprint": event.fingerprint,
+                            },
+                        )
                     logger.exception(
                         "Failed to update last_received for deduplicated alert",
                         extra={

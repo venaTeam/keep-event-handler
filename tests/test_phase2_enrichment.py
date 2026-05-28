@@ -280,6 +280,48 @@ def test_tracking_columns_written(db_session):
     assert la.last_received is not None
 
 
+def test_tracking_dict_cannot_clobber_user_enrichment_columns(db_session):
+    """`set_last_alert(tracking=...)` must never write user-enrichment columns
+    (status/assignee/note/dismiss_*). Those belong to the enrich path."""
+    # Seed lastalert + user enrichment
+    _insert_alert_and_lastalert(db_session, "fp-guard", AlertStatus.FIRING.value)
+    enrich_entity(
+        SINGLE_TENANT_UUID, "fp-guard",
+        {"status": "acknowledged", "assignee": "alice", "note": "user note"},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="alice",
+        action_description="t", session=db_session,
+    )
+
+    # Re-fire: tracking attempts to clobber user-enrichment columns
+    refire = _make_alert("fp-guard", AlertStatus.FIRING.value,
+                         ts=datetime.now(tz=timezone.utc))
+    db_session.add(refire)
+    db_session.commit()
+    set_last_alert(
+        SINGLE_TENANT_UUID,
+        refire,
+        session=db_session,
+        tracking={
+            "last_received": datetime.now(tz=timezone.utc),
+            "firing_counter": 7,
+            # Hostile keys: must be ignored.
+            "status": "resolved",
+            "assignee": "evil",
+            "note": "wiped",
+            "dismiss_mode": "permanent",
+        },
+    )
+
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, "fp-guard", session=db_session)
+    # user-enrichment columns untouched
+    assert la.status == "acknowledged"
+    assert la.assignee == "alice"
+    assert la.note == "user note"
+    assert la.dismiss_mode is None
+    # legitimate tracking columns updated
+    assert la.firing_counter == 7
+
+
 # --------------------------------------------------------------------------- #
 # Incident enrichment stays on AlertEnrichment (EH-3b) — preserved until Phase 3
 # --------------------------------------------------------------------------- #
