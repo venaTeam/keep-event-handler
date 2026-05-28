@@ -336,6 +336,9 @@ LASTALERT_ENRICHMENT_COLUMNS = {
     "assignee",
     "note",
     "deleted",
+    "ticket_type",
+    "ticket_url",
+    "ticket_provider_id",
 }
 # Legacy keys accepted at the write boundary and translated below.
 _LEGACY_ENRICHMENT_KEYS = {"dismissed", "dismiss_until"}
@@ -385,7 +388,10 @@ def normalize_enrichments(enrichments: dict, strict: bool = True) -> dict:
             else:
                 normalized.setdefault("dismiss_mode", "permanent")
         else:
-            normalized["status"] = None
+            # Undismiss: clear dismiss state; revert status to provider value
+            # UNLESS the caller supplied an explicit status (matches the
+            # equivalent fix in api-gateway + workflows for change-status flows).
+            normalized.setdefault("status", None)
             normalized["dismiss_mode"] = None
             normalized["dismissed_until"] = None
     elif "dismiss_until" in normalized:
@@ -419,7 +425,15 @@ def last_alert_enrichments_dict(last_alert: "LastAlert") -> dict:
     compat field.
     """
     data: dict = {}
-    for col_name in ("status", "assignee", "note", "dismiss_mode"):
+    for col_name in (
+        "status",
+        "assignee",
+        "note",
+        "dismiss_mode",
+        "ticket_type",
+        "ticket_url",
+        "ticket_provider_id",
+    ):
         val = getattr(last_alert, col_name, None)
         if val is not None:
             data[col_name] = val

@@ -83,12 +83,16 @@ def test_dismiss_mode_forwarded_directly():
 
 
 def test_unknown_key_rejected_strict():
+    # `unknown_field` is intentionally NOT in LASTALERT_ENRICHMENT_COLUMNS.
+    # (ticket_url is now allow-listed as a typed column; use a still-unknown key.)
     with pytest.raises(ValueError):
-        normalize_enrichments({"ticket_url": "https://x"})
+        normalize_enrichments({"unknown_field": "x"})
 
 
 def test_unknown_key_discarded_non_strict():
-    out = normalize_enrichments({"status": "acknowledged", "ticket_url": "x"}, strict=False)
+    out = normalize_enrichments(
+        {"status": "acknowledged", "unknown_field": "x"}, strict=False
+    )
     assert out == {"status": "acknowledged"}
 
 

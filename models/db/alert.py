@@ -267,6 +267,12 @@ class LastAlert(SQLModel, table=True):
         default=False,
         sa_column=Column(Boolean, nullable=False, server_default="false"),
     )
+
+    # === Phase 2: ticket linkage (assign-ticket modal) ===
+    ticket_type: str | None = Field(default=None, sa_column=Column(String(50), nullable=True))
+    ticket_url: str | None = Field(default=None, sa_column=Column(String(500), nullable=True))
+    ticket_provider_id: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
+
     # === Phase 2: system tracking fields (relocated from alert) ===
     last_received: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
