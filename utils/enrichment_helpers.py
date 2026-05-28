@@ -215,20 +215,23 @@ def convert_db_alerts_to_dto_alerts(
     from sqlmodel import select
 
     with existed_or_new_session(session) as session:
-        # Batch-fetch LastAlert rows for all (tenant_id, fingerprint) pairs.
-        keys = set()
+        # Batch-fetch LastAlert rows grouped by tenant_id so the WHERE clause
+        # is the natural (tenant_id, fingerprint IN ...) prefix-index path
+        # instead of a cartesian (tenant_id IN ..., fingerprint IN ...) that
+        # would also return cross-tenant rows the caller has to discard.
+        fps_by_tenant: dict[str, set[str]] = {}
         for _object in alerts:
             alert = _object if isinstance(_object, Alert) else _object[0]
-            keys.add((alert.tenant_id, alert.fingerprint))
+            fps_by_tenant.setdefault(alert.tenant_id, set()).add(alert.fingerprint)
 
         last_alerts_by_key = {}
-        if keys:
-            fingerprints = {fp for (_, fp) in keys}
-            tenant_ids = {tid for (tid, _) in keys}
+        for tid, fps in fps_by_tenant.items():
+            if not fps:
+                continue
             rows = session.exec(
                 select(LastAlert)
-                .where(LastAlert.tenant_id.in_(tenant_ids))
-                .where(LastAlert.fingerprint.in_(fingerprints))
+                .where(LastAlert.tenant_id == tid)
+                .where(LastAlert.fingerprint.in_(fps))
             ).all()
             for la in rows:
                 last_alerts_by_key[(la.tenant_id, la.fingerprint)] = la
