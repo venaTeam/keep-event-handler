@@ -195,7 +195,10 @@ class Alert(SQLModel, table=True):
     alert_rule_url: str | None = Field(sa_column=Column(TEXT, nullable=True))
 
     # === Source 2: Appchi System Fields (5) ===
-    source: str | None = Field(sa_column=Column(String(255), nullable=True))
+    source: list[str] | None = Field(
+        sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql"), nullable=True),
+        default_factory=list,
+    )
     service: str | None = Field(sa_column=Column(String(255), nullable=True))
     key_field: str | None = Field(sa_column=Column(String(255), nullable=True))
     name: str | None = Field(sa_column=Column(String(255), nullable=True))
