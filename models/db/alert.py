@@ -275,20 +275,20 @@ class LastAlert(SQLModel, table=True):
 
     # === Phase 2: system tracking fields (relocated from alert) ===
     last_received: datetime | None = Field(
-        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True, info={"tracking": True})
     )
     firing_counter: int = Field(
-        default=0, sa_column=Column(Integer, nullable=False, server_default="0")
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0", info={"tracking": True})
     )
     unresolved_counter: int = Field(
-        default=0, sa_column=Column(Integer, nullable=False, server_default="0")
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0", info={"tracking": True})
     )
-    started_at: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
+    started_at: str | None = Field(default=None, sa_column=Column(String(255), nullable=True, info={"tracking": True}))
     firing_start_time: str | None = Field(
-        default=None, sa_column=Column(String(255), nullable=True)
+        default=None, sa_column=Column(String(255), nullable=True, info={"tracking": True})
     )
     firing_start_time_since_last_resolved: str | None = Field(
-        default=None, sa_column=Column(String(255), nullable=True)
+        default=None, sa_column=Column(String(255), nullable=True, info={"tracking": True})
     )
 
     __table_args__ = (

@@ -19,6 +19,7 @@ import pytest
 
 from core.db.db import (
     LASTALERT_ENRICHMENT_COLUMNS,
+    LASTALERT_TRACKING_COLUMNS,
     batch_enrich,
     enrich_entity,
     get_enrichment_with_session,
@@ -62,6 +63,13 @@ def test_enrichment_columns_match_model():
     assert LASTALERT_ENRICHMENT_COLUMNS == {
         "status", "status_disposable", "dismiss_mode", "dismissed_until", "assignee",
         "note", "deleted", "ticket_type", "ticket_url", "ticket_provider_id",
+    }
+
+
+def test_tracking_columns_match_model():
+    assert LASTALERT_TRACKING_COLUMNS == {
+        "last_received", "firing_counter", "unresolved_counter",
+        "started_at", "firing_start_time", "firing_start_time_since_last_resolved",
     }
 
 
