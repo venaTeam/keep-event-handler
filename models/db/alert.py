@@ -252,26 +252,26 @@ class LastAlert(SQLModel, table=True):
     alert_hash: str | None = Field(nullable=True, index=True)
 
     # === Phase 2: user enrichment state (relocated from alertenrichment) ===
-    status: str | None = Field(default=None, sa_column=Column(String(50), nullable=True))
+    status: str | None = Field(default=None, sa_column=Column(String(50), nullable=True, info={"enrichable": True}))
     status_disposable: bool = Field(
         default=False,
-        sa_column=Column(Boolean, nullable=False, server_default="false"),
+        sa_column=Column(Boolean, nullable=False, server_default="false", info={"enrichable": True}),
     )
-    dismiss_mode: str | None = Field(default=None, sa_column=Column(String(20), nullable=True))
+    dismiss_mode: str | None = Field(default=None, sa_column=Column(String(20), nullable=True, info={"enrichable": True}))
     dismissed_until: datetime | None = Field(
-        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True, info={"enrichable": True})
     )
-    assignee: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
-    note: str | None = Field(default=None, sa_column=Column(TEXT, nullable=True))
+    assignee: str | None = Field(default=None, sa_column=Column(String(255), nullable=True, info={"enrichable": True}))
+    note: str | None = Field(default=None, sa_column=Column(TEXT, nullable=True, info={"enrichable": True}))
     deleted: bool = Field(
         default=False,
-        sa_column=Column(Boolean, nullable=False, server_default="false"),
+        sa_column=Column(Boolean, nullable=False, server_default="false", info={"enrichable": True}),
     )
 
     # === Phase 2: ticket linkage (assign-ticket modal) ===
-    ticket_type: str | None = Field(default=None, sa_column=Column(String(50), nullable=True))
-    ticket_url: str | None = Field(default=None, sa_column=Column(String(500), nullable=True))
-    ticket_provider_id: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
+    ticket_type: str | None = Field(default=None, sa_column=Column(String(50), nullable=True, info={"enrichable": True}))
+    ticket_url: str | None = Field(default=None, sa_column=Column(String(500), nullable=True, info={"enrichable": True}))
+    ticket_provider_id: str | None = Field(default=None, sa_column=Column(String(255), nullable=True, info={"enrichable": True}))
 
     # === Phase 2: system tracking fields (relocated from alert) ===
     last_received: datetime | None = Field(

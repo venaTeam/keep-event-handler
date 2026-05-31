@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import pytest
 
 from core.db.db import (
+    LASTALERT_ENRICHMENT_COLUMNS,
     batch_enrich,
     enrich_entity,
     get_enrichment_with_session,
@@ -52,6 +53,16 @@ def _insert_alert_and_lastalert(db_session, fingerprint, status, ts=None, tracki
     db_session.commit()
     set_last_alert(SINGLE_TENANT_UUID, alert, session=db_session, tracking=tracking)
     return alert
+
+
+# --------------------------------------------------------------------------- #
+# Single-source-of-truth contract guard
+# --------------------------------------------------------------------------- #
+def test_enrichment_columns_match_model():
+    assert LASTALERT_ENRICHMENT_COLUMNS == {
+        "status", "status_disposable", "dismiss_mode", "dismissed_until", "assignee",
+        "note", "deleted", "ticket_type", "ticket_url", "ticket_provider_id",
+    }
 
 
 # --------------------------------------------------------------------------- #

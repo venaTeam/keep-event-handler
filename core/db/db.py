@@ -327,18 +327,13 @@ def get_session_sync() -> Session:
 
 
 # === Phase 2: typed user-enrichment columns on LastAlert ===
-# The only enrichment keys that map to a typed LastAlert column.
+# Phase 2: derived from the LastAlert model (single source of truth) — columns tagged
+# info={"enrichable": True} are the user-writable enrichment columns. Keeping this in sync
+# with the model is automatic; do not hand-maintain a literal list.
 LASTALERT_ENRICHMENT_COLUMNS = {
-    "status",
-    "status_disposable",
-    "dismiss_mode",
-    "dismissed_until",
-    "assignee",
-    "note",
-    "deleted",
-    "ticket_type",
-    "ticket_url",
-    "ticket_provider_id",
+    column.name
+    for column in LastAlert.__table__.columns
+    if column.info.get("enrichable")
 }
 # Legacy keys accepted at the write boundary and translated below.
 _LEGACY_ENRICHMENT_KEYS = {"dismissed", "dismiss_until"}
