@@ -613,7 +613,9 @@ def __save_to_db(
             alert_args = {
                 "tenant_id": tenant_id,
                 "provider_type": (
-                    provider_type if provider_type else formatted_event.source[0]
+                    provider_type
+                    or formatted_event.provider_type
+                    or formatted_event.source[0]
                 ),
                 "provider_id": provider_id,
                 "fingerprint": formatted_event.fingerprint,
