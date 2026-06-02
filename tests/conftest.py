@@ -79,14 +79,13 @@ def mock_providers_factory():
                     duplicate_reason=None,
                     service=event.get("service", "test_service"),
                     source=[provider_type],
-                    message=event.get("message", ""),
                     description=event.get("description", ""),
                     severity=event.get("severity", "info"),
                     pushed=True,
                     event_id=event.get("event_id", "test_id"),
                     fingerprint=event.get("fingerprint", "test_fingerprint"),
                     url=event.get("url", ""),
-                    **{k: v for k, v in event.items() if k not in ["id", "name", "status", "last_received", "service", "source", "message", "description", "severity", "fingerprint", "url"]}
+                    **{k: v for k, v in event.items() if k not in ["id", "name", "status", "last_received", "service", "source", "description", "severity", "fingerprint", "url"]}
                 )
                 
             @classmethod

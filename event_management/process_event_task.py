@@ -472,7 +472,8 @@ def __save_to_db(
             # firing_start_time_since_last_resolved) no longer live on Alert —
             # they go to LastAlert via set_last_alert(tracking=...).
             native_cols = {
-                "application", "object", "node_name", "severity", "message", "operator",
+                "application", "object", "site", "impact", "runbook_url", "alert_rule_url",
+                "node_name", "severity", "operator",
                 "time_created", "network", "timezone", "custom_key", "expiry_in_minutes",
                 "source", "service", "key_field", "name", "status", "description",
                 "is_full_duplicate", "is_partial_duplicate", "duplicate_reason",
@@ -481,7 +482,9 @@ def __save_to_db(
             alert_args = {
                 "tenant_id": tenant_id,
                 "provider_type": (
-                    provider_type if provider_type else formatted_event.source[0]
+                    provider_type
+                    or formatted_event.provider_type
+                    or formatted_event.source[0]
                 ),
                 "provider_id": provider_id,
                 "fingerprint": formatted_event.fingerprint,

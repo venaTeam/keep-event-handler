@@ -145,7 +145,11 @@ class AlertDto(BaseModel):
     custom_key: str | None = None
     expiry_in_minutes: int | None = None
     key_field: str | None = None
-    message: str | None = None
+    component: str | None = None
+    site: str | None = None
+    impact: str | None = None
+    runbook_url: str | None = None
+    alert_rule_url: str | None = None
     description: str | None = None
     fingerprint: str | None = (
         None  # The fingerprint of the alert (used for alert de-duplication)
@@ -299,6 +303,17 @@ class AlertDto(BaseModel):
         if not values.get("id"):
             values["id"] = str(uuid.uuid4())
 
+        # Component <-> Object sync (mutually exclusive in payload per spec)
+        component = values.get("component")
+        obj = values.get("object")
+        if component is not None and obj is None:
+            values["object"] = component
+        elif obj is not None and component is None:
+            values["component"] = obj
+        elif component is not None and obj is not None and component != obj:
+            # Conflict — component takes precedence per spec
+            values["object"] = component
+
         # Check and set default severity
         severity = values.get("severity")
         try:
@@ -374,7 +389,6 @@ class AlertDto(BaseModel):
                     "duplicate_reason": None,
                     "service": "backend",
                     "source": ["prometheus"],
-                    "message": "The pod 'api-service-production' lacks memory causing high error rate",
                     "description": "Due to the lack of memory, the pod 'api-service-production' is experiencing high error rate",
                     "severity": "critical",
                     "pushed": True,
