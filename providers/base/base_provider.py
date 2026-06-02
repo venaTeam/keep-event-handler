@@ -784,7 +784,6 @@ class BaseProvider(metaclass=abc.ABCMeta):
             duplicate_reason=alert_data.get("duplicate_reason", None),
             service=alert_data.get("service", "alert-from-event-queue"),
             source=alert_data.get("source", [self.provider_type]),
-            message=alert_data.get("message", "alert-from-event-queue"),
             description=alert_data.get("description", "alert-from-event-queue"),
             severity=alert_data.get("severity", AlertSeverity.INFO),
             pushed=alert_data.get("pushed", False),
@@ -979,7 +978,7 @@ class ProviderHealthMixin:
                 for idx, pattern in enumerate(compiled_patterns):
                     if idx in matched_patterns:
                         continue
-                    if pattern.search(alert.message):
+                    if alert.description and pattern.search(alert.description):
                         matched_patterns.add(idx)
 
             health["rules"] = {
