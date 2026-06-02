@@ -209,6 +209,13 @@ class Alert(SQLModel, table=True):
     is_full_duplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
     is_partial_duplicate: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, default=False))
     duplicate_reason: str | None = Field(sa_column=Column(String(255), nullable=True))
+    # Per-occurrence received time on the alert row. Distinct from the canonical
+    # lastalert.last_received (per-fingerprint latest, used by the DTO/queries); kept
+    # for per-occurrence record-keeping (was alert.last_received pre-Phase-2).
+    received_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     fingerprint: str = Field(index=True)  # Add the fingerprint field with an index
 

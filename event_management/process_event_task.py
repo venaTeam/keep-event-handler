@@ -503,6 +503,9 @@ def __save_to_db(
             last_received_val = formatted_event.last_received
             if isinstance(last_received_val, str):
                 last_received_val = dateutil.parser.isoparse(last_received_val)
+            # Per-occurrence received time on the alert row (distinct from the
+            # relocated lastalert.last_received used by the DTO/queries).
+            alert_args["received_at"] = last_received_val
             tracking = {
                 "last_received": last_received_val,
                 "firing_counter": getattr(formatted_event, "firing_counter", 0) or 0,
