@@ -287,7 +287,7 @@ def __save_to_db(
 
                 __validate_last_received(event)
 
-                # Phase 2: deduplicated events don't create a new Alert row and
+                # Deduplicated events don't create a new Alert row and
                 # don't call set_last_alert, so update the LastAlert tracking
                 # column (last_received) directly here. Status/dismiss clearing
                 # for re-fires happens in set_last_alert on real occurrences.
@@ -432,7 +432,7 @@ def __save_to_db(
                     formatted_event, previous_alert
                 )
 
-            # Phase 2: status/dismiss clearing on re-fire/resolve now happens in
+            # Status/dismiss clearing on re-fire/resolve now happens in
             # set_last_alert (typed columns). assignee persists automatically on
             # lastalert.assignee, so the old dispose/make-permanent +
             # assignees-timestamp-dict propagation logic is removed.
@@ -466,7 +466,7 @@ def __save_to_db(
             infra_cols = {"id", "tenant_id", "timestamp", "provider_type", "provider_id", "fingerprint", "alert_hash"}
             
             # Extract native columns defined in Alert model
-            # Phase 2: the relocated tracking + user-state fields (last_received,
+            # The relocated tracking + user-state fields (last_received,
             # note, assignee, incident, dismiss_until, dismissed, started_at,
             # firing_counter, unresolved_counter, firing_start_time,
             # firing_start_time_since_last_resolved) no longer live on Alert —
@@ -499,7 +499,7 @@ def __save_to_db(
 
             alert_args = sanitize_alert(alert_args)
 
-            # Phase 2: build tracking dict for LastAlert (relocated from Alert).
+            # Build tracking dict for LastAlert (relocated from Alert).
             last_received_val = formatted_event.last_received
             if isinstance(last_received_val, str):
                 last_received_val = dateutil.parser.isoparse(last_received_val)
@@ -719,7 +719,7 @@ def __save_to_db(
                 },
             )
             try:
-                # Phase 2: enrichment state is on LastAlert typed columns.
+                # Enrichment state is on LastAlert typed columns.
                 last_alert = get_last_alert_by_fingerprint(
                     tenant_id, formatted_event.fingerprint, session=session
                 )

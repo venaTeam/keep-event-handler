@@ -323,7 +323,7 @@ class BaseProvider(metaclass=abc.ABCMeta):
                 "action_callee": "system",
                 "audit_enabled": audit_enabled,
                 # incident enrichment must hit the legacy AlertEnrichment path
-                # (Phase 2 moved only alert enrichment to typed LastAlert columns)
+                # (only alert enrichment was moved to typed LastAlert columns)
                 "entity_type": entity_type,
             }
 
@@ -337,7 +337,7 @@ class BaseProvider(metaclass=abc.ABCMeta):
 
             # todo: incidents do not have disposable enrichments
             if disposable_enrichments and entity_type == "alert":
-                # Phase 2: "dispose on new alert" is now the typed
+                # "dispose on new alert" is now the typed
                 # status_disposable flag on LastAlert (cleared on the next
                 # non-resolved re-fire in set_last_alert), routed through the
                 # same typed enrich path.
@@ -613,7 +613,7 @@ class BaseProvider(metaclass=abc.ABCMeta):
                         alert_enrichment.alert_fingerprint
                     )
                     for alert_to_enrich in alerts_to_enrich:
-                        # Phase 2: enrichment dict (incl. assignee/deleted/
+                        # enrichment dict (incl. assignee/deleted/
                         # dismissed) is sourced from LastAlert typed columns.
                         for enrichment in alert_enrichment.enrichments:
                             # set the enrichment

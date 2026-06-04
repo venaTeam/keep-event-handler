@@ -160,7 +160,7 @@ def calculated_unresolved_counter(
 
 def _last_alert_to_dto_payload(last_alert) -> dict:
     """Build the DTO payload contribution (user enrichment + relocated tracking
-    fields) from a LastAlert row's typed columns (Phase 2)."""
+    fields) from a LastAlert row's typed columns."""
     payload: dict = {}
     # user enrichment state
     if last_alert.status is not None:
@@ -205,7 +205,7 @@ def convert_db_alerts_to_dto_alerts(
 ) -> list[AlertDto | AlertWithIncidentLinkMetadataDto]:
     """
     Build AlertDtos, sourcing user-enrichment state and relocated tracking
-    fields from the per-fingerprint LastAlert typed columns (Phase 2).
+    fields from the per-fingerprint LastAlert typed columns.
 
     Args:
         alerts (list[Alert]): The alerts to enrich.

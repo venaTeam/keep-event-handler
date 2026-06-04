@@ -1161,7 +1161,7 @@ def test_incident_name_template_fallback(db_session):
 
 
 @pytest.mark.skip(
-    reason="Phase 2: dynamic alert fields (e.g. labels) are no longer "
+    reason="alertenrichment removal: dynamic alert fields (e.g. labels) are no longer "
     "round-tripped via alertenrichment; incident-name templates over historical "
     "alerts cannot recover discarded label fields under the strict schema."
 )
@@ -1330,7 +1330,7 @@ def test_incident_name_template_complex_fields(db_session):
 
 
 @pytest.mark.skip(
-    reason="Phase 2: dynamic alert fields (e.g. labels) are no longer "
+    reason="alertenrichment removal: dynamic alert fields (e.g. labels) are no longer "
     "round-tripped via alertenrichment; incident-name templates over historical "
     "alerts cannot recover discarded label fields under the strict schema."
 )
@@ -1387,7 +1387,7 @@ def test_incident_name_template_different_alerts_same_incident(db_session):
 
 
 @pytest.mark.skip(
-    reason="Phase 2: dynamic alert fields (e.g. labels) are no longer "
+    reason="alertenrichment removal: dynamic alert fields (e.g. labels) are no longer "
     "round-tripped via alertenrichment; incident-name templates over historical "
     "alerts cannot recover discarded label fields under the strict schema."
 )
@@ -1499,7 +1499,7 @@ def test_multiple_incidents_name_template(db_session):
 
 
 @pytest.mark.skip(
-    reason="Phase 2: dynamic alert fields (e.g. labels) are no longer "
+    reason="alertenrichment removal: dynamic alert fields (e.g. labels) are no longer "
     "round-tripped via alertenrichment; incident-name templates over historical "
     "alerts cannot recover discarded label fields under the strict schema."
 )

@@ -650,7 +650,7 @@ class EnrichmentsBl:
 
     @staticmethod
     def _apply_dispose_on_new_alert(enrichments: dict, dispose_on_new_alert: bool) -> dict:
-        """Phase 2: 'dispose on new alert' for status is now expressed via the
+        """'Dispose on new alert' for status is now expressed via the
         typed `status_disposable` flag (cleared on the next non-resolved re-fire
         in set_last_alert), not a disposable_* JSONB wrapper.
         """
@@ -707,7 +707,8 @@ class EnrichmentsBl:
         action_type = AlertActionType - the action type of the enrichment
         action_callee = the action callee of the enrichment
         entity_type = "alert" (typed LastAlert columns) or "incident" (legacy
-            AlertEnrichment JSONB, kept until Phase 3)
+            AlertEnrichment JSONB, kept until a later migration removes the
+            `alertenrichment` table)
 
         Enrich the alert with extraction and mapping rules
         """
@@ -725,7 +726,7 @@ class EnrichmentsBl:
         )
 
         if entity_type != "incident":
-            # Phase 2: normalize ONCE so the dict pushed to Elasticsearch carries the same
+            # Normalize ONCE so the dict pushed to Elasticsearch carries the same
             # typed keys the DB layer writes (raw legacy keys like `dismissed` must not reach ES).
             # event-handler enrich_entity has no `strict` param; the DB write below uses
             # strict=False (system writes discard unknown keys), so normalize matches it.

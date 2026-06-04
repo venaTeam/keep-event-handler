@@ -1,4 +1,4 @@
-"""Phase 2 (alertenrichment removal) shared-logic tests.
+"""Alertenrichment removal shared-logic tests.
 
 These exercise the typed-column enrichment model on LastAlert directly against
 the in-memory sqlite db_session fixture (no elastic / arq / API gateway needed):
@@ -371,7 +371,7 @@ def test_tracking_dict_cannot_clobber_user_enrichment_columns(db_session):
 
 
 # --------------------------------------------------------------------------- #
-# Incident enrichment stays on AlertEnrichment (EH-3b) — preserved until Phase 3
+# Incident enrichment stays on AlertEnrichment (EH-3b) — preserved until a later migration removes the `alertenrichment` table
 # --------------------------------------------------------------------------- #
 def test_incident_enrich_writes_alertenrichment_not_lastalert(db_session):
     """Incident enrichment (entity_type='incident') must write the legacy

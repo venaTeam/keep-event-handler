@@ -105,7 +105,7 @@ class ElasticClient:
         fingerprints = [
             result["_source"]["fingerprint"] for result in results["hits"]["hits"]
         ]
-        # Phase 2: enrichment dicts are built from LastAlert typed columns.
+        # Enrichment dicts are built from LastAlert typed columns.
         enrichments = get_enrichments(self.tenant_id, fingerprints)
         enrichments_by_fingerprint = {
             enrichment.alert_fingerprint: enrichment.enrichments
