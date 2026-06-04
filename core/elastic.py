@@ -9,7 +9,6 @@ from core.dependencies import SINGLE_TENANT_UUID
 from core.tenant_configuration import TenantConfiguration
 from models.alert import AlertDto, AlertSeverity
 from utils.cel_utils import preprocess_cel_expression
-from utils.enrichment_helpers import parse_and_enrich_deleted_and_assignees
 
 
 class ElasticClient:
@@ -106,6 +105,7 @@ class ElasticClient:
         fingerprints = [
             result["_source"]["fingerprint"] for result in results["hits"]["hits"]
         ]
+        # Enrichment dicts are built from LastAlert typed columns.
         enrichments = get_enrichments(self.tenant_id, fingerprints)
         enrichments_by_fingerprint = {
             enrichment.alert_fingerprint: enrichment.enrichments
@@ -114,10 +114,10 @@ class ElasticClient:
         for result in results["hits"]["hits"]:
             alert = result["_source"]
             alert_dto = AlertDto(**alert)
-            if alert_dto.fingerprint in enrichments_by_fingerprint:
-                parse_and_enrich_deleted_and_assignees(
-                    alert_dto, enrichments_by_fingerprint[alert_dto.fingerprint]
-                )
+            fp_enrichments = enrichments_by_fingerprint.get(alert_dto.fingerprint)
+            if fp_enrichments:
+                for key, value in fp_enrichments.items():
+                    setattr(alert_dto, key, value)
             alert_dtos.append(alert_dto)
         return alert_dtos
 
