@@ -1,6 +1,7 @@
 import logging
 import threading
 
+from event_management.process_event_task import shutdown_sse_pool
 from providers.base.base_provider import BaseProvider
 from providers.providers_factory import ProvidersFactory
 
@@ -100,3 +101,9 @@ class EventSubscriber:
             thread.join()
         self.started = False
         self.logger.info("Joined consumer threads")
+
+        # Flush any pending SSE notifications queued on the background pool.
+        try:
+            shutdown_sse_pool(wait=True)
+        except Exception:
+            self.logger.exception("Failed to shutdown SSE notify pool")

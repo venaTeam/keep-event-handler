@@ -83,6 +83,51 @@ KEEP_CALCULATE_START_FIRING_TIME_ENABLED = (
 
 logger = logging.getLogger(__name__)
 
+from concurrent.futures import ThreadPoolExecutor
+
+# max_workers=1 keeps SSE notifications FIFO-ordered while unblocking the consumer
+_sse_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sse-notify")
+_sse_session = requests.Session()  # keep-alive / connection reuse across calls
+# crude backpressure: skip submitting if too many notifications are already queued
+_SSE_MAX_PENDING = 1000
+
+
+def _notify_api(api_url, tenant_id, event, data):
+    try:
+        resp = _sse_session.post(
+            f"{api_url}/sse/notify",
+            json={"tenant_id": tenant_id, "event": event, "data": data},
+            timeout=5,
+        )
+        resp.raise_for_status()
+    except Exception:
+        logger.warning(
+            "SSE notify failed", extra={"event": event, "tenant_id": tenant_id}
+        )
+
+
+def _submit_notify(api_url, tenant_id, event, data):
+    """Non-blocking: enqueue an SSE notification on the background pool.
+    Drops (with a warning) under sustained backpressure so a slow/down gateway
+    can never block or unbounded-grow the consumer."""
+    try:
+        if _sse_pool._work_queue.qsize() >= _SSE_MAX_PENDING:
+            logger.warning(
+                "SSE notify dropped (backpressure)",
+                extra={"event": event, "tenant_id": tenant_id},
+            )
+            return
+        _sse_pool.submit(_notify_api, api_url, tenant_id, event, data)
+    except Exception:
+        logger.warning(
+            "SSE notify submit failed", extra={"event": event, "tenant_id": tenant_id}
+        )
+
+
+def shutdown_sse_pool(wait: bool = True):
+    """Flush pending SSE notifications on graceful shutdown."""
+    _sse_pool.shutdown(wait=wait)
+
 
 def _serialize_event_for_logging(event, max_size: int = 1000):
     """
@@ -1149,44 +1194,22 @@ def __handle_formatted_events(
 
         # Tell the client to poll alerts via API (since event handler runs in a separate process)
         # We don't use throttling here to ensure real-time updates (client will append instead of full refresh)
-        try:
-            api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
-            logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
-            
-            # Serialize alerts to dicts
-            alerts_payload = [alert.dict() for alert in enriched_formatted_events]
-            
-            response = requests.post(
-                f"{api_url}/sse/notify",
-                json={
-                    "tenant_id": tenant_id,
-                    "event": "poll-alerts",
-                    "data": {"alerts": alerts_payload}
-                },
-                timeout=5
-            )
-            response.raise_for_status()
-            logger.info(f"Successfully told client to poll alerts via API ({response.status_code})")
-        except Exception as e:
-            logger.warning(f"Failed to tell client to poll alerts: {e}")
-            pass
+        api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
+        logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
+
+        # Serialize alerts to dicts on the consumer thread so the background
+        # notifier never reads alert objects.
+        alerts_payload = [alert.dict() for alert in enriched_formatted_events]
+
+        _submit_notify(
+            api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload}
+        )
 
         if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
-            try:
-                api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
-                incident_ids = [str(inc.id) for inc in incidents]
-                response = requests.post(
-                    f"{api_url}/sse/notify",
-                    json={
-                        "tenant_id": tenant_id,
-                        "event": "incident-change",
-                        "data": {"incident_ids": incident_ids}
-                    },
-                    timeout=5
-                )
-                response.raise_for_status()
-            except Exception:
-                logger.exception("Failed to tell the client to pull incidents")
+            incident_ids = [str(inc.id) for inc in incidents]
+            _submit_notify(
+                api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
+            )
 
         # Now we need to update the presets
         # send with SSE
@@ -1205,20 +1228,13 @@ def __handle_formatted_events(
                     continue
                 presets_do_update.append(preset_dto)
             if notification_cache.should_notify(tenant_id, "poll-presets"):
-                try:
-                    api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
-                    response = requests.post(
-                        f"{api_url}/sse/notify",
-                        json={
-                            "tenant_id": tenant_id,
-                            "event": "poll-presets",
-                            "data": {"preset_names": [p.name.lower() for p in presets_do_update]},
-                        },
-                        timeout=5
-                    )
-                    response.raise_for_status()
-                except Exception:
-                    logger.exception("Failed to send presets via SSE")
+                api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
+                _submit_notify(
+                    api_url,
+                    tenant_id,
+                    "poll-presets",
+                    {"preset_names": [p.name.lower() for p in presets_do_update]},
+                )
         except Exception:
             logger.exception(
                 "Failed to send presets via SSE",
