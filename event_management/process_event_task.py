@@ -84,10 +84,24 @@ KEEP_CALCULATE_START_FIRING_TIME_ENABLED = (
 logger = logging.getLogger(__name__)
 
 from concurrent.futures import ThreadPoolExecutor
+from requests.adapters import HTTPAdapter
 
-# max_workers=1 keeps SSE notifications FIFO-ordered while unblocking the consumer
-_sse_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sse-notify")
+# Background pool that delivers SSE notifications off the Kafka consumer thread.
+# SSE_NOTIFY_WORKERS=1 (default) keeps notifications strictly FIFO-ordered; raising
+# it speeds up delivery when the gateway is slow, at the cost of strict ordering
+# (safe here: the UI dedups poll-alerts by fingerprint; other events are idempotent).
+_SSE_NOTIFY_WORKERS = max(1, int(os.getenv("SSE_NOTIFY_WORKERS", "1")))
+_sse_pool = ThreadPoolExecutor(
+    max_workers=_SSE_NOTIFY_WORKERS, thread_name_prefix="sse-notify"
+)
 _sse_session = requests.Session()  # keep-alive / connection reuse across calls
+# Size the connection pool to the worker count so concurrent posts don't contend.
+_sse_session.mount(
+    "http://", HTTPAdapter(pool_connections=_SSE_NOTIFY_WORKERS, pool_maxsize=_SSE_NOTIFY_WORKERS)
+)
+_sse_session.mount(
+    "https://", HTTPAdapter(pool_connections=_SSE_NOTIFY_WORKERS, pool_maxsize=_SSE_NOTIFY_WORKERS)
+)
 # crude backpressure: skip submitting if too many notifications are already queued
 _SSE_MAX_PENDING = 1000
 
