@@ -209,38 +209,37 @@ class PropertiesMapper:
     ) -> Node:
         # in case expression is just property access node
         # it will behave like !!property in JS
-        # converting queried property to boolean and evaluate as boolean
+        # converting queried property to boolean and evaluate as boolean.
+        # The "falsy" constants are chosen to match the column's data type so the
+        # generated SQL stays type-correct: e.g. an integer column must be compared
+        # to 0, not to the boolean literal false (Postgres rejects `integer <> boolean`).
         mapped_prop, property_metadata = self._map_property(member_access_node)
         involved_fields.append(property_metadata)
-        return LogicalNode(
-            left=ComparisonNode(
-                first_operand=mapped_prop,
-                operator=ComparisonNodeOperator.NE,
-                second_operand=ConstantNode(value=None),
-            ),
-            operator=LogicalNodeOperator.AND,
-            right=LogicalNode(
-                left=ComparisonNode(
+
+        if property_metadata.data_type == DataType.BOOLEAN:
+            falsy_values = [ConstantNode(value=False)]
+        elif property_metadata.data_type in (DataType.INTEGER, DataType.FLOAT):
+            falsy_values = [ConstantNode(value=0)]
+        else:
+            # string / unknown: empty string and "0" are the JS-falsy string values
+            falsy_values = [ConstantNode(value="0"), ConstantNode(value="")]
+
+        node = ComparisonNode(
+            first_operand=mapped_prop,
+            operator=ComparisonNodeOperator.NE,
+            second_operand=ConstantNode(value=None),
+        )
+        for falsy in falsy_values:
+            node = LogicalNode(
+                left=node,
+                operator=LogicalNodeOperator.AND,
+                right=ComparisonNode(
                     first_operand=mapped_prop,
                     operator=ComparisonNodeOperator.NE,
-                    second_operand=ConstantNode(value="0"),
+                    second_operand=falsy,
                 ),
-                operator=LogicalNodeOperator.AND,
-                right=LogicalNode(
-                    left=ComparisonNode(
-                        first_operand=mapped_prop,
-                        operator=ComparisonNodeOperator.NE,
-                        second_operand=ConstantNode(value=False),
-                    ),
-                    operator=LogicalNodeOperator.AND,
-                    right=ComparisonNode(
-                        first_operand=mapped_prop,
-                        operator=ComparisonNodeOperator.NE,
-                        second_operand=ConstantNode(value=""),
-                    ),
-                ),
-            ),
-        )
+            )
+        return node
 
 
     def _modify_comparison_node_based_on_mapping(

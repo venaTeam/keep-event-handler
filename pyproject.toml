@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "keep-event-handler"
-version = "0.50.3.3"
+version = "0.51.0.6"
 description = "Event Handler service for Keep"
 authors = ["Keep Authors"]
 readme = "README.md"

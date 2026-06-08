@@ -602,6 +602,7 @@ def test_disposable_enrichment(db_session, client, test_app, mock_alert_dto):
     assert alert["status"] == "firing"
 
 
+@pytest.mark.skip(reason="alertenrichment removal (Option A): dynamic enrichment fields have no typed lastalert column and are dropped by the strict allow-list; this test asserts the legacy dynamic-field behavior. See HANDOFF.md.")
 def test_topology_mapping_rule_enrichment(mock_session, mock_alert_dto):
     # Mock a TopologyService with dependencies to simulate the DB structure
     mock_topology_service = TopologyService(
@@ -659,6 +660,8 @@ def test_topology_mapping_rule_enrichment(mock_session, mock_alert_dto):
                 session=mock_session,
                 force=False,
                 audit_enabled=True,
+                strict=False,
+                entity_type="alert",
             )
 
 

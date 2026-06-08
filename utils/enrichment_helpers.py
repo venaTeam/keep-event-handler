@@ -36,37 +36,6 @@ def javascript_iso_format(last_received) -> str:
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def parse_and_enrich_deleted_and_assignees(alert: AlertDto, enrichments: dict):
-    # tb: we'll need to refactor this at some point since its flaky
-    # assignees and deleted are special cases that we need to handle
-    # they are kept as a list of timestamps and we need to check if the
-    # timestamp of the alert is in the list, if it is, it means that the
-    # alert at that specific time was deleted or assigned.
-    #
-    # THIS IS MAINLY BECAUSE WE ALSO HAVE THE PULLED ALERTS,
-    # OTHERWISE, WE COULD'VE JUST UPDATE THE ALERT IN THE DB
-    deleted_last_received = enrichments.get(
-        "deletedAt", enrichments.get("deleted", [])
-    )  # "deleted" is for backward compatibility
-    if javascript_iso_format(alert.last_received) in deleted_last_received:
-        alert.deleted = True
-    assignees: dict = enrichments.get("assignees", {})
-    # Try exact match
-    assignee = assignees.get(alert.last_received)
-    if not assignee:
-        # Try normalized match
-        try:
-            normalized = javascript_iso_format(alert.last_received)
-            assignee = assignees.get(normalized)
-        except Exception:
-            pass
-    
-    if assignee:
-        alert.assignee = assignee
-
-
-
-
 def calculated_start_firing_time(
     alert: AlertDto, previous_alert: AlertDto | list[AlertDto]
 ) -> str:
@@ -189,14 +158,54 @@ def calculated_unresolved_counter(
     return previous_alert.unresolved_counter + 1
 
 
+def _last_alert_to_dto_payload(last_alert) -> dict:
+    """Build the DTO payload contribution (user enrichment + relocated tracking
+    fields) from a LastAlert row's typed columns."""
+    payload: dict = {}
+    # user enrichment state
+    if last_alert.status is not None:
+        payload["status"] = last_alert.status
+    if last_alert.assignee is not None:
+        payload["assignee"] = last_alert.assignee
+    if last_alert.note is not None:
+        payload["note"] = last_alert.note
+    # derived dismissed compat field + dismiss details
+    payload["dismissed"] = last_alert.status == "suppressed"
+    if last_alert.dismiss_mode is not None:
+        payload["dismiss_mode"] = last_alert.dismiss_mode
+    if last_alert.dismissed_until is not None:
+        ts = last_alert.dismissed_until
+        if isinstance(ts, datetime):
+            # Match the legacy "...%f.Z" wire format AlertDto.validate_dismissed parses
+            # (strptime "%Y-%m-%dT%H:%M:%S.%fZ"); plain .isoformat() yields "...+00:00"
+            # which the validator rejects and json.dumps cannot serialize a raw datetime.
+            ts = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        payload["dismissed_until"] = ts
+    payload["deleted"] = bool(last_alert.deleted)
+    # relocated tracking fields
+    if last_alert.last_received is not None:
+        payload["last_received"] = last_alert.last_received
+    payload["firing_counter"] = last_alert.firing_counter or 0
+    payload["unresolved_counter"] = last_alert.unresolved_counter or 0
+    if last_alert.started_at is not None:
+        payload["started_at"] = last_alert.started_at
+    if last_alert.firing_start_time is not None:
+        payload["firing_start_time"] = last_alert.firing_start_time
+    if last_alert.firing_start_time_since_last_resolved is not None:
+        payload["firing_start_time_since_last_resolved"] = (
+            last_alert.firing_start_time_since_last_resolved
+        )
+    return payload
+
+
 def convert_db_alerts_to_dto_alerts(
     alerts: list[Alert | tuple[Alert, LastAlertToIncident]],
     with_incidents: bool = False,
-    with_alert_instance_enrichment: bool = False,
     session: Optional[Session] = None,
 ) -> list[AlertDto | AlertWithIncidentLinkMetadataDto]:
     """
-    Enriches the alerts with the enrichment data.
+    Build AlertDtos, sourcing user-enrichment state and relocated tracking
+    fields from the per-fingerprint LastAlert typed columns.
 
     Args:
         alerts (list[Alert]): The alerts to enrich.
@@ -207,12 +216,34 @@ def convert_db_alerts_to_dto_alerts(
     """
     # Lazy import to avoid circular dependency
     from core.db.db import existed_or_new_session
+    from models.db.alert import LastAlert
     from models.incident import IncidentDto
-    
+    from sqlmodel import select
+
     with existed_or_new_session(session) as session:
+        # Batch-fetch LastAlert rows grouped by tenant_id so the WHERE clause
+        # is the natural (tenant_id, fingerprint IN ...) prefix-index path
+        # instead of a cartesian (tenant_id IN ..., fingerprint IN ...) that
+        # would also return cross-tenant rows the caller has to discard.
+        fps_by_tenant: dict[str, set[str]] = {}
+        for _object in alerts:
+            alert = _object if isinstance(_object, Alert) else _object[0]
+            fps_by_tenant.setdefault(alert.tenant_id, set()).add(alert.fingerprint)
+
+        last_alerts_by_key = {}
+        for tid, fps in fps_by_tenant.items():
+            if not fps:
+                continue
+            rows = session.exec(
+                select(LastAlert)
+                .where(LastAlert.tenant_id == tid)
+                .where(LastAlert.fingerprint.in_(fps))
+            ).all()
+            for la in rows:
+                last_alerts_by_key[(la.tenant_id, la.fingerprint)] = la
+
         alerts_dto = []
         with tracer.start_as_current_span("alerts_enrichment"):
-            # enrich the alerts with the enrichment data
             for _object in alerts:
                 # We may have an Alert only or and Alert with an LastAlertToIncident
                 if isinstance(_object, Alert):
@@ -220,15 +251,13 @@ def convert_db_alerts_to_dto_alerts(
                 else:
                     alert, alert_to_incident = _object
 
-                enrichments = {}
-                if with_alert_instance_enrichment and alert.alert_instance_enrichment:
-                    enrichments = alert.alert_instance_enrichment.enrichments
-                elif alert.alert_enrichment and not with_alert_instance_enrichment:
-                    enrichments = alert.alert_enrichment.enrichments
-
                 alert_payload = alert.dict()
 
-                alert_payload.update(enrichments)
+                last_alert = last_alerts_by_key.get(
+                    (alert.tenant_id, alert.fingerprint)
+                )
+                if last_alert is not None:
+                    alert_payload.update(_last_alert_to_dto_payload(last_alert))
 
                 if with_incidents:
                     if alert._incidents:
@@ -246,9 +275,6 @@ def convert_db_alerts_to_dto_alerts(
                         )
                     else:
                         alert_dto = AlertDto(**alert_payload)
-
-                    if enrichments:
-                        parse_and_enrich_deleted_and_assignees(alert_dto, enrichments)
 
                 except Exception:
                     # should never happen but just in case
