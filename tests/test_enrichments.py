@@ -5,7 +5,6 @@ from datetime import datetime
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-from sqlalchemy import text
 from tenacity import sleep
 
 from bl.enrichments_bl import EnrichmentsBl
@@ -831,11 +830,6 @@ def test_disposable_enrichment_and_alert_history(
         json=mock_alert_dto.dict(),
     )
     assert response.status_code == 202
-
-    # 1 enrichment for fingerprint + 1 for alert.id
-    assert (
-        db_session.execute(text("SELECT count(1) from alertenrichment")).scalar() == 2
-    )
 
     # Verify the disposable enrichment is reset
     time.sleep(1)
