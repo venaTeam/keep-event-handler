@@ -155,8 +155,6 @@ class AlertDto(BaseModel):
         None  # The fingerprint of the alert (used for alert de-duplication)
     )
     dismiss_until: str | None = Field(default=None, alias="dismissUntil")  # The time until the alert is dismissed
-    # DO NOT MOVE DISMISSED ABOVE dismissedUntil since it is used in root_validator
-    dismissed: bool = False  # Whether the alert has been dismissed
     assignee: str | None = None  # The assignee of the alert
     provider_id: str | None = Field(default=None, alias="providerId")  # The provider id
     provider_type: str | None = Field(default=None, alias="providerType")  # The provider type
@@ -271,32 +269,6 @@ class AlertDto(BaseModel):
 
         raise ValueError(f"Invalid date format: {last_received}")
 
-    @validator("dismissed", pre=True, always=True)
-    def validate_dismissed(cls, dismissed, values):
-        # normzlize dismissed value
-        if isinstance(dismissed, str):
-            dismissed = dismissed.lower() == "true"
-
-        # if dismissed is False, return False
-        if not dismissed:
-            return dismissed
-
-        # else, validate dismissedUntil
-        dismiss_until = values.get("dismiss_until")
-        # if there's no dismiss_until, return just return dismissed
-        if not dismiss_until or dismiss_until == "forever":
-            return dismissed
-
-        # if there's dismiss_until, validate it
-        dismiss_until_datetime = datetime.datetime.strptime(
-            dismiss_until, "%Y-%m-%dT%H:%M:%S.%fZ"
-        ).replace(tzinfo=datetime.timezone.utc)
-        dismissed = (
-            datetime.datetime.now(datetime.timezone.utc) < dismiss_until_datetime
-        )
-        return dismissed
-
-
     @root_validator(pre=True)
     def set_default_values(cls, values: Dict[str, Any]) -> Dict[str, Any]:
         # Check and set id:
@@ -368,11 +340,6 @@ class AlertDto(BaseModel):
     # after root_validator to ensure that the values are set
     @root_validator(pre=False)
     def validate_status(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        # if dismissed, change status to SUPPRESSED
-        # note this is happen AFTER validate_dismissed which already consider
-        #   dismissed + dismiss_until
-        # if values.get("dismissed"):
-        #     values["status"] = AlertStatus.SUPPRESSED
         return values
 
     class Config:

@@ -706,9 +706,8 @@ class EnrichmentsBl:
         should_exist = False only in mapping where the alert is not yet in elastic
         action_type = AlertActionType - the action type of the enrichment
         action_callee = the action callee of the enrichment
-        entity_type = "alert" (typed LastAlert columns) or "incident" (legacy
-            AlertEnrichment JSONB, kept until a later migration removes the
-            `alertenrichment` table)
+        entity_type = "alert" (typed LastAlert columns) or "incident"
+            (IncidentEnrichment JSONB, keyed on incident_id)
 
         Enrich the alert with extraction and mapping rules
         """

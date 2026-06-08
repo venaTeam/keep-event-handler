@@ -33,7 +33,7 @@ from models.db.user import User  # pylint: disable=import-outside-toplevel
 from contextmanager.contextmanager import ContextManager
 from secretmanager.secretmanagerfactory import SecretManagerFactory
 from models.db.tenant import TenantApiKey, Tenant
-from models.db.alert import Alert, AlertField, AlertRaw, AlertAudit, CommentMention, AlertDeduplicationRule, AlertDeduplicationEvent, LastAlert, AlertEnrichment, LastAlertToIncident
+from models.db.alert import Alert, AlertField, AlertRaw, AlertAudit, CommentMention, AlertDeduplicationRule, AlertDeduplicationEvent, LastAlert, IncidentEnrichment, LastAlertToIncident
 from models.db.enrichment_event import EnrichmentEvent, EnrichmentLog
 from models.db.extraction import ExtractionRule
 from models.db.incident import Incident
