@@ -169,16 +169,15 @@ def _last_alert_to_dto_payload(last_alert) -> dict:
         payload["assignee"] = last_alert.assignee
     if last_alert.note is not None:
         payload["note"] = last_alert.note
-    # derived dismissed compat field + dismiss details
-    payload["dismissed"] = last_alert.status == "suppressed"
+    # dismiss details
     if last_alert.dismiss_mode is not None:
         payload["dismiss_mode"] = last_alert.dismiss_mode
     if last_alert.dismissed_until is not None:
         ts = last_alert.dismissed_until
         if isinstance(ts, datetime):
-            # Match the legacy "...%f.Z" wire format AlertDto.validate_dismissed parses
-            # (strptime "%Y-%m-%dT%H:%M:%S.%fZ"); plain .isoformat() yields "...+00:00"
-            # which the validator rejects and json.dumps cannot serialize a raw datetime.
+            # Emit the typed DateTime column as an ISO 8601 "...%f.Z" string so
+            # JSON consumers see a string on the wire; plain .isoformat() yields
+            # "...+00:00" which json.dumps cannot serialize from a raw datetime.
             ts = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         payload["dismissed_until"] = ts
     payload["deleted"] = bool(last_alert.deleted)

@@ -2,8 +2,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
-from sqlalchemy import String, and_, case, cast, func, select
-from sqlalchemy.orm import aliased, foreign
+from sqlalchemy import and_, case, func, select
+from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, text
 
 from core.cel_to_sql.properties_mapper import (
@@ -16,7 +16,7 @@ from core.cel_to_sql.sql_providers.get_cel_to_sql_provider_for_dialect import (
 from core.db.db import engine, enrich_incidents_with_alerts
 from models.db.alert import (
     Alert,
-    AlertEnrichment,
+    IncidentEnrichment,
     LastAlert,
     LastAlertToIncident,
 )
@@ -153,18 +153,11 @@ for col_item in Alert.__table__.columns:
     incident_field_configurations.append(
         FieldMappingConfiguration(
             map_from_pattern=f"alert.{col_item.name}",
-            map_to=[f"alert.{col_item.name}"],
+            map_to=f"alert.{col_item.name}",
             data_type=data_type,
             enum_values=enum_values,
         )
     )
-
-incident_field_configurations.append(
-    FieldMappingConfiguration(
-        map_from_pattern="alert.*",
-        map_to=["JSON(alertenrichment.enrichments).*"],
-    )
-)
 
 properties_metadata = PropertiesMetadata(incident_field_configurations)
 
@@ -172,7 +165,7 @@ properties_metadata = PropertiesMetadata(incident_field_configurations)
 logger = logging.getLogger(__name__)
 
 
-incident_enrichment = aliased(AlertEnrichment, name="incidentenrichment")
+incident_enrichment = aliased(IncidentEnrichment, name="incidentenrichment")
 
 
 def __build_base_incident_query(
@@ -231,21 +224,13 @@ def __build_base_incident_query(
                 Alert,
                 and_(LastAlert.alert_id == Alert.id, LastAlert.tenant_id == tenant_id),
             )
-            .outerjoin(
-                AlertEnrichment,
-                and_(
-                    AlertEnrichment.alert_fingerprint == Alert.fingerprint,
-                    AlertEnrichment.tenant_id == tenant_id,
-                ),
-            )
         )
 
     sql_query = sql_query.outerjoin(
         incident_enrichment,
         and_(
             Incident.tenant_id == incident_enrichment.tenant_id,
-            cast(col(Incident.id), String)
-            == foreign(incident_enrichment.alert_fingerprint),
+            Incident.id == incident_enrichment.incident_id,
         ),
     )
 
