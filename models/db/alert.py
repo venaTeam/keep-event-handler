@@ -75,6 +75,7 @@ class AlertAudit(SQLModel, table=True):
         Index("ix_alert_audit_fingerprint", "fingerprint"),
         Index("ix_alert_audit_tenant_id_fingerprint", "tenant_id", "fingerprint"),
         Index("ix_alert_audit_timestamp", "timestamp"),
+        Index("ix_alert_audit_tenant_fingerprint_ts", "tenant_id", "fingerprint", "timestamp"),
     )
 
 class CommentMention(SQLModel, table=True):
