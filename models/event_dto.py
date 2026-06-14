@@ -8,6 +8,8 @@ class EventType(str, Enum):
     ENRICH = "enrich"
     BATCH_ENRICH = "batch_enrich"
     UNENRICH = "unenrich"
+    DELETE = "delete"
+
 
 class EventDTO(BaseModel):
     tenant_id: str
