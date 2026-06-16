@@ -5,6 +5,8 @@ from event_management.process_event_task import process_event
 from models.event_dto import EventDTO
 from models.action_type import ActionType
 from enum import Enum
+from core.db.db import enrich_entity, delete_alert
+
 
 logger = logging.getLogger(__name__)
 
@@ -13,10 +15,23 @@ class EventType(str, Enum):
     INCIDENT = "incident"
     ENRICH = "enrich"
     BATCH_ENRICH = "batch_enrich"
+    DELETE = "delete"
+
+
+def _process_delete_alert_event(event_dto: EventType):
+    logger.info(
+        f"Processing delete event",
+        extra={
+            "tenant_id": event_dto.tenant_id,
+            "fingerprint": event_dto.fingerprint,
+        "event": event_dto.event,
+        },
+    )
+
+    delete_alert(fingerprint=event_dto.fingerprint)
 
 
 def _process_enrich_event(event_dto: EventDTO):
-    from core.db.db import enrich_entity
 
     logger.info(
         f"Processing enrich event",
@@ -171,7 +186,8 @@ FUNC_MAP = {
     EventType.ALERT: _process_alert_event,
     EventType.INCIDENT: _process_incident_event,
     EventType.ENRICH: _process_enrich_event,
-    EventType.BATCH_ENRICH: _process_batch_enrich_event
+    EventType.BATCH_ENRICH: _process_batch_enrich_event,
+    EventType.DELETE: _process_delete_alert_event
 }
 
 
