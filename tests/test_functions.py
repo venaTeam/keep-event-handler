@@ -6,11 +6,11 @@ import pytest
 import pytz
 from freezegun import freeze_time
 
-import functions
-from bl.enrichments_bl import EnrichmentsBl
-from core.dependencies import SINGLE_TENANT_UUID
-from models.action_type import ActionType
-from models.alert import AlertStatus
+from src import functions
+from src.bl.enrichments_bl import EnrichmentsBl
+from src.core.dependencies import SINGLE_TENANT_UUID
+from src.models.action_type import ActionType
+from src.models.alert import AlertStatus
 
 
 @pytest.mark.parametrize(

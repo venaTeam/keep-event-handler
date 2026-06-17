@@ -10,10 +10,11 @@ pytestmark = pytest.mark.skip(reason="Tests require API Gateway endpoints and Ga
 from fastapi import HTTPException
 from sqlalchemy import and_, desc, distinct, func
 
-import config.consts
-from bl.incidents_bl import IncidentBl
-from bl.maintenance_windows_bl import MaintenanceWindowsBl
-from core.db.db import (
+import src.config.consts
+import src.bl.maintenance_windows_bl
+from src.bl.incidents_bl import IncidentBl
+from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
+from src.core.db.db import (
     add_alerts_to_incident,
     create_incident_from_dict,
     get_alert_by_event_id,
@@ -24,28 +25,28 @@ from core.db.db import (
 )
 def get_last_incidents(*args, **kwargs): return []
 def merge_incidents_to_id(*args, **kwargs): return []
-from models.incident import IncidentSorting
-from core.db.db_utils import get_json_extract_field
-from core.dependencies import SINGLE_TENANT_EMAIL, SINGLE_TENANT_UUID
-from models.alert import AlertSeverity, AlertStatus
-from models.db.alert import (
+from src.models.incident import IncidentSorting
+from src.core.db.db_utils import get_json_extract_field
+from src.core.dependencies import SINGLE_TENANT_EMAIL, SINGLE_TENANT_UUID
+from src.models.alert import AlertSeverity, AlertStatus
+from src.models.db.alert import (
     NULL_FOR_DELETED_AT,
     Alert,
     LastAlertToIncident,
 )
-from models.db.incident import Incident
-from models.db.incident import IncidentSeverity, IncidentStatus
-from models.db.mapping import MappingRule
-from models.db.rule import CreateIncidentOn, ResolveOn, Rule
-from models.db.tenant import Tenant
-from models.incident import IncidentDto, IncidentDtoIn
-from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
+from src.models.db.incident import Incident
+from src.models.db.incident import IncidentSeverity, IncidentStatus
+from src.models.db.mapping import MappingRule
+from src.models.db.rule import CreateIncidentOn, ResolveOn, Rule
+from src.models.db.tenant import Tenant
+from src.models.incident import IncidentDto, IncidentDtoIn
+from src.utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
 class AuthenticatedEntity:
     def __init__(self, *args, **kwargs):
         self.tenant_id = kwargs.get("tenant_id", "test-tenant")
         self.email = kwargs.get("email", "test@keephq.dev")
-from identitymanager.rbac import Admin
-from rulesengine.rulesengine import RulesEngine
+from src.identitymanager.rbac import Admin
+from src.rulesengine.rulesengine import RulesEngine
 from tests.conftest import ElasticClientMock, SSEMock, WorkflowManagerMock
 
 
@@ -503,7 +504,7 @@ def test_incident_status_change_manual_alert_enrichment(
     assert incident._alerts[0].event["status"] == AlertStatus.FIRING.value
 
     with patch(
-        "identitymanager.identity_managers.noauth.noauth_authverifier.NoAuthVerifier._verify_api_key",
+        "src.identitymanager.identity_managers.noauth.noauth_authverifier.NoAuthVerifier._verify_api_key",
         return_value=AuthenticatedEntity(
             tenant_id=SINGLE_TENANT_UUID,
             email=SINGLE_TENANT_EMAIL,
@@ -1141,7 +1142,7 @@ def test_cross_tenant_exposure_issue_2768(db_session, create_alert):
 def test_incident_bl_create_incident(db_session):
     workflow_manager = WorkflowManagerMock()
 
-    with patch("bl.incidents_bl.WorkflowManager", workflow_manager):
+    with patch("src.bl.incidents_bl.WorkflowManager", workflow_manager):
         incident_bl = IncidentBl(
             tenant_id=SINGLE_TENANT_UUID, session=db_session
         )
@@ -1199,7 +1200,7 @@ def test_incident_bl_create_incident(db_session):
 def test_incident_bl_update_incident(db_session):
     workflow_manager = WorkflowManagerMock()
 
-    with patch("bl.incidents_bl.WorkflowManager", workflow_manager):
+    with patch("src.bl.incidents_bl.WorkflowManager", workflow_manager):
         incident_bl = IncidentBl(
             tenant_id=SINGLE_TENANT_UUID, session=db_session
         )
@@ -1253,7 +1254,7 @@ def test_incident_bl_update_incident(db_session):
 def test_incident_bl_delete_incident(db_session):
     workflow_manager = WorkflowManagerMock()
 
-    with patch("bl.incidents_bl.WorkflowManager", workflow_manager):
+    with patch("src.bl.incidents_bl.WorkflowManager", workflow_manager):
         incident_bl = IncidentBl(
             tenant_id=SINGLE_TENANT_UUID, session=db_session
         )
@@ -1302,8 +1303,8 @@ async def test_incident_bl_add_alert_to_incident(db_session, create_alert):
     workflow_manager = WorkflowManagerMock()
     elastic_client = ElasticClientMock()
 
-    with patch("bl.incidents_bl.WorkflowManager", workflow_manager):
-        with patch("bl.incidents_bl.ElasticClient", elastic_client):
+    with patch("src.bl.incidents_bl.WorkflowManager", workflow_manager):
+        with patch("src.bl.incidents_bl.ElasticClient", elastic_client):
             incident_bl = IncidentBl(
                 tenant_id=SINGLE_TENANT_UUID, session=db_session
             )
@@ -1369,8 +1370,8 @@ async def test_incident_bl_delete_alerts_from_incident(db_session, create_alert)
     workflow_manager = WorkflowManagerMock()
     elastic_client = ElasticClientMock()
 
-    with patch("bl.incidents_bl.WorkflowManager", workflow_manager):
-        with patch("bl.incidents_bl.ElasticClient", elastic_client):
+    with patch("src.bl.incidents_bl.WorkflowManager", workflow_manager):
+        with patch("src.bl.incidents_bl.ElasticClient", elastic_client):
             incident_bl = IncidentBl(
                 tenant_id=SINGLE_TENANT_UUID, session=db_session
             )
@@ -1733,7 +1734,7 @@ def test_incident_auto_resolve_only_if_active(db_session, create_alert):
         )
 
     with patch(
-        "event_management.process_event_task.IncidentBl.resolve_incident_if_require"
+        "src.event_management.process_event_task.IncidentBl.resolve_incident_if_require"
     ) as incident_bl_mock:
         create_alert(
             "alert-test",
@@ -1761,8 +1762,8 @@ def test_incident_not_created_maintenance(
     """
     # GIVEN The strategy is block_alert_by_maintenance_window
     monkeypatch.setenv("MAINTENANCE_WINDOW_STRATEGY", "recover_previous_status")
-    importlib.reload(config.consts)
-    importlib.reload(bl.maintenance_windows_bl)
+    importlib.reload(src.config.consts)
+    importlib.reload(src.bl.maintenance_windows_bl)
     # AND A rule matching by Source
     correlation_rule = Rule(
         tenant_id=SINGLE_TENANT_UUID,
@@ -1839,8 +1840,8 @@ def test_create_incident_after_maintenance_window(
     """
     # GIVEN The source not allowed to create incidents
     monkeypatch.setenv("MAINTENANCE_WINDOW_STRATEGY", "recover_previous_status")
-    importlib.reload(config.consts)
-    importlib.reload(bl.maintenance_windows_bl)
+    importlib.reload(src.config.consts)
+    importlib.reload(src.bl.maintenance_windows_bl)
     # AND A Maintenance Window matching by Source
     maintenance_w = create_window_maintenance_active(
         start=datetime.now(UTC) - timedelta(hours=3),

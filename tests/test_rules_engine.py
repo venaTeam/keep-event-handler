@@ -6,8 +6,8 @@ from time import sleep
 import pytest
 
 def create_rule_db(**kwargs):
-    from core.db.db import get_session
-    from models.db.rule import Rule, CreateIncidentOn, ResolveOn
+    from src.core.db.db import get_session
+    from src.models.db.rule import Rule, CreateIncidentOn, ResolveOn
     import datetime
     
     session = next(get_session())
@@ -34,8 +34,8 @@ def create_rule_db(**kwargs):
     return rule
 
 def get_last_incidents(tenant_id, is_candidate=None, limit=10, offset=0, session=None, **kwargs):
-    from core.db.db import get_session
-    from models.db.incident import Incident
+    from src.core.db.db import get_session
+    from src.models.db.incident import Incident
     from sqlmodel import select, func
     
     s = session or next(get_session())
@@ -49,20 +49,20 @@ def get_last_incidents(tenant_id, is_candidate=None, limit=10, offset=0, session
     incidents = s.exec(query.order_by(Incident.creation_time.desc()).offset(offset).limit(limit)).all()
     return incidents, total_count
 
-from core.db.db import (
+from src.core.db.db import (
     enrich_incidents_with_alerts,
     get_incident_alerts_by_incident_id,
     set_last_alert,
 )
-from core.db.db import get_rules as get_rules_db
-from core.dependencies import SINGLE_TENANT_UUID
-from models.alert import AlertDto, AlertSeverity, AlertStatus
-from models.db.alert import Alert
-from models.db.incident import Incident
-from models.db.incident import IncidentSeverity, IncidentStatus
-from models.db.rule import CreateIncidentOn, ResolveOn
-from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
-from rulesengine.rulesengine import RulesEngine
+from src.core.db.db import get_rules as get_rules_db
+from src.core.dependencies import SINGLE_TENANT_UUID
+from src.models.alert import AlertDto, AlertSeverity, AlertStatus
+from src.models.db.alert import Alert
+from src.models.db.incident import Incident
+from src.models.db.incident import IncidentSeverity, IncidentStatus
+from src.models.db.rule import CreateIncidentOn, ResolveOn
+from src.utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
+from src.rulesengine.rulesengine import RulesEngine
 
 
 def _persist_alert(session, alert_dto, tenant_id, provider_type="test", provider_id="test"):
