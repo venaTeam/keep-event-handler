@@ -610,3 +610,41 @@ def test_strategy_alert_execution_wf(
     n_executions = get_workflow_executions(SINGLE_TENANT_UUID, workflow.id)[0]
 
     assert n_executions == executions
+
+
+def test_recover_strategy_closes_owned_session():
+    """recover_strategy must close the session it creates — a leaked pooled
+    connection per call eventually exhausts the pool."""
+    import logging
+
+    tracking_session = MagicMock()
+    with patch(
+        "src.bl.maintenance_windows_bl.get_session_sync",
+        return_value=tracking_session,
+    ), patch(
+        "src.bl.maintenance_windows_bl.get_maintenance_windows_started",
+        return_value=[],
+    ), patch(
+        "src.bl.maintenance_windows_bl.get_alerts_by_status",
+        return_value=[],
+    ):
+        MaintenanceWindowsBl.recover_strategy(logging.getLogger(__name__))
+    tracking_session.close.assert_called_once()
+
+
+def test_recover_strategy_does_not_close_caller_session():
+    """A session passed in by the caller is the caller's to close."""
+    import logging
+
+    tracking_session = MagicMock()
+    with patch(
+        "src.bl.maintenance_windows_bl.get_maintenance_windows_started",
+        return_value=[],
+    ), patch(
+        "src.bl.maintenance_windows_bl.get_alerts_by_status",
+        return_value=[],
+    ):
+        MaintenanceWindowsBl.recover_strategy(
+            logging.getLogger(__name__), session=tracking_session
+        )
+    tracking_session.close.assert_not_called()

@@ -180,6 +180,25 @@ class MaintenanceWindowsBl:
         logger: logging.Logger,
         session: Session | None = None,
     ):
+        """Run the recovery pass, closing the session if we created it.
+
+        A session created here and never closed leaks a pooled connection per
+        call, eventually exhausting the pool.
+        """
+        owns_session = session is None
+        if owns_session:
+            session = get_session_sync()
+        try:
+            return MaintenanceWindowsBl._recover_strategy_impl(logger, session)
+        finally:
+            if owns_session:
+                session.close()
+
+    @staticmethod
+    def _recover_strategy_impl(
+        logger: logging.Logger,
+        session: Session,
+    ):
         """
 
         This strategy will try to recover the previous status of the alerts that were in maintenance windows,
@@ -203,8 +222,6 @@ class MaintenanceWindowsBl:
         """
         logger.info("Starting recover strategy for maintenance windows review.")
         env = celpy.Environment()
-        if session is None:
-            session = get_session_sync()
         windows = get_maintenance_windows_started(session)
         alerts_in_maint = get_alerts_by_status(AlertStatus.MAINTENANCE, session)
         fingerprints_to_check: set = set()

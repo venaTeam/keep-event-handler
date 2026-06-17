@@ -35,6 +35,7 @@ from sqlalchemy import (
     select,
     union,
     update,
+    delete
 )
 
 from sqlalchemy.exc import IntegrityError, InternalError, OperationalError
@@ -642,6 +643,23 @@ def _enrich_entity(
         session.refresh(last_alert)
     return last_alert
 
+
+def delete_alert(
+    fingerprint: UUID | str,
+    session=None
+):
+    with existed_or_new_session(session) as session:
+
+        session.execute(delete(LastAlertToIncident).where(LastAlertToIncident.fingerprint == fingerprint))                          
+        session.execute(delete(LastAlert).where(LastAlert.fingerprint == fingerprint))
+        session.execute(delete(AlertAudit).where(AlertAudit.fingerprint == fingerprint))
+        session.execute(delete(Alert).where(Alert.fingerprint == fingerprint))
+        session.commit()
+
+
+
+
+    
 
 def enrich_entity(
     tenant_id,
