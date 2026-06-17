@@ -49,4 +49,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8082/health || exit 1
 
 # Run the standalone consumer (no gunicorn)
-CMD ["python", "consumer_main.py"]
+CMD ["python", "-m", "src.consumer_main"]

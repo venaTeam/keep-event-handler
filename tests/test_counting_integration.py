@@ -6,7 +6,7 @@ import pytest
 
 pytestmark = pytest.mark.skip(reason="Tests require API Gateway endpoints (/alerts)")
 
-from providers.providers_factory import ProvidersFactory
+from src.providers.providers_factory import ProvidersFactory
 
 # Set the log level to DEBUG
 logging.basicConfig(level=logging.DEBUG)

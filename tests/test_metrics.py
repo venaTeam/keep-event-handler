@@ -2,7 +2,7 @@ import pytest
 
 pytestmark = pytest.mark.skip(reason="Tests require API Gateway /metrics logic and endpoint integrations")
 
-from core.db.db import (
+from src.core.db.db import (
     add_alerts_to_incident,
     create_incident_from_dict,
 )

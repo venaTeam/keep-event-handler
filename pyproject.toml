@@ -1,10 +1,10 @@
 [tool.poetry]
 name = "keep-event-handler"
-version = "0.51.0.6"
+version = "0.51.6"
 description = "Event Handler service for Keep"
 authors = ["Keep Authors"]
 readme = "README.md"
-packages = [{include = "__init__.py"}]
+packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"

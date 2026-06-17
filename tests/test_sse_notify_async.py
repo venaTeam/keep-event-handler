@@ -1,7 +1,7 @@
 import time
 from unittest.mock import MagicMock, patch
 
-import event_management.process_event_task as pet
+import src.event_management.process_event_task as pet
 
 
 def test_submit_notify_is_non_blocking_and_still_delivers():

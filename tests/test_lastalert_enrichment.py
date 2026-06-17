@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.db.db import (
+from src.core.db.db import (
     LASTALERT_ENRICHMENT_COLUMNS,
     LASTALERT_TRACKING_COLUMNS,
     batch_enrich,
@@ -28,10 +28,11 @@ from core.db.db import (
     normalize_enrichments,
     set_last_alert,
 )
-from core.dependencies import SINGLE_TENANT_UUID
-from models.action_type import ActionType
-from models.alert import AlertStatus
-from models.db.alert import Alert, AlertAudit, AlertEnrichment, LastAlert
+from src.core.dependencies import SINGLE_TENANT_UUID
+from src.models.action_type import ActionType
+from src.models.alert import AlertStatus
+from src.models.db.alert import Alert, AlertAudit, IncidentEnrichment, LastAlert
+from src.models.db.incident import Incident
 
 
 def _make_alert(fingerprint, status, ts=None):
@@ -122,9 +123,9 @@ def test_unknown_key_discarded_non_strict():
 # --------------------------------------------------------------------------- #
 def test_last_alert_enrichments_dict_dismissed_until_is_wire_string():
     """`last_alert_enrichments_dict` must coerce the typed DateTime column to the
-    legacy ISO "...%f.Z" wire string so JSON consumers (Elastic, SSE notify,
-    Kafka, AlertDto.validate_dismissed) all see one canonical, serializable
-    format. A raw datetime would break json.dumps and the strptime validator."""
+    ISO "...%f.Z" wire string so JSON consumers (Elastic, SSE notify, Kafka,
+    AlertDto) all see one canonical, serializable format. A raw datetime would
+    break json.dumps."""
     la = LastAlert()
     la.status = "suppressed"
     la.dismiss_mode = "dismiss_until"
@@ -371,25 +372,36 @@ def test_tracking_dict_cannot_clobber_user_enrichment_columns(db_session):
 
 
 # --------------------------------------------------------------------------- #
-# Incident enrichment stays on AlertEnrichment (EH-3b) — preserved until a later migration removes the `alertenrichment` table
+# Incident enrichment lives on the dedicated IncidentEnrichment table
 # --------------------------------------------------------------------------- #
-def test_incident_enrich_writes_alertenrichment_not_lastalert(db_session):
-    """Incident enrichment (entity_type='incident') must write the legacy
-    AlertEnrichment JSONB row keyed by the incident UUID, and must NOT create a
-    LastAlert row (incidents have none)."""
-    incident_id = str(uuid.uuid4())
+def _make_incident(db_session) -> Incident:
+    incident = Incident(
+        tenant_id=SINGLE_TENANT_UUID,
+        user_summary="s",
+        generated_summary="s",
+    )
+    db_session.add(incident)
+    db_session.commit()
+    return incident
+
+
+def test_incident_enrich_writes_incidentenrichment_not_lastalert(db_session):
+    """Incident enrichment (entity_type='incident') must write the
+    IncidentEnrichment JSONB row keyed by the incident UUID, and must NOT create
+    a LastAlert row (incidents have none)."""
+    incident_id = str(_make_incident(db_session).id)
     enrich_entity(
         SINGLE_TENANT_UUID,
         incident_id,
         # arbitrary keys that have NO typed LastAlert column must be allowed
         {"status": "acknowledged", "ticket_url": "https://x/1", "severity": "high"},
-        action_type=ActionType.GENERIC_ENRICH,
+        action_type=ActionType.INCIDENT_ENRICH,
         action_callee="bob",
         action_description="incident enrich",
         session=db_session,
         entity_type="incident",
     )
-    # AlertEnrichment row exists with arbitrary keys preserved (no rejection)
+    # IncidentEnrichment row exists with arbitrary keys preserved (no rejection)
     enr = get_enrichment_with_session(db_session, SINGLE_TENANT_UUID, incident_id)
     assert enr is not None
     assert enr.enrichments["status"] == "acknowledged"
@@ -411,16 +423,16 @@ def test_incident_enrich_writes_alertenrichment_not_lastalert(db_session):
 
 def test_incident_enrich_merges_without_dismissed_translation(db_session):
     """A second incident enrich merges into the existing JSONB and performs NO
-    dismissed -> dismiss_mode translation (legacy behavior)."""
-    incident_id = str(uuid.uuid4())
+    dismissed -> dismiss_mode translation (arbitrary keys preserved verbatim)."""
+    incident_id = str(_make_incident(db_session).id)
     enrich_entity(
         SINGLE_TENANT_UUID, incident_id, {"note": "first"},
-        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_type=ActionType.INCIDENT_ENRICH, action_callee="bob",
         action_description="t", session=db_session, entity_type="incident",
     )
     enrich_entity(
         SINGLE_TENANT_UUID, incident_id, {"dismissed": True},
-        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_type=ActionType.INCIDENT_ENRICH, action_callee="bob",
         action_description="t", session=db_session, entity_type="incident",
     )
     enr = get_enrichment_with_session(db_session, SINGLE_TENANT_UUID, incident_id)
@@ -431,21 +443,21 @@ def test_incident_enrich_merges_without_dismissed_translation(db_session):
     assert "dismiss_mode" not in enr.enrichments
 
 
-def test_incident_batch_enrich_writes_alertenrichment(db_session):
-    incident_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+def test_incident_batch_enrich_writes_incidentenrichment(db_session):
+    incident_ids = [str(_make_incident(db_session).id) for _ in range(2)]
     batch_enrich(
         SINGLE_TENANT_UUID,
         incident_ids,
         {"status": "resolved"},
-        action_type=ActionType.GENERIC_ENRICH,
+        action_type=ActionType.INCIDENT_ENRICH,
         action_callee="bob",
         action_description="t",
         session=db_session,
         entity_type="incident",
     )
     rows = (
-        db_session.query(AlertEnrichment)
-        .filter(AlertEnrichment.alert_fingerprint.in_(incident_ids))
+        db_session.query(IncidentEnrichment)
+        .filter(IncidentEnrichment.incident_id.in_([uuid.UUID(i) for i in incident_ids]))
         .all()
     )
     assert len(rows) == 2
