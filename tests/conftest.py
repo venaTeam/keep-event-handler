@@ -28,18 +28,18 @@ if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
     os.environ["PROMETHEUS_MULTIPROC_DIR"] = tempfile.mkdtemp(prefix="prometheus_multiproc_")
 
 # This import is required to create the tables
-from core.dependencies import SINGLE_TENANT_UUID
-from core.elastic import ElasticClient
-from models.alert import AlertStatus
-from models.db.alert import *
-from models.db.maintenance_window import MaintenanceWindowRule
-from models.db.provider import *
-from models.db.rule import *
-from models.db.tenant import *
-from models.db.user import *
-from event_management.process_event_task import process_event
-from utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
-from contextmanager.contextmanager import ContextManager
+from src.core.dependencies import SINGLE_TENANT_UUID
+from src.core.elastic import ElasticClient
+from src.models.alert import AlertStatus
+from src.models.db.alert import *
+from src.models.db.maintenance_window import MaintenanceWindowRule
+from src.models.db.provider import *
+from src.models.db.rule import *
+from src.models.db.tenant import *
+from src.models.db.user import *
+from src.event_management.process_event_task import process_event
+from src.utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
+from src.contextmanager.contextmanager import ContextManager
 
 original_request = requests.Session.request  # noqa
 load_dotenv(find_dotenv())
@@ -50,7 +50,7 @@ pytest_plugins = ["tests.fixtures.client"]
 @pytest.fixture(scope="session", autouse=True)
 def mock_providers_factory():
     def side_effect(provider_type):
-        from models.alert import AlertDto
+        from src.models.alert import AlertDto
         class MockSafeProvider:
             PROVIDER_CATEGORY = "mock"
             PROVIDER_COMING_SOON = False
@@ -93,12 +93,12 @@ def mock_providers_factory():
                 return False
         return MockSafeProvider
         
-    with patch("event_management.process_event_task.ProvidersFactory.get_provider_class", side_effect=side_effect):
+    with patch("src.event_management.process_event_task.ProvidersFactory.get_provider_class", side_effect=side_effect):
         yield
 
 @pytest.fixture(scope="session", autouse=True)
 def mock_elastic_connection():
-    with patch("core.elastic.ElasticClient") as mock_elastic:
+    with patch("src.core.elastic.ElasticClient") as mock_elastic:
         mock_instance = MagicMock()
         mock_elastic.return_value = mock_instance
         mock_instance.index_alert.return_value = None
@@ -315,8 +315,8 @@ def db_session(request, monkeypatch, tmp_path):
     session.commit()
     # Note: Workflow models don't exist in keep-event-handler, skipping workflow prepopulation
 
-    with patch("core.db.db.engine", mock_engine):
-        with patch("core.db.db_utils.create_db_engine", return_value=mock_engine):
+    with patch("src.core.db.db.engine", mock_engine):
+        with patch("src.core.db.db_utils.create_db_engine", return_value=mock_engine):
             yield session
 
     import logging

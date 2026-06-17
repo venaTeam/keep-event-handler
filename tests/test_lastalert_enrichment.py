@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.db.db import (
+from src.core.db.db import (
     LASTALERT_ENRICHMENT_COLUMNS,
     LASTALERT_TRACKING_COLUMNS,
     batch_enrich,
@@ -28,11 +28,11 @@ from core.db.db import (
     normalize_enrichments,
     set_last_alert,
 )
-from core.dependencies import SINGLE_TENANT_UUID
-from models.action_type import ActionType
-from models.alert import AlertStatus
-from models.db.alert import Alert, AlertAudit, IncidentEnrichment, LastAlert
-from models.db.incident import Incident
+from src.core.dependencies import SINGLE_TENANT_UUID
+from src.models.action_type import ActionType
+from src.models.alert import AlertStatus
+from src.models.db.alert import Alert, AlertAudit, IncidentEnrichment, LastAlert
+from src.models.db.incident import Incident
 
 
 def _make_alert(fingerprint, status, ts=None):
