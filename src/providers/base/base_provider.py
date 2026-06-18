@@ -308,8 +308,8 @@ class BaseProvider(metaclass=abc.ABCMeta):
                 )
                 continue
         self.logger.info("Enriching alert", extra={"fingerprint": fingerprint})
+        enrichments_bl = EnrichmentsBl(self.context_manager.tenant_id)
         try:
-            enrichments_bl = EnrichmentsBl(self.context_manager.tenant_id)
             enrichment_string = ", ".join(
                 [f"{key}={value}" for key, value in _enrichments.items()]
             )
@@ -362,6 +362,9 @@ class BaseProvider(metaclass=abc.ABCMeta):
                 extra={"fingerprint": fingerprint, "provider": self.provider_id},
             )
             raise e
+        finally:
+            # Return the pooled connection even when enrichment raises.
+            enrichments_bl.close()
         self.logger.info(
             f"{entity_type.capitalize()} enriched", extra={"fingerprint": fingerprint}
         )

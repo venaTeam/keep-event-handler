@@ -95,12 +95,29 @@ class EnrichmentsBl:
         self.tenant_id = tenant_id
         self.__logs: list[EnrichmentLog] = []
         self.enrichment_event_id: UUID | None = None
+        # When no session is passed we open our own and must close it. A
+        # self-created session that is never closed leaks a pooled connection
+        # per EnrichmentsBl instance, eventually exhausting the pool.
+        self._owns_session = False
         if not EnrichmentsBl.ENRICHMENT_DISABLED:
+            self._owns_session = db is None
             self.db_session = db or get_session_sync()
             self.elastic_client = ElasticClient(tenant_id=tenant_id)
         else:
             self.db_session = None
             self.elastic_client = None
+
+    def close(self):
+        """Close the DB session only if this instance created it."""
+        if self._owns_session and self.db_session is not None:
+            self.db_session.close()
+            self._owns_session = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     def run_mapping_rule_by_id(self, rule_id: int, alert_id: UUID) -> AlertDto:
         rule = get_mapping_rule_by_id(self.tenant_id, rule_id, session=self.db_session)
