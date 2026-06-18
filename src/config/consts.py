@@ -54,10 +54,7 @@ KEEP_FORCE_CONNECTION_STRING = config(
     "KEEP_FORCE_CONNECTION_STRING", default=False, cast=bool
 )  # pylint: disable=invalid-name
 KEEP_DB_PRE_PING_ENABLED = config("KEEP_DB_PRE_PING_ENABLED", default=True, cast=bool)  # pylint: disable=invalid-name
-# Recycle pooled connections below PgBouncer's server_idle_timeout so stale
-# server-side connections are dropped instead of reused. 0 disables recycling.
 DB_POOL_RECYCLE = config("DATABASE_POOL_RECYCLE", default=300, cast=int)  # pylint: disable=invalid-name
-# Block (instead of growing unbounded) when no pooled connection is free.
 DB_POOL_TIMEOUT = config("DATABASE_POOL_TIMEOUT", default=10, cast=int)  # pylint: disable=invalid-name
 
 
