@@ -19,7 +19,7 @@ from pythonjsonlogger import jsonlogger
 from sqlmodel import Session
 
 from src.config.consts import RUNNING_IN_CLOUD_RUN
-from src.core.db.db import get_session, push_logs_to_db
+from src.core.db.db import engine, push_logs_to_db
 from src.models.db.provider import ProviderExecutionLog
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -200,30 +200,33 @@ class ProviderDBHandler(logging.Handler):
         self.records = []
 
         try:
-            session = Session(next(get_session()).bind)
-            log_entries = []
+            # `with Session(engine)` returns the pooled connection on exit
+            # (including on error). The previous `Session(next(get_session()).bind)`
+            # leaked the generator's connection because the generator was never
+            # closed, and only closed the session on the success path.
+            with Session(engine) as session:
+                log_entries = []
 
-            for record in _records:
-                # if record have execution_id use it, but mostly for future use
-                if hasattr(record, "execution_id"):
-                    execution_id = record.execution_id
-                else:
-                    execution_id = None
-                entry = ProviderExecutionLog(
-                    id=str(uuid.uuid4()),
-                    tenant_id=record.tenant_id,
-                    provider_id=record.provider_id,
-                    timestamp=datetime.fromtimestamp(record.created),
-                    log_message=record.getMessage(),
-                    log_level=record.levelname,
-                    context=getattr(record, "extra", {}),
-                    execution_id=execution_id,
-                )
-                log_entries.append(entry)
+                for record in _records:
+                    # if record have execution_id use it, but mostly for future use
+                    if hasattr(record, "execution_id"):
+                        execution_id = record.execution_id
+                    else:
+                        execution_id = None
+                    entry = ProviderExecutionLog(
+                        id=str(uuid.uuid4()),
+                        tenant_id=record.tenant_id,
+                        provider_id=record.provider_id,
+                        timestamp=datetime.fromtimestamp(record.created),
+                        log_message=record.getMessage(),
+                        log_level=record.levelname,
+                        context=getattr(record, "extra", {}),
+                        execution_id=execution_id,
+                    )
+                    log_entries.append(entry)
 
-            session.add_all(log_entries)
-            session.commit()
-            session.close()
+                session.add_all(log_entries)
+                session.commit()
         except Exception as e:
             # Use the parent logger to avoid infinite recursion
             logging.getLogger(__name__).error(
