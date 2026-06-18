@@ -95,9 +95,6 @@ class EnrichmentsBl:
         self.tenant_id = tenant_id
         self.__logs: list[EnrichmentLog] = []
         self.enrichment_event_id: UUID | None = None
-        # When no session is passed we open our own and must close it. A
-        # self-created session that is never closed leaks a pooled connection
-        # per EnrichmentsBl instance, eventually exhausting the pool.
         self._owns_session = False
         if not EnrichmentsBl.ENRICHMENT_DISABLED:
             self._owns_session = db is None
@@ -108,7 +105,6 @@ class EnrichmentsBl:
             self.elastic_client = None
 
     def close(self):
-        """Close the DB session only if this instance created it."""
         if self._owns_session and self.db_session is not None:
             self.db_session.close()
             self._owns_session = False

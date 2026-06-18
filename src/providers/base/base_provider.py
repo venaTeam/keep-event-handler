@@ -363,7 +363,6 @@ class BaseProvider(metaclass=abc.ABCMeta):
             )
             raise e
         finally:
-            # Return the pooled connection even when enrichment raises.
             enrichments_bl.close()
         self.logger.info(
             f"{entity_type.capitalize()} enriched", extra={"fingerprint": fingerprint}
