@@ -200,10 +200,6 @@ class ProviderDBHandler(logging.Handler):
         self.records = []
 
         try:
-            # `with Session(engine)` returns the pooled connection on exit
-            # (including on error). The previous `Session(next(get_session()).bind)`
-            # leaked the generator's connection because the generator was never
-            # closed, and only closed the session on the success path.
             with Session(engine) as session:
                 log_entries = []
 
