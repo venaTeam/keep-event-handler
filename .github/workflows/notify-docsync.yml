@@ -1,0 +1,39 @@
+# docsync trigger — install in EACH Keep service repo (keep-api-gateway,
+# keep-event-handler, keep-workflows, keep-ui) on a dedicated review branch off `dev`.
+#
+# On every push to the default branch it notifies the docs repo (a repository_dispatch)
+# with the repo + base/head SHAs; the docs repo's docsync.yml then runs docsync.
+#
+# This file is ADDITIVE CI config — it does not touch application code. It is staged
+# here in docsync/deploy/ for review; it has NOT been applied to any Keep repo.
+#
+# Required secret in the service repo:
+#   DOCSYNC_DISPATCH_TOKEN — a PAT (or fine-grained token) with `contents:read` on this
+#   repo and permission to send a repository_dispatch to venaTeam/keep-developer-docs.
+name: notify-docsync
+
+on:
+  push:
+    branches: [dev] # the service repos' default branch
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch docsync run to the docs repo
+        run: |
+          curl -sSf -X POST \
+            -H "Authorization: Bearer ${{ secrets.DOCSYNC_DISPATCH_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/venaTeam/keep-developer-docs/dispatches \
+            -d @- <<JSON
+          {
+            "event_type": "docsync",
+            "client_payload": {
+              "repo": "${{ github.repository }}",
+              "base_sha": "${{ github.event.before }}",
+              "head_sha": "${{ github.sha }}",
+              "pr_title": ${{ toJSON(github.event.head_commit.message) }}
+            }
+          }
+          JSON
