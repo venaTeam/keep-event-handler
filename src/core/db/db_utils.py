@@ -24,7 +24,7 @@ from sqlalchemy.sql.functions import GenericFunction
 from sqlmodel import Session, SQLModel, create_engine, select
 
 # This import is required to create the tables
-from src.config.consts import RUNNING_IN_CLOUD_RUN, DB_CONNECTION_STRING, DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_ECHO, KEEP_FORCE_CONNECTION_STRING, KEEP_DB_PRE_PING_ENABLED
+from src.config.consts import RUNNING_IN_CLOUD_RUN, DB_CONNECTION_STRING, DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_ECHO, KEEP_FORCE_CONNECTION_STRING, KEEP_DB_PRE_PING_ENABLED, DB_POOL_RECYCLE, DB_POOL_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +138,8 @@ def create_db_engine():
                 DB_CONNECTION_STRING,
                 pool_size=DB_POOL_SIZE,
                 max_overflow=DB_MAX_OVERFLOW,
+                pool_recycle=DB_POOL_RECYCLE,
+                pool_timeout=DB_POOL_TIMEOUT,
                 json_serializer=dumps,
                 echo=DB_ECHO,
                 pool_pre_ping=True if KEEP_DB_PRE_PING_ENABLED else False,

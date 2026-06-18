@@ -22,7 +22,7 @@ import alembic.config
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from src.core.db.db_utils import create_db_engine
+from src.core.db.db import engine
 
 # This import is required to create the tables
 from src.models.roles import Admin as AdminRole
@@ -48,7 +48,12 @@ from src.config.consts import DEFAULT_PASSWORD, DEFAULT_USERNAME, KEEP_FORCE_RES
 
 logger = logging.getLogger(__name__)
 
-engine = create_db_engine()
+# Reuse the singleton engine from db.py instead of creating a second one.
+# A second engine keeps its own QueuePool, which holds up to pool_size idle
+# connections (opened by the startup migrate/create-tenant work) for the whole
+# process lifetime. The event-handler runs as a single process
+# (`python -m src.consumer_main`, no gunicorn fork), so the fork-safety reason
+# the engines were originally split (see module docstring) does not apply here.
 
 
 def try_create_single_tenant(tenant_id: str, create_default_user=True) -> None:
