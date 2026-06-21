@@ -1924,5 +1924,21 @@ def __save_error_alerts(
         session.close()
 
 
+def record_terminal_error(tenant_id, provider_type, raw_event, error_message):
+    """Public entrypoint for the Kafka consumer's terminal handling of a poison
+    or retry-exhausted message: persist the raw payload as an AlertRaw error
+    row, gated by the error-storm guard (so a poison flood can't fill alertraw).
+
+    This is the consumer-side replacement for the old re-raise-and-redeliver
+    behavior — after recording, the caller commits the offset.
+    """
+    __save_error_alerts(
+        tenant_id=tenant_id,
+        provider_type=provider_type,
+        raw_events=raw_event,
+        error_message=error_message,
+    )
+
+
 async def async_process_event(*args, **kwargs):
     return process_event(*args, **kwargs)

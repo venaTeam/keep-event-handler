@@ -1,6 +1,6 @@
 import json
 from unittest.mock import MagicMock, patch, call
-from src.core.kafka_consumer import KafkaEventConsumer
+from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
 
 
 def test_consume_loop_success_commits():
@@ -46,18 +46,19 @@ def test_consume_loop_success_commits():
             mock_consumer_instance.commit.assert_called_once()
 
 
-def test_consume_loop_retries_and_raises():
+def test_consume_loop_retries_then_terminal_commit():
     """
-    Verify that if process_event_sync fails continuously:
-    1. It retries MAX_PROCESSING_RETRIES times.
-    2. It does NOT commit.
-    3. The error is propagated (but consume loop catches it and continues).
+    New behavior: a message that always fails with a transient error is retried
+    MAX_PROCESSING_RETRIES times, then recorded via the terminal sink and the
+    offset COMMITTED (replacing the old re-raise-forever behavior that froze the
+    partition).
     """
     mock_msg = MagicMock()
     mock_msg.value.return_value = json.dumps({
         "trace_id": "fail-trace",
         "tenant_id": "test-tenant",
-        "event": {"data": "fail"}
+        "event": {"data": "fail"},
+        "provider_type": "grafana",
     }).encode("utf-8")
     mock_msg.error.return_value = None
 
@@ -77,23 +78,24 @@ def test_consume_loop_retries_and_raises():
 
     with patch("src.core.kafka_consumer.Consumer", return_value=mock_consumer_instance):
         with patch("src.core.kafka_consumer.process_event_sync") as mock_process:
-            # Configure process_event_sync to always fail
+            # Always fail with a generic (transient-classified) error.
             mock_process.side_effect = Exception("Processing Error")
 
             with patch("src.core.kafka_consumer.MAX_PROCESSING_RETRIES", 3):
-                consumer = KafkaEventConsumer()
-                consumer._consumer = mock_consumer_instance
-                consumer._running = True
+                with patch("src.core.kafka_consumer.record_terminal_error") as mock_terminal:
+                    with patch("src.core.kafka_consumer.time.sleep"):
+                        consumer = KafkaEventConsumer()
+                        consumer._consumer = mock_consumer_instance
+                        consumer._running = True
 
-                # The consume loop should catch the error and continue
-                # (it logs the error and doesn't commit)
-                consumer._consume_loop()
+                        consumer._consume_loop()
 
-                # Assertions
-                # Should have 3 retry attempts (MAX_PROCESSING_RETRIES)
-                assert mock_process.call_count == 3
-                # Should NOT commit because processing failed
-                mock_consumer_instance.commit.assert_not_called()
+                        # Retried up to the attempt cap.
+                        assert mock_process.call_count == 3
+                        # Terminal sink recorded the poison/exhausted message.
+                        mock_terminal.assert_called_once()
+                        # And the offset WAS committed (no partition freeze).
+                        mock_consumer_instance.commit.assert_called_once()
 
 
 def test_process_with_retries_success_on_second_attempt():
@@ -107,9 +109,10 @@ def test_process_with_retries_success_on_second_attempt():
 
             consumer = KafkaEventConsumer()
             mock_event_dto = MagicMock()
+            budget = RetryBudget(max_poll_interval_ms=300000)
 
             # Should not raise
-            consumer._process_with_retries(mock_event_dto)
+            consumer._process_with_retries(mock_event_dto, budget, {"tenant_id": "t1"})
 
             # Should have been called twice
             assert mock_process.call_count == 2
@@ -117,14 +120,19 @@ def test_process_with_retries_success_on_second_attempt():
 
 def test_process_message_json_decode_error():
     """
-    Verify that malformed JSON messages are handled gracefully.
+    Verify that malformed JSON messages are handled gracefully: recorded as
+    terminal and committed (returns True), not re-raised.
     """
     mock_msg = MagicMock()
     mock_msg.value.return_value = b"not valid json"
 
     consumer = KafkaEventConsumer()
+    budget = RetryBudget(max_poll_interval_ms=300000)
 
     with patch("src.core.kafka_consumer.events_error_counter") as mock_error_counter:
-        # Should not raise - allows commit to avoid getting stuck
-        consumer._process_message(mock_msg)
-        mock_error_counter.inc.assert_called_once()
+        with patch("src.core.kafka_consumer.record_terminal_error") as mock_terminal:
+            # Should not raise - returns True (commit past malformed message).
+            result = consumer._process_message(mock_msg, budget)
+            assert result is True
+            mock_error_counter.inc.assert_called_once()
+            mock_terminal.assert_called_once()

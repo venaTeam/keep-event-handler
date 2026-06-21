@@ -11,8 +11,15 @@ import time
 from typing import Optional
 
 from confluent_kafka import Consumer, KafkaError, KafkaException
+from pydantic import ValidationError
+from requests.exceptions import HTTPError
+from sqlalchemy.exc import OperationalError
 
-from src.config.consts import MAX_PROCESSING_RETRIES
+from src.config.consts import (
+    MAX_PROCESSING_RETRIES,
+    KAFKA_RETRY_MAX_SLEEP_SECONDS,
+    KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR,
+)
 from src.config.config import config
 from src.core.metrics import (
     events_in_counter,
@@ -21,10 +28,99 @@ from src.core.metrics import (
     processing_time_summary,
 )
 from src.controllers.event_controller import process_event_sync
+from src.event_management.process_event_task import record_terminal_error
 from src.models.event_dto import EventDTO
 
 
 logger = logging.getLogger(__name__)
+
+
+class PoisonMessageError(Exception):
+    """A message that can never succeed on retry (bad payload, unknown type,
+    validation failure, or a client/4xx error from the gateway). Routed to the
+    terminal sink and committed instead of retried."""
+
+
+def _gateway_http_status(exc: Exception) -> Optional[int]:
+    """Best-effort HTTP status from a requests HTTPError raised by a gateway
+    call somewhere in the processing path."""
+    if isinstance(exc, HTTPError) and exc.response is not None:
+        return exc.response.status_code
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def classify_error(exc: Exception) -> str:
+    """Classify a processing error as 'poison' (no retry) or 'transient'
+    (bounded retry).
+
+    poison: json.JSONDecodeError, unknown event_type, Pydantic ValidationError,
+            gateway HTTP 4xx.
+    transient: DB OperationalError / lock, gateway 5xx / timeout, everything
+            else (default to transient so a genuinely retryable bug still
+            gets its bounded retries rather than being dropped).
+    """
+    if isinstance(exc, (PoisonMessageError, json.JSONDecodeError, ValidationError)):
+        return "poison"
+
+    status = _gateway_http_status(exc)
+    if status is not None:
+        if 400 <= status < 500:
+            return "poison"
+        # 5xx (and anything else non-4xx) is transient.
+        return "transient"
+
+    # DB operational/lock errors are transient by construction.
+    if isinstance(exc, OperationalError):
+        return "transient"
+
+    # Unknown errors: default to transient (bounded retry), not poison —
+    # a real transient bug shouldn't be silently dropped on first failure.
+    return "transient"
+
+
+class RetryBudget:
+    """Batch-wide retry budget. Aborts remaining retries once the time elapsed
+    since the last poll approaches max.poll.interval.ms (scaled by the safety
+    factor), so accumulated retry sleep can never trigger a consumer-group
+    rebalance. Per-attempt sleep is capped by KAFKA_RETRY_MAX_SLEEP_SECONDS."""
+
+    def __init__(
+        self,
+        max_poll_interval_ms: int,
+        safety_factor: float = KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR,
+        max_sleep_seconds: int = KAFKA_RETRY_MAX_SLEEP_SECONDS,
+        clock=time.monotonic,
+    ):
+        self._budget_seconds = (max_poll_interval_ms / 1000.0) * safety_factor
+        self._max_sleep_seconds = max_sleep_seconds
+        self._clock = clock
+        self._started_at = clock()
+
+    def reset(self):
+        """Call right after a successful poll: the budget is measured from the
+        most recent poll so the whole batch shares one deadline."""
+        self._started_at = self._clock()
+
+    def elapsed(self) -> float:
+        return self._clock() - self._started_at
+
+    def remaining(self) -> float:
+        return self._budget_seconds - self.elapsed()
+
+    def exhausted(self) -> bool:
+        return self.remaining() <= 0
+
+    def sleep_for(self, attempt: int) -> float:
+        """Bounded backoff for this attempt, never overrunning the remaining
+        budget. Returns the seconds slept."""
+        backoff = min(2 ** attempt, self._max_sleep_seconds)
+        # Never sleep past the budget deadline.
+        backoff = max(0.0, min(backoff, self.remaining()))
+        if backoff > 0:
+            time.sleep(backoff)
+        return backoff
 
 
 class EventConsumer(abc.ABC):
@@ -194,11 +290,16 @@ class KafkaEventConsumer(EventConsumer):
                 # Reset error counter on successful poll
                 consecutive_errors = 0
 
-                # Process the message
-                self._process_message(msg)
+                # Fresh retry budget per poll (batch-wide once batching lands).
+                budget = RetryBudget(self._max_poll_interval)
 
-                # Commit offset after successful processing
-                self._consumer.commit(msg, asynchronous=False)
+                # Process the message; terminal handling (poison / retry
+                # exhausted) records + signals commit so a bad message can't
+                # freeze the partition forever.
+                should_commit = self._process_message(msg, budget)
+
+                if should_commit:
+                    self._consumer.commit(msg, asynchronous=False)
 
             except KeyboardInterrupt:
                 self.logger.info("KeyboardInterrupt received, shutting down...")
@@ -217,64 +318,147 @@ class KafkaEventConsumer(EventConsumer):
 
         self.logger.info("Exited consume loop")
 
-    def _process_message(self, msg):
-        """Process a single Kafka message."""
+    def _process_message(self, msg, budget: "RetryBudget") -> bool:
+        """Process a single Kafka message.
+
+        Returns True if the offset should be committed (success, poison, or
+        retry-exhausted — all terminal), False only when the message is
+        genuinely unresolved and should be redelivered (e.g. an unexpected
+        error in terminal handling itself).
+        """
         events_in_counter.inc()
         payload = None
 
+        # Decode the raw payload. A non-JSON message is poison and committed
+        # (we keep the raw bytes for the terminal record).
+        raw_text = None
         try:
-            payload = json.loads(msg.value().decode("utf-8"))
-            trace_id = payload.get("trace_id", "unknown")
-            self.logger.debug(f"Processing message: {trace_id}")
-
-            # Construct DTO
-            event_dto = EventDTO(
-                tenant_id=payload.get("tenant_id"),
-                trace_id=trace_id,
-                event=payload.get("event"),
-                provider_type=payload.get("provider_type"),
-                provider_id=payload.get("provider_id"),
-                fingerprint=payload.get("fingerprint"),
-                api_key_name=payload.get("api_key_name"),
-                provider_name=payload.get("provider_name"),
-                event_type=payload.get("event_type"),
+            raw_text = msg.value().decode("utf-8")
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to decode message (poison): {e}")
+            events_error_counter.inc()
+            self._record_terminal(
+                payload={"raw": raw_text} if raw_text is not None else None,
+                error=e,
             )
+            return True  # commit past the malformed message
 
-            # Process with retries and timing
+        trace_id = payload.get("trace_id", "unknown")
+        self.logger.debug(f"Processing message: {trace_id}")
+
+        try:
+            # Construct DTO. A bad shape raises pydantic ValidationError =
+            # poison.
+            try:
+                event_dto = EventDTO(
+                    tenant_id=payload.get("tenant_id"),
+                    trace_id=trace_id,
+                    event=payload.get("event"),
+                    provider_type=payload.get("provider_type"),
+                    provider_id=payload.get("provider_id"),
+                    fingerprint=payload.get("fingerprint"),
+                    api_key_name=payload.get("api_key_name"),
+                    provider_name=payload.get("provider_name"),
+                    event_type=payload.get("event_type"),
+                )
+            except ValidationError as e:
+                self.logger.error(
+                    f"Invalid event payload (poison, trace_id={trace_id}): {e}"
+                )
+                events_error_counter.inc()
+                self._record_terminal(payload=payload, error=e)
+                return True
+
+            # Process with bounded, batch-wide retries and timing.
             with processing_time_summary.time():
-                self._process_with_retries(event_dto)
+                self._process_with_retries(event_dto, budget, payload)
 
             events_out_counter.inc()
             self.logger.debug(f"Successfully processed message: {trace_id}")
+            return True
 
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to decode message: {e}")
-            events_error_counter.inc()
-            # Still allow commit to avoid getting stuck on malformed messages
-            # In production, consider sending to DLQ instead
         except Exception as e:
-            trace_id = payload.get("trace_id", "unknown") if payload else "unknown"
+            # Should not normally reach here — _process_with_retries handles
+            # its own terminal recording. Be defensive: record + commit rather
+            # than freeze the partition.
             self.logger.exception(
-                f"Error processing Kafka message (trace_id={trace_id}): {e}"
+                f"Unexpected error processing message (trace_id={trace_id}): {e}"
             )
             events_error_counter.inc()
-            # Re-raise to prevent commit - message will be reprocessed
-            raise
+            try:
+                self._record_terminal(payload=payload, error=e)
+            except Exception:
+                self.logger.exception("Terminal recording failed; not committing")
+                return False
+            return True
 
-    def _process_with_retries(self, event_dto: EventDTO):
-        """Process event with retry logic."""
+    def _process_with_retries(
+        self, event_dto: EventDTO, budget: "RetryBudget", payload: dict
+    ):
+        """Process an event with bounded, batch-wide retry.
+
+        A poison error is never retried. A transient error retries up to
+        MAX_PROCESSING_RETRIES, with each attempt's backoff bounded by both
+        KAFKA_RETRY_MAX_SLEEP_SECONDS and the remaining batch-wide budget. When
+        retries are exhausted (attempt cap, classified poison, or budget
+        exhaustion), the message is recorded via the storm-guarded error sink
+        (terminal) and NOT re-raised, so its offset can be committed.
+        """
         for attempt in range(MAX_PROCESSING_RETRIES):
             try:
                 process_event_sync(event_dto)
                 return
             except Exception as e:
+                kind = classify_error(e)
                 self.logger.warning(
-                    f"Error processing event (attempt {attempt + 1}/{MAX_PROCESSING_RETRIES}): {e}"
+                    f"Error processing event "
+                    f"(attempt {attempt + 1}/{MAX_PROCESSING_RETRIES}, "
+                    f"class={kind}): {e}"
                 )
+
+                if kind == "poison":
+                    self.logger.error(
+                        "Poison message — recording and committing (no retry)"
+                    )
+                    self._record_terminal(payload=payload, error=e)
+                    return
+
+                # transient
                 if attempt == MAX_PROCESSING_RETRIES - 1:
-                    raise
-                # Exponential backoff, max 10s
-                time.sleep(min(2 ** attempt, 10))
+                    self.logger.error(
+                        "Retries exhausted (attempt cap) — recording and committing"
+                    )
+                    self._record_terminal(payload=payload, error=e)
+                    return
+
+                if budget.exhausted():
+                    self.logger.error(
+                        "Retry budget exhausted (poll-interval guard) — "
+                        "recording and committing"
+                    )
+                    self._record_terminal(payload=payload, error=e)
+                    return
+
+                budget.sleep_for(attempt)
+
+    def _record_terminal(self, payload, error: Exception):
+        """Terminal sink for a poison / retry-exhausted message: persist the
+        raw payload via the storm-guarded AlertRaw(error=True) path so the
+        partition can advance. Best-effort: never raises into the consume loop."""
+        tenant_id = payload.get("tenant_id") if isinstance(payload, dict) else None
+        provider_type = (
+            payload.get("provider_type") if isinstance(payload, dict) else None
+        )
+        try:
+            record_terminal_error(
+                tenant_id=tenant_id,
+                provider_type=provider_type,
+                raw_event=payload,
+                error_message=f"{type(error).__name__}: {error}",
+            )
+        except Exception:
+            self.logger.exception("Failed to record terminal error for poison message")
 
     def stop(self):
         """Stop the consumer gracefully."""
