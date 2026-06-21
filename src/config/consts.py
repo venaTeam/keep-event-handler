@@ -110,3 +110,43 @@ KEEP_CLOUDWATCH_DISABLE_API_KEY = config("KEEP_CLOUDWATCH_DISABLE_API_KEY", defa
 
 KEEP_DEDUPLICATION_DISTRIBUTION_ENABLED = config("KEEP_DEDUPLICATION_DISTRIBUTION_ENABLED", default=True)
 KEEP_CUSTOM_DEDUPLICATION_DISTRIBUTION_ENABLED = config("KEEP_CUSTOM_DEDUPLICATION_DISTRIBUTION_ENABLED", default=True)
+
+# --- SC-04 consumer hardening (defaults reproduce the current baseline) ---
+
+# SSE notify offload (extends PR #13's _sse_pool). Workers stays at 1 to
+# preserve #13's strict-FIFO baseline.
+SSE_NOTIFY_WORKERS = config("SSE_NOTIFY_WORKERS", default=1, cast=int)
+# Max pending notify items before backpressure kicks in (replaces #13's
+# hardcoded _SSE_MAX_PENDING).
+SSE_NOTIFY_MAX_PENDING = config("SSE_NOTIFY_MAX_PENDING", default=1000, cast=int)
+# Coalesce duplicate (tenant_id, event_type) notify signals while pending.
+SSE_NOTIFY_COALESCE_ENABLED = config(
+    "SSE_NOTIFY_COALESCE_ENABLED", default=True, cast=bool
+)
+
+# Batch consume. BATCH_SIZE=1 reproduces today's single-message loop exactly.
+KAFKA_CONSUMER_BATCH_SIZE = config("KAFKA_CONSUMER_BATCH_SIZE", default=1, cast=int)
+KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS = config(
+    "KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS", default=1.0, cast=float
+)
+
+# Bounded, batch-wide retry budget.
+KAFKA_RETRY_MAX_SLEEP_SECONDS = config(
+    "KAFKA_RETRY_MAX_SLEEP_SECONDS", default=30, cast=int
+)
+# Abort remaining retries once elapsed since last poll reaches
+# this fraction of max.poll.interval.ms, to avoid a rebalance.
+KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR = config(
+    "KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR", default=0.8, cast=float
+)
+
+# Error-storm guard for AlertRaw(error=True) writes.
+KEEP_ERROR_STORM_WINDOW_SECONDS = config(
+    "KEEP_ERROR_STORM_WINDOW_SECONDS", default=60, cast=int
+)
+KEEP_ERROR_STORM_MAX_PER_KEY = config(
+    "KEEP_ERROR_STORM_MAX_PER_KEY", default=1, cast=int
+)
+KEEP_ERROR_GUARD_MAX_ENTRIES = config(
+    "KEEP_ERROR_GUARD_MAX_ENTRIES", default=10000, cast=int
+)

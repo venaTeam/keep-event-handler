@@ -22,7 +22,12 @@ from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
-from src.config.consts import KEEP_CORRELATION_ENABLED, MAINTENANCE_WINDOW_ALERT_STRATEGY
+from src.config.consts import (
+    KEEP_CORRELATION_ENABLED,
+    MAINTENANCE_WINDOW_ALERT_STRATEGY,
+    SSE_NOTIFY_WORKERS,
+    SSE_NOTIFY_MAX_PENDING,
+)
 from src.core.db.db import (
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
@@ -90,7 +95,7 @@ from requests.adapters import HTTPAdapter
 # SSE_NOTIFY_WORKERS=1 (default) keeps notifications strictly FIFO-ordered; raising
 # it speeds up delivery when the gateway is slow, at the cost of strict ordering
 # (safe here: the UI dedups poll-alerts by fingerprint; other events are idempotent).
-_SSE_NOTIFY_WORKERS = max(1, int(os.getenv("SSE_NOTIFY_WORKERS", "1")))
+_SSE_NOTIFY_WORKERS = max(1, SSE_NOTIFY_WORKERS)
 _sse_pool = ThreadPoolExecutor(
     max_workers=_SSE_NOTIFY_WORKERS, thread_name_prefix="sse-notify"
 )
@@ -102,8 +107,8 @@ _sse_session.mount(
 _sse_session.mount(
     "https://", HTTPAdapter(pool_connections=_SSE_NOTIFY_WORKERS, pool_maxsize=_SSE_NOTIFY_WORKERS)
 )
-# crude backpressure: skip submitting if too many notifications are already queued
-_SSE_MAX_PENDING = 1000
+# backpressure: skip submitting if too many notifications are already queued
+_SSE_MAX_PENDING = SSE_NOTIFY_MAX_PENDING
 
 
 def _notify_api(api_url, tenant_id, event, data):
