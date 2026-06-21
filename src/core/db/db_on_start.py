@@ -22,7 +22,7 @@ import alembic.config
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from src.core.db.db_utils import create_db_engine
+from src.core.db.db import engine
 
 # This import is required to create the tables
 from src.models.roles import Admin as AdminRole
@@ -47,8 +47,6 @@ from sqlmodel import SQLModel
 from src.config.consts import DEFAULT_PASSWORD, DEFAULT_USERNAME, KEEP_FORCE_RESET_DEFAULT_PASSWORD
 
 logger = logging.getLogger(__name__)
-
-engine = create_db_engine()
 
 
 def try_create_single_tenant(tenant_id: str, create_default_user=True) -> None:

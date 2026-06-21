@@ -53,7 +53,9 @@ DB_ECHO = config("DATABASE_ECHO", default=False, cast=bool)  # pylint: disable=i
 KEEP_FORCE_CONNECTION_STRING = config(
     "KEEP_FORCE_CONNECTION_STRING", default=False, cast=bool
 )  # pylint: disable=invalid-name
-KEEP_DB_PRE_PING_ENABLED = config("KEEP_DB_PRE_PING_ENABLED", default=False, cast=bool)  # pylint: disable=invalid-name
+KEEP_DB_PRE_PING_ENABLED = config("KEEP_DB_PRE_PING_ENABLED", default=True, cast=bool)  # pylint: disable=invalid-name
+DB_POOL_RECYCLE = config("DATABASE_POOL_RECYCLE", default=300, cast=int)  # pylint: disable=invalid-name
+DB_POOL_TIMEOUT = config("DATABASE_POOL_TIMEOUT", default=10, cast=int)  # pylint: disable=invalid-name
 
 
 KEEP_AUDIT_EVENTS_ENABLED = config("KEEP_AUDIT_EVENTS_ENABLED", cast=bool, default=True)
