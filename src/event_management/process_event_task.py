@@ -143,6 +143,20 @@ def shutdown_sse_pool(wait: bool = True):
     _sse_pool.shutdown(wait=wait)
 
 
+def rebuild_sse_pool():
+    """Replace the (possibly shut-down) notify pool with a fresh started one.
+
+    Used by tests to hand each case a clean, started worker so a prior
+    shutdown_sse_pool() call can't leave a dead executor behind for the next
+    test. Not used in production code paths.
+    """
+    global _sse_pool
+    _sse_pool = ThreadPoolExecutor(
+        max_workers=_SSE_NOTIFY_WORKERS, thread_name_prefix="sse-notify"
+    )
+    return _sse_pool
+
+
 def _serialize_event_for_logging(event, max_size: int = 1000):
     """
     Safely serialize event for logging, truncating if too large.

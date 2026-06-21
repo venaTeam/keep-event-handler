@@ -145,6 +145,29 @@ def context_manager():
     return ContextManager(tenant_id=SINGLE_TENANT_UUID, workflow_id="1234")
 
 
+@pytest.fixture
+def notify_pool():
+    """
+    Yields a freshly-started SSE notify pool and tears it down deterministically.
+
+    The notify pool in process_event_task is a module-level ThreadPoolExecutor
+    of daemon threads. A test that submits work to it (and shuts it down) would
+    otherwise leave a dead executor behind for the next test, or leak in-flight
+    daemon threads across tests. This fixture rebuilds the pool before the test
+    and drains + rebuilds it afterwards so each test starts from a clean,
+    started worker and nothing leaks across the suite.
+    """
+    import src.event_management.process_event_task as pet
+
+    pet.rebuild_sse_pool()
+    try:
+        yield pet
+    finally:
+        # Drain anything still queued, then hand the next test a fresh pool.
+        pet.shutdown_sse_pool(wait=True)
+        pet.rebuild_sse_pool()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_prometheus_multiproc_dir(tmp_path_factory):
     """
