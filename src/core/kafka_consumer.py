@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Optional
 
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
 from pydantic import ValidationError
 from requests.exceptions import HTTPError
 from sqlalchemy.exc import OperationalError
@@ -19,6 +19,8 @@ from src.config.consts import (
     MAX_PROCESSING_RETRIES,
     KAFKA_RETRY_MAX_SLEEP_SECONDS,
     KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR,
+    KAFKA_CONSUMER_BATCH_SIZE,
+    KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
 from src.config.config import config
 from src.core.metrics import (
@@ -163,6 +165,9 @@ class KafkaEventConsumer(EventConsumer):
 
         # Consumer tuning
         self._poll_timeout = float(config("KAFKA_POLL_TIMEOUT_SECONDS", default="1.0"))
+        # Batch consume. BATCH_SIZE=1 (default) reproduces the single-message loop.
+        self._batch_size = max(1, KAFKA_CONSUMER_BATCH_SIZE)
+        self._batch_timeout = KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS
         self._session_timeout = int(config("KAFKA_SESSION_TIMEOUT_MS", default="45000"))
         self._max_poll_interval = int(config("KAFKA_MAX_POLL_INTERVAL_MS", default="300000"))
 
@@ -269,37 +274,44 @@ class KafkaEventConsumer(EventConsumer):
 
         while self._running:
             try:
-                msg = self._consumer.poll(timeout=self._poll_timeout)
+                messages = self._consumer.consume(
+                    num_messages=self._batch_size, timeout=self._batch_timeout
+                )
 
-                if msg is None:
-                    # No message available, continue polling
+                if not messages:
+                    # No messages available this poll.
                     consecutive_errors = 0
                     continue
 
-                if msg.error():
-                    if msg.error().code() == KafkaError._PARTITION_EOF:
-                        # End of partition - not an error
-                        self.logger.debug(f"Reached end of partition {msg.partition()}")
-                    else:
-                        self.logger.error(f"Consumer error: {msg.error()}")
-                        consecutive_errors += 1
-                        if consecutive_errors >= max_consecutive_errors:
-                            raise KafkaException(msg.error())
+                # Separate consumer/EOF error frames from real records.
+                records = []
+                for msg in messages:
+                    err = msg.error()
+                    if err:
+                        if err.code() == KafkaError._PARTITION_EOF:
+                            self.logger.debug(
+                                f"Reached end of partition {msg.partition()}"
+                            )
+                        else:
+                            self.logger.error(f"Consumer error: {err}")
+                            consecutive_errors += 1
+                            if consecutive_errors >= max_consecutive_errors:
+                                raise KafkaException(err)
+                        continue
+                    records.append(msg)
+
+                if not records:
                     continue
 
-                # Reset error counter on successful poll
+                # Reset error counter on a successful poll with real records.
                 consecutive_errors = 0
 
-                # Fresh retry budget per poll (batch-wide once batching lands).
+                # Fresh batch-wide retry budget measured from this poll, so
+                # accumulated retry sleep across the batch can't overrun the
+                # poll interval and trigger a rebalance.
                 budget = RetryBudget(self._max_poll_interval)
 
-                # Process the message; terminal handling (poison / retry
-                # exhausted) records + signals commit so a bad message can't
-                # freeze the partition forever.
-                should_commit = self._process_message(msg, budget)
-
-                if should_commit:
-                    self._consumer.commit(msg, asynchronous=False)
+                self._process_batch(records, budget)
 
             except KeyboardInterrupt:
                 self.logger.info("KeyboardInterrupt received, shutting down...")
@@ -317,6 +329,51 @@ class KafkaEventConsumer(EventConsumer):
                 continue
 
         self.logger.info("Exited consume loop")
+
+    def _process_batch(self, records, budget: "RetryBudget"):
+        """Process a batch of records and commit the highest *contiguous*
+        successfully-resolved offset per partition.
+
+        Within each partition, records are processed in ascending offset order.
+        Contiguity stops at the first unresolved record (one whose processing
+        returned should_commit=False); a poison record handled by the terminal
+        sink counts as resolved (should_commit=True), so it does not break the
+        chain. Offsets after a break are NOT committed — they'll be redelivered
+        (at-least-once), never silently skipped.
+
+        BATCH_SIZE=1 reduces to: one record, one partition, commit it on
+        success — identical to the previous single-message loop.
+        """
+        # Group by (topic, partition), preserving offset order.
+        partitions = {}
+        for msg in records:
+            key = (msg.topic(), msg.partition())
+            partitions.setdefault(key, []).append(msg)
+
+        for key, partition_msgs in partitions.items():
+            partition_msgs.sort(key=lambda m: m.offset())
+            commit_boundary = None  # last contiguous resolved message
+            for msg in partition_msgs:
+                should_commit = self._process_message(msg, budget)
+                if should_commit:
+                    commit_boundary = msg
+                else:
+                    # First unresolved record breaks contiguity for this
+                    # partition; stop and commit up to the boundary.
+                    self.logger.warning(
+                        "Unresolved record breaks contiguity",
+                        extra={
+                            "topic": msg.topic(),
+                            "partition": msg.partition(),
+                            "offset": msg.offset(),
+                        },
+                    )
+                    break
+
+            if commit_boundary is not None:
+                # commit(message=...) commits boundary.offset()+1 for its
+                # partition — i.e. the highest contiguous processed offset.
+                self._consumer.commit(commit_boundary, asynchronous=False)
 
     def _process_message(self, msg, budget: "RetryBudget") -> bool:
         """Process a single Kafka message.

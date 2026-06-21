@@ -34,23 +34,23 @@ def test_default_config_single_message_poll_process_commit():
         }
     ).encode("utf-8")
     mock_msg.error.return_value = None
+    mock_msg.topic.return_value = "keep-events"
+    mock_msg.partition.return_value = 0
+    mock_msg.offset.return_value = 0
 
     mock_consumer_instance = MagicMock()
-    poll_returns = [mock_msg, None]
-    poll_call_count = [0]
+    consume_returns = [[mock_msg], []]
+    consume_call_count = [0]
 
-    def poll_side_effect(timeout=None):
-        result = (
-            poll_returns[poll_call_count[0]]
-            if poll_call_count[0] < len(poll_returns)
-            else None
-        )
-        poll_call_count[0] += 1
-        if poll_call_count[0] >= len(poll_returns):
+    def consume_side_effect(num_messages=1, timeout=None):
+        idx = consume_call_count[0]
+        result = consume_returns[idx] if idx < len(consume_returns) else []
+        consume_call_count[0] += 1
+        if consume_call_count[0] >= len(consume_returns):
             consumer._running = False
         return result
 
-    mock_consumer_instance.poll.side_effect = poll_side_effect
+    mock_consumer_instance.consume.side_effect = consume_side_effect
 
     with patch("src.core.kafka_consumer.Consumer", return_value=mock_consumer_instance):
         with patch("src.core.kafka_consumer.process_event_sync") as mock_process:

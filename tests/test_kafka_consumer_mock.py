@@ -16,20 +16,23 @@ def test_consume_loop_success_commits():
     }).encode("utf-8")
     mock_msg.error.return_value = None
 
-    # Create a mock consumer that returns one message then None (to exit loop)
+    # Create a mock consumer that returns a batch of one then empty (exit loop)
     mock_consumer_instance = MagicMock()
-    poll_returns = [mock_msg, None]
-    poll_call_count = [0]
+    mock_msg.topic.return_value = "keep-events"
+    mock_msg.partition.return_value = 0
+    mock_msg.offset.return_value = 0
+    consume_returns = [[mock_msg], []]
+    consume_call_count = [0]
 
-    def poll_side_effect(timeout=None):
-        result = poll_returns[poll_call_count[0]] if poll_call_count[0] < len(poll_returns) else None
-        poll_call_count[0] += 1
-        # Stop the consumer after processing the message
-        if poll_call_count[0] >= len(poll_returns):
+    def consume_side_effect(num_messages=1, timeout=None):
+        idx = consume_call_count[0]
+        result = consume_returns[idx] if idx < len(consume_returns) else []
+        consume_call_count[0] += 1
+        if consume_call_count[0] >= len(consume_returns):
             consumer._running = False
         return result
 
-    mock_consumer_instance.poll.side_effect = poll_side_effect
+    mock_consumer_instance.consume.side_effect = consume_side_effect
     mock_consumer_instance.commit = MagicMock()
 
     with patch("src.core.kafka_consumer.Consumer", return_value=mock_consumer_instance):
@@ -43,7 +46,9 @@ def test_consume_loop_success_commits():
 
             # Assertions
             mock_process.assert_called_once()
-            mock_consumer_instance.commit.assert_called_once()
+            mock_consumer_instance.commit.assert_called_once_with(
+                mock_msg, asynchronous=False
+            )
 
 
 def test_consume_loop_retries_then_terminal_commit():
@@ -61,19 +66,23 @@ def test_consume_loop_retries_then_terminal_commit():
         "provider_type": "grafana",
     }).encode("utf-8")
     mock_msg.error.return_value = None
+    mock_msg.topic.return_value = "keep-events"
+    mock_msg.partition.return_value = 0
+    mock_msg.offset.return_value = 0
 
     mock_consumer_instance = MagicMock()
-    poll_returns = [mock_msg, None]
-    poll_call_count = [0]
+    consume_returns = [[mock_msg], []]
+    consume_call_count = [0]
 
-    def poll_side_effect(timeout=None):
-        result = poll_returns[poll_call_count[0]] if poll_call_count[0] < len(poll_returns) else None
-        poll_call_count[0] += 1
-        if poll_call_count[0] >= len(poll_returns):
+    def consume_side_effect(num_messages=1, timeout=None):
+        idx = consume_call_count[0]
+        result = consume_returns[idx] if idx < len(consume_returns) else []
+        consume_call_count[0] += 1
+        if consume_call_count[0] >= len(consume_returns):
             consumer._running = False
         return result
 
-    mock_consumer_instance.poll.side_effect = poll_side_effect
+    mock_consumer_instance.consume.side_effect = consume_side_effect
     mock_consumer_instance.commit = MagicMock()
 
     with patch("src.core.kafka_consumer.Consumer", return_value=mock_consumer_instance):

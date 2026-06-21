@@ -124,6 +124,14 @@ def main():
         logger.exception(f"Fatal error in event handler: {e}")
         sys.exit(1)
     finally:
+        # Flush any pending SSE notifications queued on the background pool so
+        # they aren't lost on a graceful shutdown of the standalone consumer.
+        try:
+            from src.event_management.process_event_task import shutdown_sse_pool
+
+            shutdown_sse_pool(wait=True)
+        except Exception:
+            logger.exception("Failed to shutdown SSE notify pool")
         logger.info("Event handler shutdown complete")
 
 
