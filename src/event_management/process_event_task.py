@@ -118,9 +118,13 @@ _SSE_MAX_PENDING = SSE_NOTIFY_MAX_PENDING
 _SSE_COALESCE_ENABLED = SSE_NOTIFY_COALESCE_ENABLED
 
 # Coalescing state: collapse duplicate (tenant_id, event) notifications while
-# they're still pending. poll-alerts / poll-presets are refresh-style "go
-# re-poll" signals, so only the latest payload per key needs to be delivered;
-# this bounds queue depth by tenant-cardinality instead of storm volume.
+# they're still pending, bounding queue depth by tenant-cardinality instead of
+# storm volume. The payloads are MERGED, not latest-wins: the poll-alerts
+# payload carries {"alerts": [...]} that the UI injects into its cache without a
+# refetch (page-1 unfiltered, to avoid DB load under storms), so dropping
+# intermediate payloads would make alerts silently disappear from the live view.
+# Merging list-valued fields (alerts / incident_ids / preset_names) preserves
+# every item while still collapsing N deliveries into one.
 _coalesce_lock = threading.Lock()
 # key -> latest (api_url, tenant_id, event, data) awaiting delivery
 _coalesce_pending = {}
@@ -142,8 +146,47 @@ def _notify_api(api_url, tenant_id, event, data):
         )
 
 
+def _dedup_list(items):
+    """De-dup a coalesced list, keeping the latest value for each identity and
+    preserving first-seen order. Alert dicts de-dup by fingerprint; hashable
+    scalars (incident ids, preset names) by value; anything else is kept."""
+    latest = {}
+    order = []
+    for item in items:
+        if isinstance(item, dict):
+            fingerprint = item.get("fingerprint")
+            ident = ("fp", fingerprint) if fingerprint is not None else ("obj", id(item))
+        else:
+            try:
+                hash(item)
+                ident = ("val", item)
+            except TypeError:
+                ident = ("obj", id(item))
+        if ident not in latest:
+            order.append(ident)
+        latest[ident] = item
+    return [latest[ident] for ident in order]
+
+
+def _merge_coalesced_data(old_data, new_data):
+    """Merge two coalesced payloads for the same (tenant, event) so collapsing
+    notifications never loses data. List-valued fields (alerts, incident_ids,
+    preset_names) are concatenated + de-duplicated; scalar fields take the
+    latest value."""
+    if not isinstance(old_data, dict) or not isinstance(new_data, dict):
+        return new_data
+    merged = dict(old_data)
+    for field, new_val in new_data.items():
+        old_val = merged.get(field)
+        if isinstance(old_val, list) and isinstance(new_val, list):
+            merged[field] = _dedup_list(old_val + new_val)
+        else:
+            merged[field] = new_val
+    return merged
+
+
 def _drain_coalesced(key):
-    """Worker task: deliver the latest pending payload for a coalesced key.
+    """Worker task: deliver the merged pending payload for a coalesced key.
 
     If a newer payload arrived for the same key after this task was scheduled,
     it is picked up here (single delivery). If yet another arrives during the
@@ -162,9 +205,10 @@ def _submit_notify(api_url, tenant_id, event, data):
     """Non-blocking: enqueue an SSE notification on the background pool.
 
     With coalescing enabled (default), duplicate (tenant_id, event) signals
-    collapse to the latest payload, bounded by SSE_NOTIFY_MAX_PENDING distinct
-    keys. With coalescing disabled, falls back to a direct bounded submit so a
-    slow/down gateway can never block or unbounded-grow the consumer."""
+    collapse into one pending entry whose list-valued payload fields are MERGED
+    (no data loss), bounded by SSE_NOTIFY_MAX_PENDING distinct keys. With
+    coalescing disabled, falls back to a direct bounded submit so a slow/down
+    gateway can never block or unbounded-grow the consumer."""
     try:
         if not _SSE_COALESCE_ENABLED:
             if _sse_pool._work_queue.qsize() >= _SSE_MAX_PENDING:
@@ -187,7 +231,13 @@ def _submit_notify(api_url, tenant_id, event, data):
                     extra={"event": event, "tenant_id": tenant_id},
                 )
                 return
-            _coalesce_pending[key] = (api_url, tenant_id, event, data)
+            existing = _coalesce_pending.get(key)
+            merged_data = (
+                _merge_coalesced_data(existing[3], data)
+                if existing is not None
+                else data
+            )
+            _coalesce_pending[key] = (api_url, tenant_id, event, merged_data)
             if key not in _coalesce_scheduled:
                 _coalesce_scheduled.add(key)
                 schedule = True
