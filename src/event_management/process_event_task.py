@@ -536,6 +536,7 @@ def __save_to_db(
                 "time_created", "network", "timezone", "custom_key", "expiry_in_minutes",
                 "source", "service", "key_field", "name", "status", "description",
                 "is_full_duplicate", "is_partial_duplicate", "duplicate_reason",
+                "environment",
             }
 
             alert_args = {
