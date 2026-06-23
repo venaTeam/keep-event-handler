@@ -194,9 +194,9 @@ class Alert(SQLModel, table=True):
     impact: str | None = Field(sa_column=Column(TEXT, nullable=True))
     runbook_url: str | None = Field(sa_column=Column(TEXT, nullable=True))
     alert_rule_url: str | None = Field(sa_column=Column(TEXT, nullable=True))
-    environment: str | None = Field(
+    environment: str = Field(
         default="production",
-        sa_column=Column(String(50), nullable=False, server_default="production", default="production"),
+        sa_column=Column(String(50), nullable=False, server_default="production"),
     )
 
     # === Source 2: Appchi System Fields (5) ===
