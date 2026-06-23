@@ -22,7 +22,14 @@ from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
-from src.config.consts import KEEP_CORRELATION_ENABLED, MAINTENANCE_WINDOW_ALERT_STRATEGY
+from src.config.consts import (
+    KEEP_CORRELATION_ENABLED,
+    MAINTENANCE_WINDOW_ALERT_STRATEGY,
+    SSE_NOTIFY_WORKERS,
+    SSE_NOTIFY_MAX_PENDING,
+    SSE_NOTIFY_COALESCE_ENABLED,
+)
+from src.event_management.error_storm_guard import should_record_error
 from src.core.db.db import (
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
@@ -83,14 +90,18 @@ KEEP_CALCULATE_START_FIRING_TIME_ENABLED = (
 
 logger = logging.getLogger(__name__)
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 
 # Background pool that delivers SSE notifications off the Kafka consumer thread.
+# It also performs the remaining consumer-thread notify work — alert
+# serialization and the per-preset CEL filtering loop — so none of it runs on
+# the consumer hot path.
 # SSE_NOTIFY_WORKERS=1 (default) keeps notifications strictly FIFO-ordered; raising
 # it speeds up delivery when the gateway is slow, at the cost of strict ordering
 # (safe here: the UI dedups poll-alerts by fingerprint; other events are idempotent).
-_SSE_NOTIFY_WORKERS = max(1, int(os.getenv("SSE_NOTIFY_WORKERS", "1")))
+_SSE_NOTIFY_WORKERS = max(1, SSE_NOTIFY_WORKERS)
 _sse_pool = ThreadPoolExecutor(
     max_workers=_SSE_NOTIFY_WORKERS, thread_name_prefix="sse-notify"
 )
@@ -102,8 +113,23 @@ _sse_session.mount(
 _sse_session.mount(
     "https://", HTTPAdapter(pool_connections=_SSE_NOTIFY_WORKERS, pool_maxsize=_SSE_NOTIFY_WORKERS)
 )
-# crude backpressure: skip submitting if too many notifications are already queued
-_SSE_MAX_PENDING = 1000
+# Bounded backpressure for the notify path.
+_SSE_MAX_PENDING = SSE_NOTIFY_MAX_PENDING
+_SSE_COALESCE_ENABLED = SSE_NOTIFY_COALESCE_ENABLED
+
+# Coalescing state: collapse duplicate (tenant_id, event) notifications while
+# they're still pending, bounding queue depth by tenant-cardinality instead of
+# storm volume. The payloads are MERGED, not latest-wins: the poll-alerts
+# payload carries {"alerts": [...]} that the UI injects into its cache without a
+# refetch (page-1 unfiltered, to avoid DB load under storms), so dropping
+# intermediate payloads would make alerts silently disappear from the live view.
+# Merging list-valued fields (alerts / incident_ids / preset_names) preserves
+# every item while still collapsing N deliveries into one.
+_coalesce_lock = threading.Lock()
+# key -> latest (api_url, tenant_id, event, data) awaiting delivery
+_coalesce_pending = {}
+# keys with a drain task currently scheduled/running on the pool
+_coalesce_scheduled = set()
 
 
 def _notify_api(api_url, tenant_id, event, data):
@@ -120,27 +146,176 @@ def _notify_api(api_url, tenant_id, event, data):
         )
 
 
+def _dedup_list(items):
+    """De-dup a coalesced list, keeping the latest value for each identity and
+    preserving first-seen order. Alert dicts de-dup by fingerprint; hashable
+    scalars (incident ids, preset names) by value; anything else is kept."""
+    latest = {}
+    order = []
+    for item in items:
+        if isinstance(item, dict):
+            fingerprint = item.get("fingerprint")
+            ident = ("fp", fingerprint) if fingerprint is not None else ("obj", id(item))
+        else:
+            try:
+                hash(item)
+                ident = ("val", item)
+            except TypeError:
+                ident = ("obj", id(item))
+        if ident not in latest:
+            order.append(ident)
+        latest[ident] = item
+    return [latest[ident] for ident in order]
+
+
+def _merge_coalesced_data(old_data, new_data):
+    """Merge two coalesced payloads for the same (tenant, event) so collapsing
+    notifications never loses data. List-valued fields (alerts, incident_ids,
+    preset_names) are concatenated + de-duplicated; scalar fields take the
+    latest value."""
+    if not isinstance(old_data, dict) or not isinstance(new_data, dict):
+        return new_data
+    merged = dict(old_data)
+    for field, new_val in new_data.items():
+        old_val = merged.get(field)
+        if isinstance(old_val, list) and isinstance(new_val, list):
+            merged[field] = _dedup_list(old_val + new_val)
+        else:
+            merged[field] = new_val
+    return merged
+
+
+def _drain_coalesced(key):
+    """Worker task: deliver the merged pending payload for a coalesced key.
+
+    If a newer payload arrived for the same key after this task was scheduled,
+    it is picked up here (single delivery). If yet another arrives during the
+    POST, the task re-schedules itself so nothing is lost."""
+    while True:
+        with _coalesce_lock:
+            entry = _coalesce_pending.pop(key, None)
+            if entry is None:
+                _coalesce_scheduled.discard(key)
+                return
+        api_url, tenant_id, event, data = entry
+        _notify_api(api_url, tenant_id, event, data)
+
+
 def _submit_notify(api_url, tenant_id, event, data):
     """Non-blocking: enqueue an SSE notification on the background pool.
-    Drops (with a warning) under sustained backpressure so a slow/down gateway
-    can never block or unbounded-grow the consumer."""
+
+    With coalescing enabled (default), duplicate (tenant_id, event) signals
+    collapse into one pending entry whose list-valued payload fields are MERGED
+    (no data loss), bounded by SSE_NOTIFY_MAX_PENDING distinct keys. With
+    coalescing disabled, falls back to a direct bounded submit so a slow/down
+    gateway can never block or unbounded-grow the consumer."""
     try:
-        if _sse_pool._work_queue.qsize() >= _SSE_MAX_PENDING:
-            logger.warning(
-                "SSE notify dropped (backpressure)",
-                extra={"event": event, "tenant_id": tenant_id},
-            )
+        if not _SSE_COALESCE_ENABLED:
+            if _sse_pool._work_queue.qsize() >= _SSE_MAX_PENDING:
+                logger.warning(
+                    "SSE notify dropped (backpressure)",
+                    extra={"event": event, "tenant_id": tenant_id},
+                )
+                return
+            _sse_pool.submit(_notify_api, api_url, tenant_id, event, data)
             return
-        _sse_pool.submit(_notify_api, api_url, tenant_id, event, data)
+
+        key = (tenant_id, event)
+        schedule = False
+        with _coalesce_lock:
+            # Bound distinct pending keys; a brand-new key over the cap is
+            # dropped, but an existing key is always allowed to refresh.
+            if key not in _coalesce_pending and len(_coalesce_pending) >= _SSE_MAX_PENDING:
+                logger.warning(
+                    "SSE notify dropped (coalesce backpressure)",
+                    extra={"event": event, "tenant_id": tenant_id},
+                )
+                return
+            existing = _coalesce_pending.get(key)
+            merged_data = (
+                _merge_coalesced_data(existing[3], data)
+                if existing is not None
+                else data
+            )
+            _coalesce_pending[key] = (api_url, tenant_id, event, merged_data)
+            if key not in _coalesce_scheduled:
+                _coalesce_scheduled.add(key)
+                schedule = True
+        if schedule:
+            _sse_pool.submit(_drain_coalesced, key)
     except Exception:
         logger.warning(
             "SSE notify submit failed", extra={"event": event, "tenant_id": tenant_id}
         )
 
 
+def _submit_preset_notify(api_url, tenant_id, alerts_payload):
+    """Offload the per-preset CEL filtering loop onto the notify pool.
+
+    alerts_payload is a list of already-serialized alert dicts (an immutable
+    snapshot taken on the consumer thread) so the worker never touches live
+    AlertDto / preset objects shared with the consumer. The worker reconstructs
+    fresh AlertDto instances, runs get_all_presets_dtos + filter_alerts, and
+    submits the poll-presets notification."""
+    try:
+        _sse_pool.submit(_run_preset_filter, api_url, tenant_id, alerts_payload)
+    except Exception:
+        logger.warning(
+            "SSE preset notify submit failed",
+            extra={"event": "poll-presets", "tenant_id": tenant_id},
+        )
+
+
+def _run_preset_filter(api_url, tenant_id, alerts_payload):
+    """Pool worker: reconstruct alerts, run preset CEL filtering, notify."""
+    try:
+        # Reconstruct fresh AlertDto objects from the snapshot dicts; never
+        # share mutable state with the consumer thread.
+        alerts = [AlertDto(**alert_dict) for alert_dict in alerts_payload]
+        notification_cache = get_notification_cache()
+        presets = get_all_presets_dtos(tenant_id)
+        rules_engine = RulesEngine(tenant_id=tenant_id)
+        presets_do_update = []
+        for preset_dto in presets:
+            filtered_alerts = rules_engine.filter_alerts(alerts, preset_dto.cel_query)
+            if not filtered_alerts:
+                continue
+            presets_do_update.append(preset_dto)
+        if notification_cache.should_notify(tenant_id, "poll-presets"):
+            _submit_notify(
+                api_url,
+                tenant_id,
+                "poll-presets",
+                {"preset_names": [p.name.lower() for p in presets_do_update]},
+            )
+    except Exception:
+        logger.exception(
+            "Failed to send presets via SSE",
+            extra={"tenant_id": tenant_id},
+        )
+
+
 def shutdown_sse_pool(wait: bool = True):
     """Flush pending SSE notifications on graceful shutdown."""
     _sse_pool.shutdown(wait=wait)
+
+
+def rebuild_sse_pool():
+    """Replace the (possibly shut-down) notify pool with a fresh started one,
+    and clear coalescing state.
+
+    Used by tests to hand each case a clean, started worker so a prior
+    shutdown_sse_pool() call can't leave a dead executor behind for the next
+    test. Not used in production code paths.
+    """
+    global _sse_pool
+    with _coalesce_lock:
+        _coalesce_pending.clear()
+        _coalesce_scheduled.clear()
+    _sse_pool = ThreadPoolExecutor(
+        max_workers=_SSE_NOTIFY_WORKERS, thread_name_prefix="sse-notify"
+    )
+    return _sse_pool
 
 
 def _serialize_event_for_logging(event, max_size: int = 1000):
@@ -1212,8 +1387,11 @@ def __handle_formatted_events(
         api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
         logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
 
-        # Serialize alerts to dicts on the consumer thread so the background
-        # notifier never reads alert objects.
+        # Take an immutable snapshot (plain dicts) of the alerts on the consumer
+        # thread, then hand it to the background pool. The pool owns the rest of
+        # the notify work (delivery + the per-preset CEL filtering loop) so none
+        # of it runs on the consumer hot path, and the workers never touch live
+        # AlertDto / preset objects shared with the consumer.
         alerts_payload = [alert.dict() for alert in enriched_formatted_events]
 
         _submit_notify(
@@ -1226,40 +1404,9 @@ def __handle_formatted_events(
                 api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
             )
 
-        # Now we need to update the presets
-        # send with SSE
-
-        try:
-            presets = get_all_presets_dtos(tenant_id)
-            rules_engine = RulesEngine(tenant_id=tenant_id)
-            presets_do_update = []
-            for preset_dto in presets:
-                # filter the alerts based on the search query
-                filtered_alerts = rules_engine.filter_alerts(
-                    enriched_formatted_events, preset_dto.cel_query
-                )
-                # if not related alerts, no need to update
-                if not filtered_alerts:
-                    continue
-                presets_do_update.append(preset_dto)
-            if notification_cache.should_notify(tenant_id, "poll-presets"):
-                api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
-                _submit_notify(
-                    api_url,
-                    tenant_id,
-                    "poll-presets",
-                    {"preset_names": [p.name.lower() for p in presets_do_update]},
-                )
-        except Exception:
-            logger.exception(
-                "Failed to send presets via SSE",
-                extra={
-                    "provider_type": provider_type,
-                    "num_of_alerts": len(formatted_events),
-                    "provider_id": provider_id,
-                    "tenant_id": tenant_id,
-                },
-            )
+        # Offload the preset CEL filtering loop + poll-presets notify onto the
+        # pool, passing the immutable alerts snapshot.
+        _submit_preset_notify(api_url, tenant_id, alerts_payload)
     return enriched_formatted_events
 
 
@@ -1834,6 +1981,22 @@ def __save_error_alerts(
         logger.info("No raw events to save as errors")
         return
 
+    # Error-storm guard: rate-limit / dedup AlertRaw(error=True) writes by
+    # (tenant_id, provider_type, bounded-error-hash) over a TTL window so a
+    # malformed-payload flood or a repeated poison message can't fill alertraw.
+    # The normal error=False raw-event path never reaches here.
+    if not should_record_error(
+        tenant_id=tenant_id,
+        provider_type=provider_type,
+        error_class="save_error_alerts",
+        error_message=error_message,
+    ):
+        logger.info(
+            "Suppressing AlertRaw error write (error-storm guard)",
+            extra={"tenant_id": tenant_id, "provider_type": provider_type},
+        )
+        return
+
     try:
         logger.info(
             "Getting database session",
@@ -1887,6 +2050,22 @@ def __save_error_alerts(
         logger.exception("Failed to save error alerts")
     finally:
         session.close()
+
+
+def record_terminal_error(tenant_id, provider_type, raw_event, error_message):
+    """Public entrypoint for the Kafka consumer's terminal handling of a poison
+    or retry-exhausted message: persist the raw payload as an AlertRaw error
+    row, gated by the error-storm guard (so a poison flood can't fill alertraw).
+
+    This is the consumer-side replacement for the old re-raise-and-redeliver
+    behavior — after recording, the caller commits the offset.
+    """
+    __save_error_alerts(
+        tenant_id=tenant_id,
+        provider_type=provider_type,
+        raw_events=raw_event,
+        error_message=error_message,
+    )
 
 
 async def async_process_event(*args, **kwargs):
