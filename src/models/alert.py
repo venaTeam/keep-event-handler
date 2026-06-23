@@ -40,6 +40,13 @@ class AlertStatus(Enum):
     # Affected by Maintenance Windows
     MAINTENANCE = "maintenance"
 
+class AlertEnvironment(str, Enum):
+    PRODUCTION = "production"
+    INTEGRATION = "integration"
+    LOAD = "load"
+    DEVELOPMENT = "development"
+    TEST = "test"
+
 class DeduplicationRuleRequestDto(BaseModel):
     name: str
     description: Optional[str] = None
@@ -162,6 +169,7 @@ class AlertDto(BaseModel):
     started_at: str | None = Field(
         default=None, alias="startedAt"  # The time the alert started
     )
+    environment: str = Field(default=AlertEnvironment.PRODUCTION.value)
 
 
 
@@ -311,6 +319,13 @@ class AlertDto(BaseModel):
                 extra={"event": values},
             )
             values["status"] = AlertStatus.FIRING
+
+        # Check and set default environment
+        environment = values.get("environment")
+        try:
+            values["environment"] = AlertEnvironment(environment).value
+        except ValueError:
+            values["environment"] = AlertEnvironment.PRODUCTION.value
 
         # this is code duplication of enrichment_helpers.py and should be refactored
         last_received = values.get("last_received", None)
