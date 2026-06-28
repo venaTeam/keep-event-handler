@@ -28,6 +28,7 @@ from src.core.metrics import (
     events_out_counter,
     events_error_counter,
     processing_time_summary,
+    consume_batch_size,
 )
 from src.controllers.event_controller import process_event_sync
 from src.event_management.process_event_task import record_terminal_error
@@ -344,6 +345,17 @@ class KafkaEventConsumer(EventConsumer):
         BATCH_SIZE=1 reduces to: one record, one partition, commit it on
         success — identical to the previous single-message loop.
         """
+        # Observability: record how many records this poll returned. The metric
+        # always observes; the log fires only for real batches (>1) to keep the
+        # single-message baseline quiet.
+        batch_len = len(records)
+        consume_batch_size.observe(batch_len)
+        if batch_len > 1:
+            self.logger.info(
+                "Consumed Kafka batch",
+                extra={"batch_size": batch_len},
+            )
+
         # Group by (topic, partition), preserving offset order.
         partitions = {}
         for msg in records:

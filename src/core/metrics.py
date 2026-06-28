@@ -56,6 +56,14 @@ processing_time_summary = Summary(
     f"{METRIC_PREFIX}processing_time_seconds",
     "Average time spent processing events",
 )
+# Number of records returned by a single Kafka poll (i.e. the batch size).
+# A distribution skewed toward 1 means batches are not forming (light traffic
+# or KAFKA_CONSUMER_BATCH_SIZE=1); higher buckets confirm batch consumption.
+consume_batch_size = Histogram(
+    f"{METRIC_PREFIX}consume_batch_size",
+    "Number of records processed per Kafka poll",
+    buckets=(1, 2, 5, 10, 25, 50, 100, 250),
+)
 
 ### ALERTS
 ALERT_METRIC_PREFIX = "keep_alert_"
