@@ -136,6 +136,51 @@ def test_per_partition_grouping_preserves_order_and_independent_commits():
     assert committed == {(0, 1), (1, 0)}
 
 
+def test_batch_logs_size_for_multi_record_batch(caplog):
+    """A batch with >1 record emits an INFO log carrying batch_size."""
+    import logging
+
+    consumer, _ = _consumer_with_mock_kafka()
+    budget = RetryBudget(max_poll_interval_ms=300000)
+
+    msgs = [_make_msg("keep-events", 0, o) for o in range(3)]
+    with patch.object(consumer, "_process_message", return_value=True):
+        with caplog.at_level(logging.INFO):
+            consumer._process_batch(msgs, budget)
+
+    batch_logs = [r for r in caplog.records if r.message == "Consumed Kafka batch"]
+    assert len(batch_logs) == 1
+    assert getattr(batch_logs[0], "batch_size", None) == 3
+
+
+def test_single_record_batch_does_not_log(caplog):
+    """BATCH_SIZE=1 baseline: no batch log for a single-record poll."""
+    import logging
+
+    consumer, _ = _consumer_with_mock_kafka()
+    budget = RetryBudget(max_poll_interval_ms=300000)
+
+    msg = _make_msg("keep-events", 0, 0)
+    with patch.object(consumer, "_process_message", return_value=True):
+        with caplog.at_level(logging.INFO):
+            consumer._process_batch([msg], budget)
+
+    assert not [r for r in caplog.records if r.message == "Consumed Kafka batch"]
+
+
+def test_batch_size_metric_observed():
+    """The consume_batch_size histogram observes the batch length each poll."""
+    consumer, _ = _consumer_with_mock_kafka()
+    budget = RetryBudget(max_poll_interval_ms=300000)
+
+    msgs = [_make_msg("keep-events", 0, o) for o in range(4)]
+    with patch("src.core.kafka_consumer.consume_batch_size") as metric:
+        with patch.object(consumer, "_process_message", return_value=True):
+            consumer._process_batch(msgs, budget)
+
+    metric.observe.assert_called_once_with(4)
+
+
 def test_no_commit_when_first_record_unresolved():
     """If the very first record of a partition is unresolved, nothing commits
     for that partition (offset stays put, redelivered)."""
