@@ -13,15 +13,15 @@ The alert enrichment path (``entity_type="alert"``) is unchanged: it writes type
 import uuid
 from uuid import UUID
 
-from core.db.db import (
+from src.core.db.db import (
     enrich_entity,
     get_last_alert_by_fingerprint,
     set_last_alert,
 )
-from core.dependencies import SINGLE_TENANT_UUID
-from models.action_type import ActionType
-from models.db.alert import Alert, AlertAudit, IncidentEnrichment, LastAlert
-from models.db.incident import Incident
+from src.core.dependencies import SINGLE_TENANT_UUID
+from src.models.action_type import ActionType
+from src.models.db.alert import Alert, AlertAudit, IncidentEnrichment, LastAlert
+from src.models.db.incident import Incident
 
 
 def _make_incident(db_session) -> Incident:

@@ -7,21 +7,21 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from tenacity import sleep
 
-from bl.enrichments_bl import EnrichmentsBl
-from core.dependencies import SINGLE_TENANT_UUID
-from models.action_type import ActionType
-from models.alert import AlertDto, AlertStatus
-from models.db.alert import Alert
-from models.db.extraction import ExtractionRule
-from models.db.mapping import MappingRule
-from models.db.topology import TopologyService
+from src.bl.enrichments_bl import EnrichmentsBl
+from src.core.dependencies import SINGLE_TENANT_UUID
+from src.models.action_type import ActionType
+from src.models.alert import AlertDto, AlertStatus
+from src.models.db.alert import Alert
+from src.models.db.extraction import ExtractionRule
+from src.models.db.mapping import MappingRule
+from src.models.db.topology import TopologyService
 
 
 @pytest.fixture(autouse=True)
 def patch_get_tenants_configurations():
     """Automatically patch get_tenants_configurations for all tests."""
     with patch(
-        "core.tenant_configuration.TenantConfiguration._TenantConfiguration.get_configuration",
+        "src.core.tenant_configuration.TenantConfiguration._TenantConfiguration.get_configuration",
         return_value=None,
     ):
         yield
@@ -629,12 +629,12 @@ def test_topology_mapping_rule_enrichment(mock_session, mock_alert_dto):
 
     # Mock the get_topology_data_by_dynamic_matcher to return the mock topology service
     with patch(
-        "bl.enrichments_bl.get_topology_data_by_dynamic_matcher",
+        "src.bl.enrichments_bl.get_topology_data_by_dynamic_matcher",
         return_value=mock_topology_service,
     ):
         # Mock the enrichment database function so no actual DB actions occur
         with patch(
-            "bl.enrichments_bl.enrich_alert_db"
+            "src.bl.enrichments_bl.enrich_alert_db"
         ) as mock_enrich_alert_db:
             # Run the mapping rule logic for the topology
             result_event = enrichment_bl.run_mapping_rules(mock_alert_dto)

@@ -3,9 +3,9 @@ import hashlib
 from datetime import datetime, timezone
 from prometheus_client import generate_latest
 
-from models.db.tenant import TenantApiKey
-from event_management.process_event_task import process_event
-from core.dependencies import SINGLE_TENANT_UUID
+from src.models.db.tenant import TenantApiKey
+from src.event_management.process_event_task import process_event
+from src.core.dependencies import SINGLE_TENANT_UUID
 
 def setup_api_key(
     db_session, api_key_value, tenant_id=SINGLE_TENANT_UUID, role="admin"
@@ -71,7 +71,7 @@ class ClientMock:
                 metric.labels(path=path).observe(2.5)
             return DummyResponse({"status": "ok"}, 200)
         elif url.startswith("/incidents/"):
-            from bl.incidents_bl import IncidentBl
+            from src.bl.incidents_bl import IncidentBl
             if "/enrich" in url:
                 incident_id = url.split("/")[-2]
                 IncidentBl(tenant_id=SINGLE_TENANT_UUID).enrich_incident(incident_id, json_data)
@@ -84,7 +84,7 @@ class ClientMock:
             metrics_data = generate_latest().decode("utf-8")
             return DummyResponse({}, 200, text=metrics_data)
         elif url.startswith("/incidents/") and "enrich" not in url:
-            from bl.incidents_bl import IncidentBl
+            from src.bl.incidents_bl import IncidentBl
             incident_id = url.split("/")[-1]
             incident = IncidentBl(tenant_id=SINGLE_TENANT_UUID).get_incident_by_id(incident_id)
             if incident:
