@@ -35,10 +35,13 @@ class AlertField(SQLModel, table=True):
 
 
 class AlertRaw(SQLModel, table=True):
+    # SC-05: alertraw is range-partitioned by `timestamp` (daily) with short-TTL
+    # partition-drop retention. Postgres requires the partition key to be part of
+    # every unique/primary key, so the PK is composite (id, timestamp).
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: str = Field(foreign_key="tenant.id", index=True)
     raw_alert: dict = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql")))
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=datetime.utcnow, primary_key=True)
     provider_type: str | None = Field(default=None)
     error: bool = Field(default=False, index=True)
     error_message: str | None = Field(default=None)
