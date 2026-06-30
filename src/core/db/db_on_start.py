@@ -20,7 +20,7 @@ import time
 
 import alembic.command
 import alembic.config
-from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import inspect as sa_inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -163,16 +163,26 @@ def try_create_single_tenant(tenant_id: str, create_default_user=True) -> None:
             logger.exception("Failed to create single tenant")
 
 
-# Tables provisioned by keep-api-gateway's alembic migrations whose presence
-# signals the shared schema is ready. `alembic_version` proves the gateway (the
-# single schema owner) has run, `alert` is a core table this consumer needs.
-_SCHEMA_READY_TABLES = ("alembic_version", "alert")
 _SCHEMA_WAIT_TIMEOUT = int(os.environ.get("KEEP_SCHEMA_WAIT_TIMEOUT", "180"))
 _SCHEMA_WAIT_INTERVAL = int(os.environ.get("KEEP_SCHEMA_WAIT_INTERVAL", "2"))
+# How many consecutive polls the gateway's alembic head must stay unchanged
+# before we treat its `alembic upgrade head` run as finished.
+_SCHEMA_STABLE_CHECKS = int(os.environ.get("KEEP_SCHEMA_STABLE_CHECKS", "3"))
+
+
+def _gateway_alembic_head():
+    """Return the alembic revision currently stamped on the shared DB, or None if
+    keep-api-gateway has not created/stamped `alembic_version` yet."""
+    inspector = sa_inspect(engine)
+    if "alembic_version" not in inspector.get_table_names():
+        return None
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT version_num FROM alembic_version")).first()
+    return row[0] if row else None
 
 
 def _wait_for_schema():
-    """Block until keep-api-gateway has provisioned the shared DB schema.
+    """Block until keep-api-gateway has FINISHED provisioning the shared schema.
 
     keep-api-gateway is the SINGLE owner of the database schema — it is the only
     service that ships alembic migrations. This consumer must not build the
@@ -181,26 +191,61 @@ def _wait_for_schema():
     pg_type (duplicate key (typname)=(tenant)), and it also bypasses migration
     history (create_all materializes the current model and never stamps
     alembic_version). Wait for the gateway to finish, then run as a consumer.
+
+    Readiness is detected by quiescence of the gateway's alembic head: the
+    gateway advances `alembic_version` after each migration, so once the revision
+    stops changing across several consecutive polls its migration run is complete
+    and every column is in place. Checking only that core tables exist is NOT
+    enough — the gateway creates alembic_version/alert early but adds columns
+    such as provider.provider_metadata in *later* migrations, so a
+    table-existence check lets this consumer query a not-yet-created column on a
+    cold boot. We also can't compare against a fixed head revision, because the
+    gateway ships migrations (product-BI metrics) that this consumer's own
+    migration chain does not contain — so its head differs from ours.
     """
     deadline = time.monotonic() + _SCHEMA_WAIT_TIMEOUT
+    last_head = None
+    stable = 0
     while True:
         try:
-            tables = set(sa_inspect(engine).get_table_names())
-            missing = [t for t in _SCHEMA_READY_TABLES if t not in tables]
-            if not missing:
-                logger.info("DB schema is ready (owned by keep-api-gateway)")
-                return
-            logger.info(
-                "Waiting for keep-api-gateway to provision the DB schema; "
-                "missing tables: %s",
-                missing,
-            )
+            head = _gateway_alembic_head()
+            if head is None:
+                last_head, stable = None, 0
+                logger.info(
+                    "Waiting for keep-api-gateway to initialize the DB schema "
+                    "(alembic_version not stamped yet)"
+                )
+            elif head == last_head:
+                stable += 1
+                if stable >= _SCHEMA_STABLE_CHECKS:
+                    logger.info(
+                        "DB schema is ready (owned by keep-api-gateway; alembic "
+                        "head %s stable across %s checks)",
+                        head,
+                        stable,
+                    )
+                    return
+                logger.info(
+                    "keep-api-gateway alembic head %s steady (%s/%s)",
+                    head,
+                    stable,
+                    _SCHEMA_STABLE_CHECKS,
+                )
+            else:
+                logger.info(
+                    "keep-api-gateway migrations still advancing "
+                    "(alembic head -> %s); waiting for them to settle",
+                    head,
+                )
+                last_head, stable = head, 1
         except Exception as exc:
             logger.warning("Waiting for the DB to become reachable: %s", exc)
+            last_head, stable = None, 0
         if time.monotonic() >= deadline:
             raise RuntimeError(
                 "Timed out waiting for keep-api-gateway to provision the DB "
-                f"schema (waited {_SCHEMA_WAIT_TIMEOUT}s for {_SCHEMA_READY_TABLES})"
+                f"schema (waited {_SCHEMA_WAIT_TIMEOUT}s; last alembic head "
+                f"{last_head!r})"
             )
         time.sleep(_SCHEMA_WAIT_INTERVAL)
 
