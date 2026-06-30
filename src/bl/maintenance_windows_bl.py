@@ -35,6 +35,9 @@ class MaintenanceWindowsBl:
     def __init__(self, tenant_id: str, session: Session | None) -> None:
         self.logger = logging.getLogger(__name__)
         self.tenant_id = tenant_id
+        # Only close the session in close()/__exit__ if we created it here; a
+        # caller-provided session is owned (and closed) by the caller.
+        self._owns_session = session is None
         self.session = session if session else get_session_sync()
         now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         self.maintenance_rules: list[MaintenanceWindowRule] = (
@@ -45,6 +48,17 @@ class MaintenanceWindowsBl:
             .filter(MaintenanceWindowRule.start_time <= now_utc)
             .all()
         )
+
+    def close(self):
+        if self._owns_session and self.session is not None:
+            self.session.close()
+            self._owns_session = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     def check_if_alert_in_maintenance_windows(self, alert: AlertDto) -> bool:
         extra = {"tenant_id": self.tenant_id, "fingerprint": alert.fingerprint}
