@@ -13,7 +13,7 @@ the in-memory sqlite db_session fixture (no elastic / arq / API gateway needed):
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -277,7 +277,11 @@ def test_status_persists_when_not_disposable(db_session):
 @pytest.mark.parametrize(
     "mode,survives",
     [
-        ("permanent", True),
+        # A "keep on new alerts" (permanent) dismiss now auto-undismisses when
+        # the alert returns RESOLVED — a fresh lifecycle begins.
+        ("permanent", False),
+        # Only a time-boxed dismiss_until survives an interim resolve; it
+        # self-expires on its own clock.
         ("dismiss_until", True),
         ("until_resolved", False),
     ],
@@ -304,6 +308,219 @@ def test_dismiss_survive_resolve(db_session, mode, survives):
         assert la.status is None
         assert la.dismiss_mode is None
         assert la.dismissed_until is None
+        assert la.status_disposable is False
+
+
+# --------------------------------------------------------------------------- #
+# Update Dismiss Behavior: auto-undismiss on resolve + dispose on new alert
+# --------------------------------------------------------------------------- #
+_T0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def _occurrence(db_session, fp, status, ts):
+    """Feed a real (non-deduplicated) alert occurrence through set_last_alert."""
+    alert = _make_alert(fp, status, ts=ts)
+    db_session.add(alert)
+    db_session.commit()
+    set_last_alert(SINGLE_TENANT_UUID, alert, session=db_session, tracking={})
+
+
+def test_permanent_dismiss_stays_dismissed_on_firing_refire(db_session):
+    """Keep-on-new-alerts (permanent) must still suppress a firing re-fire."""
+    fp = "fp-perm-firing"
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "permanent"},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=1))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status == "suppressed"
+    assert la.dismiss_mode == "permanent"
+
+
+def test_permanent_dismiss_undismisses_on_resolve_then_fresh_lifecycle(db_session):
+    """permanent dismiss -> resolve auto-undismisses -> a later firing fires."""
+    fp = "fp-perm-lifecycle"
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "permanent"},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    # Resolve -> auto-undismiss (the provider "resolved" status shows through).
+    _occurrence(db_session, fp, AlertStatus.RESOLVED.value, _T0 + timedelta(minutes=1))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status is None
+    assert la.dismiss_mode is None
+
+    # A later firing occurrence must fire normally (not re-suppressed).
+    _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=2))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status is None
+
+
+def test_dismiss_until_preserved_on_resolve(db_session):
+    """A time-boxed dismiss_until survives an interim resolve unchanged."""
+    fp = "fp-until-resolve"
+    until = _T0 + timedelta(hours=1)
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "dismiss_until",
+         "dismissed_until": until},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    _occurrence(db_session, fp, AlertStatus.RESOLVED.value, _T0 + timedelta(minutes=1))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status == "suppressed"
+    assert la.dismiss_mode == "dismiss_until"
+    assert la.dismissed_until is not None
+
+
+def test_disposable_dismiss_clears_on_firing_refire(db_session):
+    """Dispose-on-new-alerts: a disposable dismiss un-dismisses on the next
+    firing occurrence (not only on resolve)."""
+    fp = "fp-disp-dismiss"
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "permanent",
+         "status_disposable": True},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=1))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status is None
+    assert la.dismiss_mode is None
+    assert la.status_disposable is False
+
+
+def test_disposable_dismiss_until_clears_on_firing_refire(db_session):
+    """Dispose overrides the time-box: a disposable dismiss_until un-dismisses
+    on the next firing occurrence instead of waiting for the timestamp."""
+    fp = "fp-disp-until"
+    until = _T0 + timedelta(hours=1)
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "dismiss_until",
+         "dismissed_until": until, "status_disposable": True},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=1))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status is None
+    assert la.dismiss_mode is None
+    assert la.dismissed_until is None
+    assert la.status_disposable is False
+
+
+def test_apply_dispose_on_new_alert_emits_flag_for_dismiss_and_status():
+    """A status/dismiss write always carries status_disposable so a "keep"
+    (dispose_on_new_alert=False) action explicitly resets a prior True; an
+    enrichment with neither status nor dismiss_mode is left untouched."""
+    from src.bl.enrichments_bl import EnrichmentsBl
+
+    out = EnrichmentsBl._apply_dispose_on_new_alert({"dismiss_mode": "permanent"}, True)
+    assert out["status_disposable"] is True
+    out = EnrichmentsBl._apply_dispose_on_new_alert({"dismiss_mode": "permanent"}, False)
+    assert out["status_disposable"] is False
+
+    out = EnrichmentsBl._apply_dispose_on_new_alert({"status": "acknowledged"}, True)
+    assert out["status_disposable"] is True
+    out = EnrichmentsBl._apply_dispose_on_new_alert({"status": "acknowledged"}, False)
+    assert out["status_disposable"] is False
+
+    out = EnrichmentsBl._apply_dispose_on_new_alert({"note": "on it"}, False)
+    assert "status_disposable" not in out
+
+
+# --------------------------------------------------------------------------- #
+# Dedup-path hardening: the dismiss lifecycle must also run when an occurrence
+# is a FULL DUPLICATE (dismissing doesn't change the dedup hash, so the next
+# identical occurrence lands on the deduplicated path and skips set_last_alert).
+# --------------------------------------------------------------------------- #
+def _dedup_dto(fp, status):
+    from src.models.alert import AlertDto
+
+    return AlertDto(
+        id="dup", name="n", status=status, severity="high",
+        last_received=(_T0 + timedelta(minutes=5)).isoformat(),
+        source=["s"], fingerprint=fp, labels={},
+    )
+
+
+def _save_dedup(db_session, dup):
+    # Drive only the deduplicated-events branch of __save_to_db (no real
+    # occurrences), which is where full duplicates are handled.
+    from src.event_management.process_event_task import (
+        __save_to_db as _save_to_db,
+    )
+
+    _save_to_db(
+        SINGLE_TENANT_UUID, "test", db_session,
+        raw_events=[], formatted_events=[], deduplicated_events=[dup],
+    )
+
+
+def test_dedup_path_undismisses_permanent_on_resolved_full_duplicate(db_session):
+    """A RESOLVED full duplicate (e.g. a custom dedup rule that ignores
+    `status`) still auto-undismisses a permanent dismiss."""
+    fp = "fp-dedup-resolve"
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "permanent"},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    _save_dedup(db_session, _dedup_dto(fp, AlertStatus.RESOLVED.value))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status is None
+    assert la.dismiss_mode is None
+
+
+def test_dedup_path_disposes_dismiss_on_firing_full_duplicate(db_session):
+    """A disposable dismiss un-dismisses on an identical firing re-fire — which
+    is a FULL duplicate, so this only works because the dedup path runs the
+    lifecycle too."""
+    fp = "fp-dedup-dispose"
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "permanent",
+         "status_disposable": True},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    _save_dedup(db_session, _dedup_dto(fp, AlertStatus.FIRING.value))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status is None
+    assert la.status_disposable is False
+
+
+def test_dedup_path_keeps_permanent_dismiss_on_firing_full_duplicate(db_session):
+    """A "keep" (non-disposable) permanent dismiss must survive a firing full
+    duplicate — the dedup path must not over-clear."""
+    fp = "fp-dedup-keep"
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "permanent"},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    _save_dedup(db_session, _dedup_dto(fp, AlertStatus.FIRING.value))
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status == "suppressed"
+    assert la.dismiss_mode == "permanent"
 
 
 # --------------------------------------------------------------------------- #

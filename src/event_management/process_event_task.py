@@ -31,6 +31,7 @@ from src.config.consts import (
 )
 from src.event_management.error_storm_guard import should_record_error
 from src.core.db.db import (
+    apply_dismiss_lifecycle,
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
     get_alerts_by_fingerprint,
@@ -505,10 +506,17 @@ def __save_to_db(
                     raise
 
         enrichments_bl = EnrichmentsBl(tenant_id, session)
-        # add audit to the deduplicated events
-        # TODO: move this to the alert deduplicator
-        if KEEP_AUDIT_EVENTS_ENABLED:
-            for event in deduplicated_events:
+        # Deduplicated events don't create a new Alert row and don't call
+        # set_last_alert. Update the LastAlert directly here: bump last_received
+        # and run the dismiss/status lifecycle. The lifecycle MUST run
+        # regardless of KEEP_AUDIT_EVENTS_ENABLED because dismissing an alert
+        # doesn't change its dedup hash — the next identical firing occurrence
+        # is a full duplicate and lands here, and that is exactly where
+        # "dispose on new alerts" (and, for custom dedup rules that ignore
+        # `status`, auto-undismiss-on-resolve) must still take effect.
+        # TODO: move the audit part to the alert deduplicator
+        for event in deduplicated_events:
+            if KEEP_AUDIT_EVENTS_ENABLED:
                 audit = AlertAudit(
                     tenant_id=tenant_id,
                     fingerprint=event.fingerprint,
@@ -519,62 +527,65 @@ def __save_to_db(
                 )
                 session.add(audit)
 
-                __validate_last_received(event)
+            __validate_last_received(event)
 
-                # Deduplicated events don't create a new Alert row and
-                # don't call set_last_alert, so update the LastAlert tracking
-                # column (last_received) directly here. Status/dismiss clearing
-                # for re-fires happens in set_last_alert on real occurrences.
+            try:
+                logger.debug(
+                    "Updating last_received for deduplicated alert",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "fingerprint": event.fingerprint,
+                        "last_received": event.last_received,
+                    },
+                )
+                last_alert = get_last_alert_by_fingerprint(
+                    tenant_id, event.fingerprint, session=session, for_update=True
+                )
+                if last_alert:
+                    last_received = event.last_received
+                    if isinstance(last_received, str):
+                        last_received = dateutil.parser.isoparse(last_received)
+                    last_alert.last_received = last_received
+                    # Auto-undismiss / dispose even though this occurrence was
+                    # deduplicated. Guard on a newer timestamp, like
+                    # set_last_alert, so an out-of-order duplicate can't clear.
+                    if last_alert.timestamp.replace(
+                        tzinfo=datetime.timezone.utc
+                    ) < last_received.replace(tzinfo=datetime.timezone.utc):
+                        apply_dismiss_lifecycle(last_alert, event.status)
+                    session.add(last_alert)
+                    session.flush()
+                else:
+                    logger.warning(
+                        "No last alert found to update last_received",
+                        extra={
+                            "tenant_id": tenant_id,
+                            "fingerprint": event.fingerprint,
+                        },
+                    )
+            except Exception as e:
+                # Rollback so a deadlock / integrity error on this single
+                # deduplicated event doesn't poison the session for the
+                # rest of the batch (we already swallow the error).
                 try:
-                    logger.debug(
-                        "Updating last_received for deduplicated alert",
-                        extra={
-                            "tenant_id": tenant_id,
-                            "fingerprint": event.fingerprint,
-                            "last_received": event.last_received,
-                        },
-                    )
-                    last_alert = get_last_alert_by_fingerprint(
-                        tenant_id, event.fingerprint, session=session, for_update=True
-                    )
-                    if last_alert:
-                        last_received = event.last_received
-                        if isinstance(last_received, str):
-                            last_received = dateutil.parser.isoparse(last_received)
-                        last_alert.last_received = last_received
-                        session.add(last_alert)
-                        session.flush()
-                    else:
-                        logger.warning(
-                            "No last alert found to update last_received",
-                            extra={
-                                "tenant_id": tenant_id,
-                                "fingerprint": event.fingerprint,
-                            },
-                        )
-                except Exception as e:
-                    # Rollback so a deadlock / integrity error on this single
-                    # deduplicated event doesn't poison the session for the
-                    # rest of the batch (we already swallow the error).
-                    try:
-                        session.rollback()
-                    except Exception:
-                        logger.exception(
-                            "Failed to rollback session after dedup last_received update",
-                            extra={
-                                "tenant_id": tenant_id,
-                                "fingerprint": event.fingerprint,
-                            },
-                        )
+                    session.rollback()
+                except Exception:
                     logger.exception(
-                        "Failed to update last_received for deduplicated alert",
+                        "Failed to rollback session after dedup last_received update",
                         extra={
                             "tenant_id": tenant_id,
                             "fingerprint": event.fingerprint,
-                            "error_type": type(e).__name__,
-                            "error_message": str(e),
                         },
                     )
+                logger.exception(
+                    "Failed to update last_received for deduplicated alert",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "fingerprint": event.fingerprint,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    },
+                )
 
         enriched_formatted_events = []
         saved_alerts = []

@@ -1140,6 +1140,33 @@ def get_last_alert_hashes_by_fingerprints(
         return alert_hash_dict
 
 
+def apply_dismiss_lifecycle(last_alert: LastAlert, alert_status: str) -> bool:
+    """Clear dismiss/status enrichment when a new occurrence ends the dismissal.
+
+    Returns True if it mutated ``last_alert``. Rules:
+      - A time-boxed "keep" dismiss (dismiss_until, not disposable) survives any
+        new occurrence — it self-expires on its own clock.
+      - A RESOLVED occurrence ends every other dismissal (fresh lifecycle): the
+        alert shows Resolved and a later firing occurrence fires normally.
+      - A non-resolved (firing) occurrence ends only a "dispose on new alerts"
+        dismissal/status (status_disposable); a "keep" dismissal persists.
+    """
+    time_boxed_keep = (
+        last_alert.dismiss_mode == "dismiss_until"
+        and not last_alert.status_disposable
+    )
+    if alert_status == AlertStatus.RESOLVED.value:
+        should_clear = not time_boxed_keep
+    else:
+        should_clear = last_alert.status_disposable
+    if not should_clear:
+        return False
+    last_alert.status = None
+    last_alert.status_disposable = False
+    last_alert.dismiss_mode = None
+    last_alert.dismissed_until = None
+    return True
+
 
 def set_last_alert(
     tenant_id: str,
@@ -1209,21 +1236,9 @@ def set_last_alert(
                                 continue
                             setattr(last_alert, _col, _val)
 
-                    # Status/dismiss clearing on this occurrence's
-                    # provider status (replaces dispose/make-permanent).
-                    resolved = alert.status == AlertStatus.RESOLVED.value
-                    if not resolved:
-                        if last_alert.status_disposable:
-                            last_alert.status = None
-                            last_alert.status_disposable = False
-                    else:
-                        if last_alert.dismiss_mode not in (
-                            "permanent",
-                            "dismiss_until",
-                        ):
-                            last_alert.status = None
-                            last_alert.dismiss_mode = None
-                            last_alert.dismissed_until = None
+                    # Status/dismiss clearing on this occurrence's provider
+                    # status (auto-undismiss on resolve; dispose-on-new-alert).
+                    apply_dismiss_lifecycle(last_alert, alert.status)
 
                     session.add(last_alert)
 
