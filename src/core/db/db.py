@@ -1151,18 +1151,14 @@ def apply_dismiss_lifecycle(last_alert: LastAlert, alert_status: str) -> bool:
       - A non-resolved (firing) occurrence ends only a "dispose on new alerts"
         dismissal/status (status_disposable); a "keep" dismissal persists.
     """
-    time_boxed_keep = (
-        last_alert.dismiss_mode == "dismiss_until"
-        and not last_alert.status_disposable
-    )
     if alert_status == AlertStatus.RESOLVED.value:
-        should_clear = not time_boxed_keep
+        should_clear = True
     else:
         should_clear = last_alert.status_disposable
     if not should_clear:
         return False
-    last_alert.status = None
-    last_alert.status_disposable = False
+    last_alert.status = alert_status
+    last_alert.status_disposable = True
     last_alert.dismiss_mode = None
     last_alert.dismissed_until = None
     return True
