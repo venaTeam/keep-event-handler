@@ -278,12 +278,6 @@ def __save_to_db(
         },
     )
     try:
-        # SC-05: alertraw is now an error-only dead-letter queue. The success-path
-        # write that stored every ingested payload (the firehose — ~5.76M JSONB
-        # rows/day that nothing ever read) has been removed. Failed events are still
-        # captured via __save_error_alerts (error=True), which is the only path
-        # get_error_alerts reads. See spec-sc05-db-growth-partitioning.md, Area 1.
-
         enrichments_bl = EnrichmentsBl(tenant_id, session)
         # add audit to the deduplicated events
         # TODO: move this to the alert deduplicator
