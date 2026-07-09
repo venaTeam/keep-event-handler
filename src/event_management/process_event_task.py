@@ -453,57 +453,6 @@ def __save_to_db(
         },
     )
     try:
-        # keep raw events in the DB if the user wants to
-        # this is mainly for debugging and research purposes
-        if KEEP_STORE_RAW_ALERTS:
-            logger.debug(
-                "Storing raw alerts",
-                extra={
-                    "tenant_id": tenant_id,
-                    "raw_events_count": len(raw_events)
-                    if isinstance(raw_events, list)
-                    else 1,
-                },
-            )
-            if isinstance(raw_events, dict):
-                raw_events = [raw_events]
-
-            for idx, raw_event in enumerate(raw_events):
-                try:
-                    logger.debug(
-                        "Creating AlertRaw object",
-                        extra={
-                            "tenant_id": tenant_id,
-                            "provider_type": provider_type,
-                            "raw_event_index": idx,
-                        },
-                    )
-                    alert = AlertRaw(
-                        tenant_id=tenant_id,
-                        raw_alert=raw_event,
-                        provider_type=provider_type,
-                    )
-                    session.add(alert)
-                    logger.debug(
-                        "AlertRaw object added to session",
-                        extra={
-                            "tenant_id": tenant_id,
-                            "raw_event_index": idx,
-                        },
-                    )
-                except Exception as e:
-                    logger.exception(
-                        "Failed to create AlertRaw object",
-                        extra={
-                            "tenant_id": tenant_id,
-                            "provider_type": provider_type,
-                            "raw_event_index": idx,
-                            "error_type": type(e).__name__,
-                            "error_message": str(e),
-                        },
-                    )
-                    raise
-
         enrichments_bl = EnrichmentsBl(tenant_id, session)
         # add audit to the deduplicated events
         # TODO: move this to the alert deduplicator
