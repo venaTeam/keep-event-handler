@@ -35,6 +35,12 @@ class AlertField(SQLModel, table=True):
 
 
 class AlertRaw(SQLModel, table=True):
+    # SC-05: alertraw is intended to be range-partitioned by `timestamp` (daily)
+    # with short-TTL partition-drop retention. Partitioning is performed by the DBA
+    # (elevated DDL permissions), NOT by app migrations. The app change here is:
+    #   (1) alertraw is written only for failed events (error-only DLQ), and
+    #   (2) a plain `timestamp` index (`ix_alertraw_timestamp`) — the future
+    #       partition key — to support time-range retention/pruning.
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     tenant_id: str = Field(foreign_key="tenant.id", index=True)
     raw_alert: dict = Field(sa_column=Column(JSON().with_variant(PG_JSONB, "postgresql")))
@@ -49,6 +55,7 @@ class AlertRaw(SQLModel, table=True):
     __table_args__ = (
         Index("ix_alert_raw_tenant_id_error", "tenant_id", "error"),
         Index("ix_alert_raw_tenant_id_timestamp", "tenant_id", "timestamp"),
+        Index("ix_alertraw_timestamp", "timestamp"),
     )
 
     class Config:
