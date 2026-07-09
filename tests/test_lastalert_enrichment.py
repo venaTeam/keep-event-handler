@@ -251,8 +251,10 @@ def test_status_disposable_clears_on_non_resolved_refire(db_session):
     db_session.commit()
     set_last_alert(SINGLE_TENANT_UUID, refire, session=db_session, tracking={})
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, "fp-disp", session=db_session)
-    assert la.status is None
-    assert la.status_disposable is False
+    # A disposable status is replaced by the re-fire's status and stays
+    # disposable (the acknowledged dismiss no longer persists).
+    assert la.status == "firing"
+    assert la.status_disposable is True
 
 
 def test_status_persists_when_not_disposable(db_session):
@@ -272,21 +274,13 @@ def test_status_persists_when_not_disposable(db_session):
 
 
 # --------------------------------------------------------------------------- #
-# dismiss survive-resolve
+# dismiss cleared on resolve
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(
-    "mode,survives",
-    [
-        # A "keep on new alerts" (permanent) dismiss now auto-undismisses when
-        # the alert returns RESOLVED — a fresh lifecycle begins.
-        ("permanent", False),
-        # Only a time-boxed dismiss_until survives an interim resolve; it
-        # self-expires on its own clock.
-        ("dismiss_until", True),
-        ("until_resolved", False),
-    ],
-)
-def test_dismiss_survive_resolve(db_session, mode, survives):
+@pytest.mark.parametrize("mode", ["permanent", "dismiss_until", "until_resolved"])
+def test_dismiss_cleared_on_resolve(db_session, mode):
+    # A RESOLVED occurrence clears every dismiss (permanent, dismiss_until and
+    # until_resolved alike): the status takes the resolved value, the dismiss
+    # columns clear, and the write is marked disposable.
     fp = f"fp-resolve-{mode}"
     _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value)
     enrich_entity(
@@ -301,14 +295,10 @@ def test_dismiss_survive_resolve(db_session, mode, survives):
     db_session.commit()
     set_last_alert(SINGLE_TENANT_UUID, resolved, session=db_session, tracking={})
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    if survives:
-        assert la.status == "suppressed"
-        assert la.dismiss_mode == mode
-    else:
-        assert la.status is None
-        assert la.dismiss_mode is None
-        assert la.dismissed_until is None
-        assert la.status_disposable is False
+    assert la.status == "resolved"
+    assert la.dismiss_mode is None
+    assert la.dismissed_until is None
+    assert la.status_disposable is True
 
 
 # --------------------------------------------------------------------------- #
@@ -351,20 +341,20 @@ def test_permanent_dismiss_undismisses_on_resolve_then_fresh_lifecycle(db_sessio
         action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
         action_description="t", session=db_session,
     )
-    # Resolve -> auto-undismiss (the provider "resolved" status shows through).
+    # Resolve -> auto-undismiss (status takes the resolved value, disposable).
     _occurrence(db_session, fp, AlertStatus.RESOLVED.value, _T0 + timedelta(minutes=1))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status is None
+    assert la.status == "resolved"
     assert la.dismiss_mode is None
 
-    # A later firing occurrence must fire normally (not re-suppressed).
+    # A later firing occurrence takes the firing status (not re-suppressed).
     _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=2))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status is None
+    assert la.status == "firing"
 
 
-def test_dismiss_until_preserved_on_resolve(db_session):
-    """A time-boxed dismiss_until survives an interim resolve unchanged."""
+def test_dismiss_until_cleared_on_resolve(db_session):
+    """A resolve clears a time-boxed dismiss_until too (does not survive)."""
     fp = "fp-until-resolve"
     until = _T0 + timedelta(hours=1)
     _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
@@ -377,9 +367,10 @@ def test_dismiss_until_preserved_on_resolve(db_session):
     )
     _occurrence(db_session, fp, AlertStatus.RESOLVED.value, _T0 + timedelta(minutes=1))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status == "suppressed"
-    assert la.dismiss_mode == "dismiss_until"
-    assert la.dismissed_until is not None
+    assert la.status == "resolved"
+    assert la.dismiss_mode is None
+    assert la.dismissed_until is None
+    assert la.status_disposable is True
 
 
 def test_disposable_dismiss_clears_on_firing_refire(db_session):
@@ -396,9 +387,9 @@ def test_disposable_dismiss_clears_on_firing_refire(db_session):
     )
     _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=1))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status is None
+    assert la.status == "firing"
     assert la.dismiss_mode is None
-    assert la.status_disposable is False
+    assert la.status_disposable is True
 
 
 def test_disposable_dismiss_until_clears_on_firing_refire(db_session):
@@ -416,10 +407,10 @@ def test_disposable_dismiss_until_clears_on_firing_refire(db_session):
     )
     _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=1))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status is None
+    assert la.status == "firing"
     assert la.dismiss_mode is None
     assert la.dismissed_until is None
-    assert la.status_disposable is False
+    assert la.status_disposable is True
 
 
 def test_apply_dispose_on_new_alert_emits_flag_for_dismiss_and_status():
@@ -483,7 +474,7 @@ def test_dedup_path_undismisses_permanent_on_resolved_full_duplicate(db_session)
     )
     _save_dedup(db_session, _dedup_dto(fp, AlertStatus.RESOLVED.value))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status is None
+    assert la.status == "resolved"
     assert la.dismiss_mode is None
 
 
@@ -502,8 +493,8 @@ def test_dedup_path_disposes_dismiss_on_firing_full_duplicate(db_session):
     )
     _save_dedup(db_session, _dedup_dto(fp, AlertStatus.FIRING.value))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status is None
-    assert la.status_disposable is False
+    assert la.status == "firing"
+    assert la.status_disposable is True
 
 
 def test_dedup_path_keeps_permanent_dismiss_on_firing_full_duplicate(db_session):
