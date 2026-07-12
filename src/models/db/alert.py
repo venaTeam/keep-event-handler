@@ -165,6 +165,11 @@ class AlertDeduplicationEvent(SQLModel, table=True):
             "provider_type",
             "date_hour",
         ),
+        # SC-05: `timestamp` is the future daily-partition key (partitioning is done
+        # by the DBA, who has elevated DDL rights). Index it to support the time-range
+        # scans that retention/partition-pruning rely on. The date_hour/provider
+        # indexes above are kept for the dedup-distribution analytics queries.
+        Index("ix_alert_deduplication_event_timestamp", "timestamp"),
     )
 
     class Config:
