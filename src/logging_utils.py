@@ -329,11 +329,11 @@ WORKER_TYPE = get_worker_type()
 
 class FluentBitHandler(logging.Handler):
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-    def __init__(self, host, port, tenant="keep", service=None, **kwargs):
+    def __init__(self, host, port, tenant="keep", service_name=None, **kwargs):
         super().__init__()
         self.url = f"http://{host}:{port}"
         self.tenant = tenant
-        self.service = service
+        self.service_name = service_name
         self.queue = queue.Queue(maxsize=1000)
         self.session = requests.Session()
         self._stop = threading.Event()
@@ -347,8 +347,15 @@ class FluentBitHandler(logging.Handler):
                     break
                 json_record = json.loads(record)
                 json_record["tenant"] = self.tenant
-                if self.service:
-                    json_record["service"] = self.service
+                # Carry service identity in the SAME field the gateway uses
+                # (otelServiceName, populated there by the OTel LoggingInstrumentor)
+                # rather than a bespoke `service` field, so both services share one
+                # Elasticsearch mapping. The consumer has no OTel logging
+                # instrumentation, so this field is null here -- fill it from the
+                # configured service name, without clobbering a real OTel value
+                # (e.g. in the API process where LoggingInstrumentor is active).
+                if self.service_name and not json_record.get("otelServiceName"):
+                    json_record["otelServiceName"] = self.service_name
                 try:
                     self.session.post(self.url, json=json_record, verify=False)
                 except Exception:

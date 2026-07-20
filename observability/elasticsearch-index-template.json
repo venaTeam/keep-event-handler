@@ -1,0 +1,54 @@
+{
+  "index_patterns": ["keep-*"],
+  "priority": 200,
+  "_meta": {
+    "description": "Shared log mapping for keep-api-gateway + keep-event-handler. dynamic:false stops per-field mapping growth and, crucially, prevents document_mapping_exception rejections when the same extra= key (alert, event, payload, status, tags, ...) arrives as different JSON types from different call sites. Known/correlation fields are mapped explicitly so they stay searchable; everything else is kept in _source (visible in a document, not indexed).",
+    "adjust": "Set index_patterns to the actual index your Fluent Bit OUTPUT writes to (or keep both services on one keep-* index)."
+  },
+  "template": {
+    "settings": {
+      "index.mapping.ignore_malformed": true,
+      "index.mapping.total_fields.limit": 200
+    },
+    "mappings": {
+      "dynamic": false,
+      "date_detection": false,
+      "properties": {
+        "@timestamp":       { "type": "date" },
+        "message":          { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 4096 } } },
+        "levelname":        { "type": "keyword" },
+        "name":             { "type": "keyword" },
+        "filename":         { "type": "keyword" },
+        "module":           { "type": "keyword" },
+        "threadName":       { "type": "keyword" },
+        "process":          { "type": "long" },
+        "worker_type":      { "type": "keyword" },
+        "asctime":          { "type": "keyword" },
+
+        "otelServiceName":  { "type": "keyword" },
+        "otelTraceID":      { "type": "keyword" },
+        "otelSpanID":       { "type": "keyword" },
+        "otelTraceSampled": { "type": "boolean" },
+
+        "tenant":           { "type": "keyword" },
+        "tenant_id":        { "type": "keyword" },
+        "provider_id":      { "type": "keyword" },
+        "provider_type":    { "type": "keyword" },
+        "incident_id":      { "type": "keyword" },
+        "rule_id":          { "type": "keyword" },
+        "alert_id":         { "type": "keyword" },
+        "execution_id":     { "type": "keyword" },
+        "fingerprint":      { "type": "keyword" },
+        "event_type":       { "type": "keyword" },
+
+        "exc_info":         { "type": "text" },
+        "stack_info":       { "type": "text" },
+        "exception":        { "type": "text" },
+        "error":            { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 1024 } } },
+        "error_type":       { "type": "keyword" },
+        "error_message":    { "type": "text" },
+        "error_msg":        { "type": "text" }
+      }
+    }
+  }
+}

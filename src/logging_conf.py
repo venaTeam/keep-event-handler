@@ -14,8 +14,10 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 KEEP_FLUENTBIT = os.environ.get("KEEP_FLUENTBIT", "true").lower() == "true"
 KEEP_FLUENTBIT_HOST = os.environ.get("KEEP_FLUENTBIT_HOST")  # None => forwarding off
 KEEP_FLUENTBIT_PORT = os.environ.get("KEEP_FLUENTBIT_PORT", "80")
-# Tags forwarded records so this service is distinguishable from the gateway in
-# the shared collector. Falls back to the OTel service name convention.
+# Service identity for forwarded records. Emitted as `otelServiceName` (the same
+# field the gateway populates via OTel) so both services share one Elasticsearch
+# mapping and are distinguishable by value. Uses the same env knobs as the OTel
+# resource in observability.py.
 SERVICE_NAME = os.environ.get(
     "OTEL_SERVICE_NAME", os.environ.get("SERVICE_NAME", "keep-event-handler")
 )
@@ -228,7 +230,7 @@ def setup_logging():
             "class": "src.logging_utils.FluentBitHandler",
             "host": KEEP_FLUENTBIT_HOST,
             "port": int(KEEP_FLUENTBIT_PORT),
-            "service": SERVICE_NAME,
+            "service_name": SERVICE_NAME,
         }
         # Idempotent: setup_logging() may run more than once (e.g. in tests).
         if "fluentbit" not in CONFIG["loggers"][""]["handlers"]:
