@@ -57,17 +57,54 @@ services:
       - SOKETI_DEFAULT_APP_KEY=keepappkey
       - SOKETI_DEFAULT_APP_SECRET=keepappsecret
 
-  # Local log collector for exercising KEEP_FLUENTBIT forwarding end-to-end.
-  # Point the app at it with:
+  # ---------------------------------------------------------------------------
+  # Log-observability stack (opt-in). Start it with:
+  #   docker compose -f docker-compose.infra.yml --profile observability up -d
+  # then point the app at Fluent Bit:
   #   KEEP_FLUENTBIT=true KEEP_FLUENTBIT_HOST=localhost KEEP_FLUENTBIT_PORT=9880
-  # Forwarded records show up in `docker logs <fluent-bit container>`.
+  # Pipeline: app --(HTTP POST)--> fluent-bit --> elasticsearch --> kibana.
+  # These services are gated behind the `observability` profile so the default
+  # `up` (kafka/postgres/websocket) stays lightweight.
+  # ---------------------------------------------------------------------------
   fluent-bit:
     image: fluent/fluent-bit:3.1
+    profiles: ["observability"]
     ports:
       - "9880:9880"   # HTTP input — where the app POSTs log records
       - "2020:2020"   # Fluent Bit monitoring API
     volumes:
       - ./fluent-bit.dev.conf:/fluent-bit/etc/fluent-bit.conf:ro
+    depends_on:
+      - elasticsearch
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    profiles: ["observability"]
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false          # local dev only — no auth
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - cluster.routing.allocation.disk.watermark.low=99%
+      - cluster.routing.allocation.disk.watermark.high=99%
+      - cluster.routing.allocation.disk.watermark.flood_stage=99%
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.4
+    profiles: ["observability"]
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
 
 volumes:
   postgres_data:
