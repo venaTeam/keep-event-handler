@@ -57,5 +57,17 @@ services:
       - SOKETI_DEFAULT_APP_KEY=keepappkey
       - SOKETI_DEFAULT_APP_SECRET=keepappsecret
 
+  # Local log collector for exercising KEEP_FLUENTBIT forwarding end-to-end.
+  # Point the app at it with:
+  #   KEEP_FLUENTBIT=true KEEP_FLUENTBIT_HOST=localhost KEEP_FLUENTBIT_PORT=9880
+  # Forwarded records show up in `docker logs <fluent-bit container>`.
+  fluent-bit:
+    image: fluent/fluent-bit:3.1
+    ports:
+      - "9880:9880"   # HTTP input — where the app POSTs log records
+      - "2020:2020"   # Fluent Bit monitoring API
+    volumes:
+      - ./fluent-bit.dev.conf:/fluent-bit/etc/fluent-bit.conf:ro
+
 volumes:
   postgres_data:
