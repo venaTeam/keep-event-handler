@@ -47,7 +47,7 @@ from enum import Enum
 from src.core.db.helpers import NULL_FOR_DELETED_AT
 from src.core.db.db_utils import get_json_extract_field
 from src.models.db.preset import PresetDto, StaticPresetsId, Preset
-from src.models.db.alert import LastAlertToIncident, AlertDeduplicationEvent, LastAlert, Alert, AlertDeduplicationRule, IncidentEnrichment, AlertAudit, AlertField
+from src.models.db.alert import LastAlertToIncident, AlertDeduplicationEvent, LastAlert, Alert, AlertDeduplicationRule, IncidentEnrichment, AlertAudit, AlertField, CommentMention
 from src.models.db.provider import Provider, ProviderExecutionLog
 from src.models.db.rule import Rule
 from src.models.db.incident import Incident, IncidentType, IncidentStatus, IncidentSeverity
@@ -650,8 +650,15 @@ def delete_alert(
 ):
     with existed_or_new_session(session) as session:
 
-        session.execute(delete(LastAlertToIncident).where(LastAlertToIncident.fingerprint == fingerprint))                          
+        session.execute(delete(LastAlertToIncident).where(LastAlertToIncident.fingerprint == fingerprint))
         session.execute(delete(LastAlert).where(LastAlert.fingerprint == fingerprint))
+        session.execute(
+            delete(CommentMention).where(
+                CommentMention.comment_id.in_(
+                    select(AlertAudit.id).where(AlertAudit.fingerprint == fingerprint)
+                )
+            )
+        )
         session.execute(delete(AlertAudit).where(AlertAudit.fingerprint == fingerprint))
         session.execute(delete(Alert).where(Alert.fingerprint == fingerprint))
         session.commit()
