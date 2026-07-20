@@ -30,6 +30,12 @@ also produces the per-rule field sprawl.
   correlation keys (`tenant_id`, `provider_id`, `incident_id`, `rule_id`,
   `alert_id`, `execution_id`, `fingerprint`, `event_type`, `otelServiceName`, ...)
   so those stay searchable/aggregatable.
+- **Exception / error fields are first-classed** so error logs stay debuggable:
+  `exc_info` (the traceback string emitted by `python-json-logger` for
+  `logger.exception(...)` / `exc_info=True`), `stack_info`, `exception`, `error`,
+  `error_type`, `error_message`, `error_msg`. Without these in the mapping,
+  `dynamic:false` would keep the traceback in `_source` but leave it unindexed —
+  invisible in Kibana's field list and unsearchable.
 - **`index.mapping.ignore_malformed: true`** — safety net: if an explicitly-mapped
   scalar field ever receives a bad value, that one field is skipped instead of the
   whole document being rejected.

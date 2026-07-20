@@ -39,7 +39,15 @@
         "alert_id":         { "type": "keyword" },
         "execution_id":     { "type": "keyword" },
         "fingerprint":      { "type": "keyword" },
-        "event_type":       { "type": "keyword" }
+        "event_type":       { "type": "keyword" },
+
+        "exc_info":         { "type": "text" },
+        "stack_info":       { "type": "text" },
+        "exception":        { "type": "text" },
+        "error":            { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 1024 } } },
+        "error_type":       { "type": "keyword" },
+        "error_message":    { "type": "text" },
+        "error_msg":        { "type": "text" }
       }
     }
   }
