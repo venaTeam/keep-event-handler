@@ -657,7 +657,8 @@ def delete_alert(
                 CommentMention.comment_id.in_(
                     select(AlertAudit.id).where(AlertAudit.fingerprint == fingerprint)
                 )
-            )
+            ),
+            execution_options={"synchronize_session": False},
         )
         session.execute(delete(AlertAudit).where(AlertAudit.fingerprint == fingerprint))
         session.execute(delete(Alert).where(Alert.fingerprint == fingerprint))
