@@ -1,5 +1,5 @@
 import os
-from prometheus_client import Counter, Histogram, Summary
+from prometheus_client import Counter, Gauge, Histogram, Summary
 
 # This MUST be called before any prometheus_client import
 prom_multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR", "/tmp/prometheus")
@@ -91,4 +91,101 @@ rules_engine_duration_seconds = Histogram(
     f"{ALERT_METRIC_PREFIX}rules_engine_duration_seconds",
     "Time spent in rules engine",
     labelnames=["provider_type"],
+)
+
+
+### AUTOMATIONS TRIGGER INDEX (B4)
+AUTOMATION_METRIC_PREFIX = "keep_automation_"
+
+# Boot signal only. A dead reload worker leaves this at 1 -- the alert for that
+# is staleness on index_last_successful_reload_timestamp, not this gauge.
+automation_index_ready = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}index_ready",
+    "1 once a hydrate has succeeded and an index is published",
+)
+# Distinct from index_ready on purpose: two states, two runbooks. ready==0 means
+# "no usable index, matching is silently doing nothing"; config_missing means
+# "the index is fine, convergence is slower than advertised".
+automation_index_config_missing = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}index_config_missing",
+    "1 when an optional setting is unset and a capability is degraded",
+    labelnames=["setting"],
+)
+# Set from INSIDE the worker loop. This is what distinguishes a wedged or dead
+# worker from a healthy one; index_ready cannot.
+automation_index_worker_alive = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}index_worker_alive",
+    "1 while the reload worker thread is running its loop",
+)
+automation_index_last_successful_reload_timestamp = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}index_last_successful_reload_timestamp",
+    "Unix seconds of the last hydrate that completed without error",
+)
+# Unlabelled totals. A `tenant` label here would be unbounded cardinality on a
+# metric scraped from every replica; the per-tenant question is query-time, B5's.
+automation_index_size = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}index_size",
+    "Active automations in the published index, all tenants",
+)
+automation_index_tenants = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}index_tenants",
+    "Tenants with at least one active automation in the published index",
+)
+automation_index_generation = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}index_generation",
+    "max(index_generation) observed in the applied index",
+)
+automation_index_reloads_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}index_reloads_total",
+    "Reload attempts by what triggered them and how they ended",
+    labelnames=["trigger", "result"],
+)
+automation_index_reload_duration_seconds = Histogram(
+    f"{AUTOMATION_METRIC_PREFIX}index_reload_duration_seconds",
+    "Wall time of a hydrate + compile + swap cycle",
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+)
+# Both of these are security signals, not debug counters: nonzero means the
+# control plane wrote something this service refuses to index.
+automation_index_rows_skipped_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}index_rows_skipped_total",
+    "Rows skipped at compile, by reason",
+    labelnames=["reason"],
+)
+automation_index_rows_rejected_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}index_rows_rejected_total",
+    "Hydrates refused wholesale because the result set breached a cap",
+    labelnames=["reason"],
+)
+automation_index_readonly_verification_failures_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}index_readonly_verification_failures_total",
+    "Hydrate transactions that were not actually read-only",
+)
+automation_index_hydrate_rate_limited_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}index_hydrate_rate_limited_total",
+    "Reload signals dropped by the minimum-hydrate-interval floor",
+)
+# Derived from last message / last successful health check, NOT from socket
+# state: an idle-timeout device can drop the connection while the socket looks
+# alive and get_message() returns None forever with no exception.
+automation_pubsub_connected = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}pubsub_connected",
+    "1 while the reload subscriber is believed live",
+)
+automation_pubsub_reconnects_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}pubsub_reconnects_total",
+    "Reload subscriber reconnect attempts",
+)
+automation_index_matches_skipped_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}index_matches_skipped_total",
+    "match() calls that returned empty for a reason other than no match",
+    labelnames=["reason"],
+)
+# The p99 < 1ms SLO instrument. Observed with a bare perf_counter delta rather
+# than the .time() context manager, which allocates a Timer per call -- the
+# instrument would otherwise cost more than the probe it measures.
+automation_match_duration_seconds = Histogram(
+    f"{AUTOMATION_METRIC_PREFIX}match_duration_seconds",
+    "Wall time of a match() probe on the consumer thread",
+    buckets=(5e-5, 1e-4, 2.5e-4, 5e-4, 1e-3, 2.5e-3, 5e-3, 1e-2),
 )
