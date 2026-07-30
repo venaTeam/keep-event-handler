@@ -312,6 +312,7 @@ class TriggerIndexService:
 # Module-level singleton, constructed at import. This is what makes match()
 # legal in a process that never started the service.
 _service = TriggerIndexService()
+_subscriber = None
 
 
 def get_service() -> TriggerIndexService:
@@ -324,8 +325,36 @@ def match(tenant_id: str, alert):
 
 
 def start_trigger_index() -> None:
+    """Start the reload worker, and the `reload` subscriber if configured.
+
+    Non-blocking: it kicks the worker and returns rather than waiting for the
+    first hydrate, so a slow database cannot add a second to ingestion startup.
+    `index_ready` makes the warm-up window observable instead.
+    """
+    global _subscriber
     _service.start()
+    # Imported here, not at module scope: this pulls in redis, and an import
+    # error must not be able to take down the consumer (see the wrapped import
+    # in consumer_main).
+    from src.bl.automations.pubsub import ReloadSubscriber
+
+    if _subscriber is None:
+        _subscriber = ReloadSubscriber(_service)
+    _subscriber.start()
 
 
 def stop_trigger_index() -> None:
-    _service.stop(deadline=settings.read_shutdown_timeout_seconds())
+    """Bounded stop, one shared deadline across both threads.
+
+    Both threads are daemons, so a wedged join can never block process exit --
+    but this runs BEFORE the unbounded SSE pool flush in consumer_main, so the
+    bounded half completes inside the Kubernetes grace period regardless.
+    """
+    global _subscriber
+    deadline = settings.read_shutdown_timeout_seconds()
+    started = time.monotonic()
+    if _subscriber is not None:
+        _subscriber.stop(deadline=deadline)
+        _subscriber = None
+    remaining = max(0.5, deadline - (time.monotonic() - started))
+    _service.stop(deadline=remaining)
