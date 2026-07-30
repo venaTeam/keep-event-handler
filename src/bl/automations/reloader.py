@@ -56,6 +56,33 @@ logger = logging.getLogger(__name__)
 _LOUD_FAILURES = 3
 
 
+def _failure_kind(error: Exception) -> str:
+    """Classify a hydrate failure.
+
+    The spec requires a missing table or column to be distinguishable from a
+    connection failure, because for this story they mean opposite things: the
+    schema is behind (deploy ordering -- this service is specified to deploy
+    BEFORE the gateway migration, so it is EXPECTED for a window), versus the
+    database is gone (a real incident). Collapsing them into one counter is how
+    an expected transient and an outage end up looking identical on a dashboard.
+    """
+    name = type(error).__name__
+    text_form = f"{name}: {error}".lower()
+    if "undefinedtable" in text_form or "undefinedcolumn" in text_form:
+        return "schema_behind"
+    if "does not exist" in text_form and ("relation" in text_form or "column" in text_form):
+        return "schema_behind"
+    if "operationalerror" in text_form or "could not connect" in text_form:
+        return "unreachable"
+    return "error"
+
+
+def _failure_result(error: Exception) -> str:
+    """The `result` label on reloads_total, so the two are separable in a query."""
+    kind = _failure_kind(error)
+    return "failed" if kind == "error" else f"failed_{kind}"
+
+
 def next_action(
     now: float,
     last_attempt_at: float,
@@ -238,11 +265,13 @@ class TriggerIndexService:
         last automation has to take effect. Only a failure keeps last-good.
         """
         self._consecutive_failures += 1
-        automation_index_reloads_total.labels(trigger=trigger, result="failed").inc()
+        automation_index_reloads_total.labels(
+            trigger=trigger, result=_failure_result(error)
+        ).inc()
         message = (
-            "automations: index reload failed (trigger=%s, consecutive=%d): %s"
+            "automations: index reload failed (trigger=%s, consecutive=%d, kind=%s): %s"
         )
-        args = (trigger, self._consecutive_failures, error)
+        args = (trigger, self._consecutive_failures, _failure_kind(error), error)
         if self._consecutive_failures <= _LOUD_FAILURES:
             logger.error(message, *args)
         elif self._consecutive_failures % 20 == 0:

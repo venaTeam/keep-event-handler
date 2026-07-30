@@ -114,11 +114,15 @@ services:
   # convergence is sub-second like production.
   #
   # AOF everysec mirrors the durability posture of spec section 7.3.
+  # Host port 6380, NOT 6379: the keepHQ root stack (CLAUDE.md's "THE local
+  # infra stack for all six services") already binds 6379 as `keep-redis`, and
+  # a dev with both up would get "port is already allocated". Set
+  # REDIS_URL=redis://localhost:6380/0 when using this stack standalone.
   redis:
     image: redis:7
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:

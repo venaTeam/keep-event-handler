@@ -31,8 +31,17 @@ over the code default. `tests/automations/test_container_ports.py` guards this.
 ```bash
 docker compose -f docker-compose.infra.yml up -d   # kafka, postgres, redis, soketi
 poetry install
+
+# Optional: the reload pub/sub channel. Without it the index still reloads on
+# its timer -- see "two degraded states" below. This stack maps redis to 6380
+# so it cannot collide with the keepHQ root stack's 6379.
+export REDIS_URL=redis://localhost:6380/0
+
 poetry run python -m src.consumer_main
 ```
+
+If you are running the **keepHQ root stack** instead (the one that serves all six
+services), redis is on the usual `redis://localhost:6379/0`.
 
 `keep-api-gateway` owns the schema on the shared `keep` database — this service
 waits for it rather than building it (`src/core/db/db_on_start.py`). Apply the

@@ -111,11 +111,17 @@ automation_index_config_missing = Gauge(
     "1 when an optional setting is unset and a capability is degraded",
     labelnames=["setting"],
 )
-# Set from INSIDE the worker loop. This is what distinguishes a wedged or dead
-# worker from a healthy one; index_ready cannot.
+# Set to 1 from inside the worker loop, and to 0 on a clean stop.
+#
+# Read it honestly: nothing resets this if the thread DIES, so a 1 does not
+# prove liveness. What it does prove is that the loop ran at least once -- so a
+# scrape showing 0 means the index never started, which is the "watcher never
+# starts in deployment" failure class this platform has already shipped once.
+# The detector for a worker that started and then died is staleness on
+# index_last_successful_reload_timestamp.
 automation_index_worker_alive = Gauge(
     f"{AUTOMATION_METRIC_PREFIX}index_worker_alive",
-    "1 while the reload worker thread is running its loop",
+    "1 once the reload worker loop has run; 0 before start and after a clean stop",
 )
 automation_index_last_successful_reload_timestamp = Gauge(
     f"{AUTOMATION_METRIC_PREFIX}index_last_successful_reload_timestamp",

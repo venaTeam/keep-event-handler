@@ -484,3 +484,84 @@ def test_a_signal_inside_the_floor_is_dropped_and_counted(monkeypatch, metric_de
     finally:
         service.stop(deadline=5)
     assert tracked.delta >= 1.0
+
+
+# --------------------------------------------------------------------------
+# Failure classification and gauge movement
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (Exception("relation \"automations\" does not exist"), "schema_behind"),
+        (Exception("UndefinedTable: no such relation"), "schema_behind"),
+        (Exception("UndefinedColumn: tenant_id"), "schema_behind"),
+        (Exception("column tenant_id does not exist"), "schema_behind"),
+        (Exception("OperationalError: could not connect to server"), "unreachable"),
+        (Exception("something else entirely"), "error"),
+    ],
+)
+def test_a_missing_table_is_distinguishable_from_a_dead_database(error, expected):
+    """They mean opposite things for this story.
+
+    The schema being behind is EXPECTED for a window -- this service is
+    specified to deploy before the gateway migration that creates the table.
+    The database being gone is an incident. One counter for both is how an
+    expected transient and an outage look identical on a dashboard.
+    """
+    from src.bl.automations.reloader import _failure_kind
+
+    assert _failure_kind(error) == expected
+
+
+def test_the_failure_result_label_separates_the_two(metric_delta):
+    def schema_behind():
+        raise Exception('relation "automations" does not exist')
+
+    tracked = metric_delta(
+        "keep_automation_index_reloads_total",
+        {"trigger": "boot", "result": "failed_schema_behind"},
+    )
+    service = TriggerIndexService(hydrate_fn=schema_behind)
+    service.reload_now("boot")
+    assert tracked.delta == 1.0
+
+
+def test_a_successful_swap_moves_the_published_gauges():
+    """The instruments the runbooks read must actually be written, not merely
+    registered."""
+    from tests.automations.conftest import metric_value
+
+    service = TriggerIndexService(
+        hydrate_fn=lambda: [
+            row("a", "site", "dc1", tenant_id="keep"),
+            row("b", "site", "dc2", tenant_id="other-tenant"),
+        ]
+    )
+    service.reload_now("boot")
+
+    assert metric_value("keep_automation_index_ready") == 1.0
+    assert metric_value("keep_automation_index_size") == 2.0
+    assert metric_value("keep_automation_index_tenants") == 2.0
+    assert metric_value("keep_automation_index_last_successful_reload_timestamp") > 0
+
+
+def test_the_staleness_clock_is_not_refreshed_by_a_failure():
+    """The staleness alert is the detector for a dead worker. A failing service
+    must not be able to keep it looking fresh."""
+    from tests.automations.conftest import metric_value
+
+    service = TriggerIndexService(hydrate_fn=lambda: [row("a", "site", "dc1")])
+    service.reload_now("boot")
+    fresh = metric_value("keep_automation_index_last_successful_reload_timestamp")
+
+    def boom():
+        raise RuntimeError("gone")
+
+    service._hydrate_fn = boom
+    service.reload_now("periodic")
+
+    assert (
+        metric_value("keep_automation_index_last_successful_reload_timestamp") == fresh
+    )

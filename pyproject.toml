@@ -71,3 +71,11 @@ pytest-timeout = "^2.3"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+# A default wall-clock bound for EVERY test, not just the ones that remembered
+# a marker. The Stop hook and CI both run pytest with no timeout of their own,
+# and this suite now contains daemon threads, a socket-polling loop and real
+# connection probes -- any one of which can hang a run indefinitely.
+# Per-test @pytest.mark.timeout still overrides this.
+timeout = 120
