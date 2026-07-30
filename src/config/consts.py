@@ -150,3 +150,62 @@ KEEP_ERROR_STORM_MAX_PER_KEY = config(
 KEEP_ERROR_GUARD_MAX_ENTRIES = config(
     "KEEP_ERROR_GUARD_MAX_ENTRIES", default=10000, cast=int
 )
+
+# --- Automations trigger index (B4) ---------------------------------------
+# The matcher hydrates the gateway-owned `automations` table from the SAME
+# database this service already reads (DATABASE_CONNECTION_STRING above), so
+# there is no DSN to configure here. Only intervals, caps and Redis.
+#
+# Every interval is clamped at read time in src/bl/automations/settings.py:
+# config() performs no validation and accepts a literal "0", which would turn
+# the reload timer into a hot loop -- a pure-Python thread spinning against the
+# GIL steals time from the single synchronous Kafka consumer thread. Precedent
+# for the clamp: kafka_consumer.py's `max(1, KAFKA_CONSUMER_BATCH_SIZE)`.
+AUTOMATION_INDEX_RELOAD_SECONDS = config(
+    "AUTOMATION_INDEX_RELOAD_SECONDS", default=30, cast=int
+)
+# +/- this fraction, so N replicas don't stampede the shared pool in lockstep
+# after a rolling restart.
+AUTOMATION_INDEX_RELOAD_JITTER_FRACTION = config(
+    "AUTOMATION_INDEX_RELOAD_JITTER_FRACTION", default=0.1, cast=float
+)
+# Collapses a burst of `reload` publishes into one hydrate.
+AUTOMATION_INDEX_RELOAD_DEBOUNCE_SECONDS = config(
+    "AUTOMATION_INDEX_RELOAD_DEBOUNCE_SECONDS", default=0.5, cast=float
+)
+# Wall-clock floor between ANY two hydrates. Debounce coalesces a burst; only
+# this bounds a sustained publish rate. The `reload` channel is unauthenticated
+# and the database it hydrates against is the one serving alert ingestion.
+AUTOMATION_INDEX_MIN_HYDRATE_INTERVAL_SECONDS = config(
+    "AUTOMATION_INDEX_MIN_HYDRATE_INTERVAL_SECONDS", default=5, cast=int
+)
+AUTOMATION_INDEX_BOOT_RETRY_SECONDS = config(
+    "AUTOMATION_INDEX_BOOT_RETRY_SECONDS", default=5, cast=int
+)
+AUTOMATION_INDEX_SHUTDOWN_TIMEOUT_SECONDS = config(
+    "AUTOMATION_INDEX_SHUTDOWN_TIMEOUT_SECONDS", default=3, cast=int
+)
+AUTOMATION_INDEX_STATEMENT_TIMEOUT_MS = config(
+    "AUTOMATION_INDEX_STATEMENT_TIMEOUT_MS", default=10000, cast=int
+)
+
+# Caps. A defect in one row skips that row; a condition that indicts the whole
+# result set refuses the swap. Never truncate -- a silently truncated index is
+# a set of automations that stop firing with no signal.
+AUTOMATION_INDEX_MAX_ROWS = config(
+    "AUTOMATION_INDEX_MAX_ROWS", default=2000, cast=int
+)
+AUTOMATION_INDEX_MAX_VALUE_BYTES = config(
+    "AUTOMATION_INDEX_MAX_VALUE_BYTES", default=512, cast=int
+)
+AUTOMATION_INDEX_MAX_TOTAL_BYTES = config(
+    "AUTOMATION_INDEX_MAX_TOTAL_BYTES", default=8 * 1024 * 1024, cast=int
+)
+
+# Empty is a defined, quiet degradation: the reload worker still runs on its
+# timer, only sub-second convergence is lost. Not an off switch.
+REDIS_URL = config("REDIS_URL", default="")
+AUTOMATION_RELOAD_CHANNEL = config("AUTOMATION_RELOAD_CHANNEL", default="reload")
+AUTOMATION_PUBSUB_RECONNECT_MAX_BACKOFF_SECONDS = config(
+    "AUTOMATION_PUBSUB_RECONNECT_MAX_BACKOFF_SECONDS", default=30, cast=int
+)
