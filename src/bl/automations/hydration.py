@@ -75,11 +75,30 @@ WHERE matching_state = 'active'
 LIMIT :cap
 """
 
+# The `::text` casts are Postgres syntax and a Postgres need -- psycopg2 would
+# otherwise hand back JSONB pre-parsed, making the digest and the byte
+# accounting driver-dependent. On sqlite those columns are already TEXT, so the
+# cast is both unnecessary and a syntax error. Keeping a dialect-neutral variant
+# is what lets `fetch_rows()` -- and therefore the read-only mechanism, the
+# statement allowlist and the row cap -- be tested without infra.
+HYDRATION_SQL_GENERIC = """
+SELECT id, tenant_id, triggers AS triggers,
+       cooldown_seconds, cooldown_fields AS cooldown_fields,
+       grace_seconds, index_generation
+FROM automations
+WHERE matching_state = 'active'
+LIMIT :cap
+"""
+
 _READONLY_CHECK_SQL = "SHOW transaction_read_only"
 
 
 def _is_postgres(bind) -> bool:
     return bind.dialect.name == "postgresql"
+
+
+def hydration_sql(bind) -> str:
+    return HYDRATION_SQL if _is_postgres(bind) else HYDRATION_SQL_GENERIC
 
 
 def fetch_rows() -> list[dict]:
@@ -109,7 +128,7 @@ def fetch_rows() -> list[dict]:
             # Layer 2 (statement-log allowlist, text() only, no session.add)
             # is what covers this path.
             conn = session.connection()
-        result = conn.execute(text(HYDRATION_SQL), {"cap": cap})
+        result = conn.execute(text(hydration_sql(bind)), {"cap": cap})
         rows = [dict(row) for row in result.mappings().all()]
 
     if len(rows) > settings.read_max_rows():
