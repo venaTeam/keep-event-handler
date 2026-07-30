@@ -191,7 +191,7 @@ class Alert(SQLModel, table=True):
     #            with 1M alerts, we see queries goes from >30s to 0s with the index
     #            todo: on MSSQL, the index is "nonclustered" index which cannot be controlled by SQLModel
     timestamp: datetime = Field(
-        sa_column=Column(DATETIME_COLUMN_TYPE, index=True, nullable=False),
+        sa_column=Column(DATETIME_COLUMN_TYPE, index=True, nullable=False, primary_key=True),
         default_factory=lambda: datetime.utcnow().replace(
             microsecond=int(datetime.utcnow().microsecond / 1000) * 1000
         ),
@@ -292,7 +292,7 @@ class Alert(SQLModel, table=True):
 class LastAlert(SQLModel, table=True):
     tenant_id: str = Field(foreign_key="tenant.id", nullable=False, primary_key=True)
     fingerprint: str = Field(primary_key=True, index=True)
-    alert_id: UUID = Field(foreign_key="alert.id")
+    alert_id: UUID = Field()
     timestamp: datetime = Field(nullable=False, index=True)
     first_timestamp: datetime = Field(nullable=False, index=True)
     alert_hash: str | None = Field(nullable=True, index=True)
