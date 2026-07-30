@@ -58,7 +58,7 @@ _LOUD_FAILURES = 3
 
 def next_action(
     now: float,
-    last_hydrate_at: float,
+    last_attempt_at: float,
     signalled: bool,
     consecutive_failures: int,
     reload_seconds: float,
@@ -68,33 +68,44 @@ def next_action(
 ) -> tuple[str, float]:
     """Pure scheduling policy: ("reload", 0.0) or ("wait", seconds).
 
-    Extracted as a pure function because freegun cannot drive
+    Extracted as a pure function because freezegun cannot drive
     `threading.Event.wait` -- a 1.5s wait under `freeze_time` burns 1.5s of real
     time while the frozen clock reports zero. So the policy is tested directly
     and the thread only has to honour it.
 
+    **The clock is ATTEMPTS, not successes.** This is load-bearing and was a
+    real bug: keying off the last *successful* hydrate means a failing hydrate
+    never advances the clock, so `since` stays large, every guard passes, and
+    the loop returns ("reload", 0.0) forever -- an unbounded tight loop issuing
+    ~6 round trips per iteration against the connection pool alert ingestion is
+    drawing from. A database blip would have been amplified into an ingestion
+    outage, and it would have fired on the very first deploy, since this service
+    is specified to deploy BEFORE the gateway migration that creates the table.
+
     `jitter` is passed in rather than drawn here so the function stays pure.
     """
-    since = now - last_hydrate_at
+    since = now - last_attempt_at
 
-    # The floor applies to signals AND boot retries, not just the timer. Debounce
+    # The floor applies to signals AND retries, not just the timer. Debounce
     # coalesces a burst; only this bounds a sustained publish rate, and the
     # `reload` channel is unauthenticated.
     if since < min_hydrate_interval:
         return "wait", max(0.0, min_hydrate_interval - since)
 
-    if signalled:
-        return "reload", 0.0
-
     if consecutive_failures:
         # Exponential from the boot-retry base, capped at the normal interval,
-        # so a persistent failure settles into the ordinary cadence.
+        # so a persistent failure settles into the ordinary cadence. Checked
+        # BEFORE the signal branch: a publish storm must not be able to bypass
+        # the failure backoff and reinstate the hot loop.
         backoff = min(
             reload_seconds, boot_retry_seconds * (2 ** (consecutive_failures - 1))
         )
         if since >= backoff:
             return "reload", 0.0
         return "wait", backoff - since
+
+    if signalled:
+        return "reload", 0.0
 
     due_in = reload_seconds + jitter - since
     if due_in <= 0:
@@ -110,6 +121,12 @@ class TriggerIndexService:
         self._index = TriggerIndex.empty()
         self._ready = False
         self._digest = None
+        # Two clocks, deliberately. `_last_attempt_at` drives scheduling and is
+        # advanced on EVERY attempt including failures -- without that a failing
+        # hydrate never moves the clock and the worker spins. `_last_hydrate_at`
+        # records the last SUCCESS and is what the staleness alert reads, so a
+        # failing service must not be able to refresh it.
+        self._last_attempt_at = 0.0
         self._last_hydrate_at = 0.0
         self._consecutive_failures = 0
 
@@ -159,6 +176,9 @@ class TriggerIndexService:
         """Hydrate, compile, swap. Total: never raises to the caller."""
         with self._writer_lock:
             started = time.perf_counter()
+            # Stamped before anything can fail, so the scheduler's backoff is
+            # honoured no matter which branch below is taken.
+            self._last_attempt_at = time.time()
             try:
                 rows = self._hydrate_fn()
                 digest = hydration.rows_digest(rows)
@@ -272,7 +292,7 @@ class TriggerIndexService:
 
                 action, seconds = next_action(
                     now=time.time(),
-                    last_hydrate_at=self._last_hydrate_at,
+                    last_attempt_at=self._last_attempt_at,
                     signalled=signalled,
                     consecutive_failures=self._consecutive_failures,
                     reload_seconds=self._reload_seconds,

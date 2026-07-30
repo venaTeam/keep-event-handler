@@ -54,7 +54,7 @@ def row(automation_id, field, value, tenant_id=TENANT):
 def _action(**overrides):
     kwargs = dict(
         now=1000.0,
-        last_hydrate_at=0.0,
+        last_attempt_at=0.0,
         signalled=False,
         consecutive_failures=0,
         reload_seconds=30.0,
@@ -67,48 +67,94 @@ def _action(**overrides):
 
 
 def test_reloads_when_the_interval_has_elapsed():
-    assert _action(last_hydrate_at=900.0)[0] == "reload"
+    assert _action(last_attempt_at=900.0)[0] == "reload"
 
 
 def test_waits_when_the_interval_has_not_elapsed():
-    action, seconds = _action(last_hydrate_at=990.0)
+    action, seconds = _action(last_attempt_at=990.0)
     assert action == "wait"
     assert 0 < seconds <= 30
 
 
 def test_a_signal_reloads_immediately_once_past_the_floor():
-    assert _action(last_hydrate_at=990.0, signalled=True)[0] == "reload"
+    assert _action(last_attempt_at=990.0, signalled=True)[0] == "reload"
 
 
 def test_the_minimum_interval_floor_beats_a_signal():
     """Debounce coalesces a burst; only the floor bounds a sustained publish
     rate -- and the reload channel is unauthenticated."""
-    action, seconds = _action(last_hydrate_at=998.0, signalled=True)
+    action, seconds = _action(last_attempt_at=998.0, signalled=True)
     assert action == "wait"
     assert seconds == pytest.approx(3.0)
 
 
-def test_the_floor_also_applies_to_boot_retries():
-    action, _ = _action(last_hydrate_at=999.0, consecutive_failures=3)
+def test_the_floor_also_applies_to_retries():
+    action, _ = _action(last_attempt_at=999.0, consecutive_failures=3)
     assert action == "wait"
 
 
 def test_failure_backoff_grows_then_caps_at_the_reload_interval():
+    """Each sample is measured at ITS OWN backoff boundary.
+
+    Measuring them all at a fixed `since` would just report the same clamp.
+    """
     waits = []
     for failures in (1, 2, 3, 4, 5, 9):
-        _, seconds = _action(last_hydrate_at=1000.0, consecutive_failures=failures)
+        _, seconds = _action(last_attempt_at=994.0, consecutive_failures=failures)
         waits.append(seconds)
     assert waits == sorted(waits)
     assert max(waits) <= 30.0
 
 
+@pytest.mark.parametrize("failures", [1, 2, 3, 10, 50])
+def test_a_failed_attempt_never_schedules_an_immediate_retry(failures):
+    """Regression: the scheduler used to key off the last SUCCESSFUL hydrate.
+
+    A failing hydrate never advanced that clock, so `since` stayed large, every
+    guard passed, and the loop returned ("reload", 0.0) forever -- an unbounded
+    tight loop issuing ~6 round trips per iteration against the connection pool
+    alert ingestion draws from. It would have fired on the very first deploy,
+    because this service is specified to deploy BEFORE the gateway migration
+    that creates the table.
+
+    Now the clock is ATTEMPTS, so a failure that just happened must wait.
+    """
+    action, seconds = _action(last_attempt_at=1000.0, consecutive_failures=failures)
+    assert action == "wait"
+    assert seconds > 0
+
+
+def test_a_signal_cannot_bypass_the_failure_backoff():
+    """Otherwise a publish storm reinstates the hot loop during an outage."""
+    action, seconds = _action(
+        last_attempt_at=994.0, signalled=True, consecutive_failures=3
+    )
+    assert action == "wait"
+    assert seconds > 0
+
+
 def test_jitter_moves_the_due_time():
     """since = 31s, interval = 30s: due without jitter, not due with +5s."""
-    early, _ = _action(last_hydrate_at=969.0, jitter=0.0)
-    late, seconds = _action(last_hydrate_at=969.0, jitter=5.0)
+    early, _ = _action(last_attempt_at=969.0, jitter=0.0)
+    late, seconds = _action(last_attempt_at=969.0, jitter=5.0)
     assert early == "reload"
     assert late == "wait"
     assert seconds == pytest.approx(4.0)
+
+
+def test_the_attempt_clock_advances_on_a_failed_hydrate():
+    """The service half of the regression: reload_now must stamp the attempt
+    clock before anything can fail."""
+
+    def boom():
+        raise RuntimeError("database is gone")
+
+    service = TriggerIndexService(hydrate_fn=boom)
+    assert service._last_attempt_at == 0.0
+    service.reload_now("boot")
+    assert service._last_attempt_at > 0.0
+    # ...and must NOT have refreshed the success clock the staleness alert reads.
+    assert service._last_hydrate_at == 0.0
 
 
 # --------------------------------------------------------------------------
