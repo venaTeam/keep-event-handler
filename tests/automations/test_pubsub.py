@@ -7,6 +7,7 @@ needs a live Redis lives in test_reload_integration.py and self-skips.
 """
 
 import threading
+import time
 
 import pytest
 import redis.exceptions as redis_exceptions
@@ -131,18 +132,71 @@ def test_the_channel_subscribed_is_the_contract_channel(service):
     assert client.pubsubs[0].subscribed == ["reload"]
 
 
-def test_the_payload_is_never_read():
+@pytest.mark.timeout(15)
+def test_the_payload_is_never_read(service):
     """The channel is a signal, never data. Parsing it would turn an
-    unauthenticated channel into an input path."""
-    source = (
-        __import__("pathlib").Path("src/bl/automations/pubsub.py").read_text(
-            encoding="utf-8"
-        )
+    unauthenticated channel into an untrusted-input path.
+
+    Asserted as a PROPERTY, not by grepping for `message["data"]`: a source
+    scan passes the moment someone spells the access differently.
+
+    The probe RECORDS an access rather than raising on one. Raising does not
+    work here -- the listener's `except Exception` would swallow it and treat
+    it as a disconnect, and the test would pass anyway once the reconnect
+    delivered the signal. (Verified: a raising version of this test failed to
+    catch a deliberate `message["data"]` mutation.)
+    """
+    accesses = []
+
+    class Tattletale(dict):
+        def __getitem__(self, key):
+            accesses.append(f"[{key!r}]")
+            return super().__getitem__(key)
+
+        def get(self, key, default=None):
+            accesses.append(f".get({key!r})")
+            return super().get(key, default)
+
+    client = FakeClient(script=[Tattletale(type="message", data=b"secret")])
+    subscriber = ReloadSubscriber(
+        service, url="redis://x", client_factory=lambda: client
     )
-    # No indexing into the message and no deserialization anywhere.
-    assert 'message["data"]' not in source
-    assert "message.get(" not in source
-    assert "json.loads" not in source
+    subscriber.start()
+    try:
+        assert service.event.wait(timeout=5), "the signal never arrived"
+    finally:
+        subscriber.stop(deadline=5)
+
+    assert accesses == [], f"the listener read the payload: {accesses}"
+
+
+def test_liveness_decays_without_a_message_or_health_check(service):
+    """`pubsub_connected` must come from evidence, not socket state.
+
+    An idle-timeout device can drop the connection while the socket still looks
+    alive -- get_message() then returns None forever with no exception. Without
+    this decay the gauge would keep reporting 1 through exactly that outage.
+    """
+    from tests.automations.conftest import metric_value
+
+    subscriber = ReloadSubscriber(service, url="redis://x")
+    subscriber._mark_alive()
+    assert metric_value("keep_automation_pubsub_connected") == 1.0
+
+    # Older than the health-check grace window.
+    subscriber._last_alive = time.time() - 10_000
+    subscriber._refresh_liveness()
+
+    assert metric_value("keep_automation_pubsub_connected") == 0.0
+
+
+def test_liveness_survives_a_recent_message(service):
+    from tests.automations.conftest import metric_value
+
+    subscriber = ReloadSubscriber(service, url="redis://x")
+    subscriber._mark_alive()
+    subscriber._refresh_liveness()
+    assert metric_value("keep_automation_pubsub_connected") == 1.0
 
 
 # --------------------------------------------------------------------------
@@ -230,10 +284,15 @@ def test_every_replaced_pubsub_is_closed(service, monkeypatch):
     )
     subscriber.start()
     try:
-        threading.Event().wait(2.5)
+        deadline = time.time() + 20
+        while time.time() < deadline and len(client.pubsubs) < 2:
+            threading.Event().wait(0.05)
     finally:
         subscriber.stop(deadline=5)
 
+    # Guard the guard: with only one pubsub ever created, the assertion below
+    # is `0 >= 0` and silently stops testing anything on a slow machine.
+    assert len(client.pubsubs) >= 2, "no reconnect happened; the test would be vacuous"
     # Every pubsub but possibly the live one has been closed.
     assert sum(p.closed for p in client.pubsubs) >= len(client.pubsubs) - 1
 
