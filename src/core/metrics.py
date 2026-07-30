@@ -137,6 +137,15 @@ automation_index_tenants = Gauge(
     f"{AUTOMATION_METRIC_PREFIX}index_tenants",
     "Tenants with at least one active automation in the published index",
 )
+# The probe is linear in candidates-per-posting-list, and MEASURED p99 crosses
+# the 1ms SLO at roughly 1400 automations sharing one pivot. The row cap is
+# fleet-wide (a different dimension) and defaults above that, so it cannot
+# bound this. Exporting the largest list is what makes the SLO risk visible
+# before a probe is slow rather than after.
+automation_index_largest_posting_list = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}index_largest_posting_list",
+    "Automations sharing a single (field, value) pivot in the published index",
+)
 automation_index_generation = Gauge(
     f"{AUTOMATION_METRIC_PREFIX}index_generation",
     "max(index_generation) observed in the applied index",

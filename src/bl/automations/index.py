@@ -48,10 +48,16 @@ class TriggerIndex:
     size: int
     tenants: int
     generation: int
+    # Candidates in the biggest single posting list. The probe is linear in
+    # this, not in `size`, so it -- not the fleet-wide row cap -- is what
+    # predicts whether the p99 SLO holds.
+    largest_posting_list: int
 
     @staticmethod
     def empty() -> "TriggerIndex":
-        return TriggerIndex(_by_tenant={}, size=0, tenants=0, generation=0)
+        return TriggerIndex(
+            _by_tenant={}, size=0, tenants=0, generation=0, largest_posting_list=0
+        )
 
     @staticmethod
     def compile(definitions) -> "TriggerIndex":
@@ -76,18 +82,24 @@ class TriggerIndex:
 
         by_tenant = {}
         size = 0
+        largest = 0
         for tenant_id, rows in grouped.items():
             postings = _compile_tenant(rows)
             if not postings:
                 continue
             by_tenant[tenant_id] = tuple(postings.items())
             size += len(rows)
+            for bucket in postings.values():
+                for candidates in bucket.values():
+                    if len(candidates) > largest:
+                        largest = len(candidates)
 
         return TriggerIndex(
             _by_tenant=by_tenant,
             size=size,
             tenants=len(by_tenant),
             generation=generation,
+            largest_posting_list=largest,
         )
 
     def match(self, tenant_id: str, alert) -> tuple[AutomationMatch, ...] | list:

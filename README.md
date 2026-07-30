@@ -76,6 +76,14 @@ this service performs.
 | `AUTOMATION_INDEX_MIN_HYDRATE_INTERVAL_SECONDS` | `5` | Wall-clock floor between any two hydrates. |
 | `AUTOMATION_INDEX_MAX_ROWS` | `2000` | Fleet-wide. A breach refuses the swap and keeps the last good index — it never truncates. |
 | `AUTOMATION_INDEX_MAX_VALUE_BYTES` | `512` | Per trigger value. A breach skips that one row. |
+| `AUTOMATION_INDEX_STATEMENT_TIMEOUT_MS` | `2000` | Bounds a hung hydrate. Deliberately well below `DATABASE_POOL_TIMEOUT` — the hydrate borrows a connection from the pool alert ingestion uses. |
+
+**Watch `keep_automation_index_largest_posting_list`, not `index_size`.** The probe
+is linear in how many automations share a single pivot, not in the total. Measured,
+p99 crosses the 1 ms SLO at roughly **1400 candidates in one posting list** — which
+the fleet-wide row cap does not bound, because it is a different dimension. The
+shape that gets there is one tenant onboarding many automations from a single
+template, so they share every trigger value. Alert on this gauge above ~1000.
 
 Every interval is clamped at read time: `config()` accepts a literal `"0"`,
 which would turn the reload timer into a hot loop stealing GIL from the single

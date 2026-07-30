@@ -185,8 +185,12 @@ AUTOMATION_INDEX_BOOT_RETRY_SECONDS = config(
 AUTOMATION_INDEX_SHUTDOWN_TIMEOUT_SECONDS = config(
     "AUTOMATION_INDEX_SHUTDOWN_TIMEOUT_SECONDS", default=3, cast=int
 )
+# 2s, deliberately NOT 10s: DB_POOL_TIMEOUT is 10s on a 15-connection pool
+# shared with alert ingestion, so a 10s statement timeout let a slow hydrate
+# hold a slot for exactly the window an ingestion checkout would time out in.
+# The real query costs single-digit milliseconds.
 AUTOMATION_INDEX_STATEMENT_TIMEOUT_MS = config(
-    "AUTOMATION_INDEX_STATEMENT_TIMEOUT_MS", default=10000, cast=int
+    "AUTOMATION_INDEX_STATEMENT_TIMEOUT_MS", default=2000, cast=int
 )
 
 # Caps. A defect in one row skips that row; a condition that indicts the whole

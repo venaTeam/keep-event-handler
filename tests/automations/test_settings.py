@@ -59,13 +59,16 @@ def test_jitter_fraction_is_clamped_to_zero_half(monkeypatch, raw, expected):
     assert settings.read_jitter_fraction() == expected
 
 
-@pytest.mark.parametrize("raw", ["-3", "0"])
-def test_min_hydrate_interval_allows_zero_but_not_negative(monkeypatch, raw):
-    """Zero is a legitimate choice (no floor); negative is not expressible."""
+@pytest.mark.parametrize("raw", ["-3", "0", "1"])
+def test_min_hydrate_interval_is_never_below_one(monkeypatch, raw):
+    """Superseded an earlier `max(0, ...)`: zero looked like a legitimate
+    "no floor" choice, but this is the only bound on a sustained publish rate
+    against an unauthenticated channel, so zero disables the design's only
+    rate limit."""
     settings = _reload_with(
         monkeypatch, AUTOMATION_INDEX_MIN_HYDRATE_INTERVAL_SECONDS=raw
     )
-    assert settings.read_min_hydrate_interval_seconds() == 0
+    assert settings.read_min_hydrate_interval_seconds() >= 1
 
 
 @pytest.mark.parametrize(
@@ -143,3 +146,41 @@ def test_redaction_is_total(url):
 def test_passwordless_url_is_left_intact():
     url = "redis://redis-host:6379/0"
     assert settings_module.redact_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "url,secret",
+    [
+        # Passwords that the narrower character class silently failed on.
+        ("postgresql://keep:pa/ss@db-host:5432/keep", "pa/ss"),
+        ("redis://user:p@ssw0rd@redis-host:6379/0", "p@ssw0rd"),
+        ("postgresql://keep:a/b@c/d@db-host:5432/keep", "a/b@c/d"),
+        ("redis://user:with spaces@host:6379", "with spaces"),
+    ],
+)
+def test_redaction_handles_awkward_passwords(url, secret):
+    """A password may contain `/` or an unencoded `@`.
+
+    The first version of this regex returned the DSN verbatim on those, which
+    on a logging path is the whole failure it exists to prevent.
+    """
+    redacted = settings_module.redact_url(url)
+    assert secret not in redacted
+    assert "***" in redacted
+
+
+def test_redaction_still_keeps_the_host_for_awkward_passwords():
+    redacted = settings_module.redact_url(
+        "postgresql://keep:pa/ss@db-host:5432/keep"
+    )
+    assert "db-host" in redacted
+    assert "5432" in redacted
+
+
+def test_min_hydrate_interval_has_a_floor_of_one(monkeypatch):
+    """It is the only bound on a sustained publish rate, on a channel with no
+    auth -- a configured 0 must not be able to disable it."""
+    settings = _reload_with(
+        monkeypatch, AUTOMATION_INDEX_MIN_HYDRATE_INTERVAL_SECONDS="0"
+    )
+    assert settings.read_min_hydrate_interval_seconds() >= 1

@@ -51,7 +51,10 @@ def read_debounce_seconds() -> float:
 
 
 def read_min_hydrate_interval_seconds() -> int:
-    return max(0, AUTOMATION_INDEX_MIN_HYDRATE_INTERVAL_SECONDS)
+    # Floor of 1, not 0, unlike an earlier version: this is the ONLY bound on a
+    # sustained publish rate on an unauthenticated channel, so a configured 0
+    # would disable the design's only rate limit.
+    return max(1, AUTOMATION_INDEX_MIN_HYDRATE_INTERVAL_SECONDS)
 
 
 def read_boot_retry_seconds() -> int:
@@ -84,8 +87,15 @@ def read_pubsub_max_backoff_seconds() -> int:
     return max(1, AUTOMATION_PUBSUB_RECONNECT_MAX_BACKOFF_SECONDS)
 
 
-# scheme://user:password@host  ->  keep everything but the password.
-_CREDENTIAL_RE = re.compile(r"(?P<prefix>://[^:/@\s]*:)(?P<secret>[^@/\s]*)(?P<at>@)")
+# scheme://user:password@host -> keep everything but the password.
+#
+# `.*` for the secret, not `[^@/\s]*`: a password may legitimately contain `/`
+# or an unencoded `@`. The narrower class failed to match at all on
+# `postgres://user:pa/ss@host/db` -- returning the DSN verbatim to a log line --
+# and on `user:p@ss@host` it stopped at the first `@` and leaked the tail. The
+# match is anchored on the LAST `@` before the host by being greedy, and the
+# host portion cannot contain `@`, so this cannot over-consume past it.
+_CREDENTIAL_RE = re.compile(r"(?P<prefix>://[^:/@\s]*:)(?P<secret>.*)(?P<at>@)")
 
 
 def redact_url(value: str) -> str:

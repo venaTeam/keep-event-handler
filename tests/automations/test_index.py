@@ -497,3 +497,21 @@ def test_ties_break_lexicographically_so_the_index_is_reproducible():
     # ("application", ...) sorts before ("site", ...).
     assert _pivot_field_of(forward, TENANT, "a") == "application"
     assert _pivot_field_of(backward, TENANT, "a") == "application"
+
+
+def test_the_largest_posting_list_is_reported():
+    """The probe is linear in this, not in `size` -- so it, not the fleet-wide
+    row cap, is what predicts whether the p99 SLO holds. Measured: p99 crosses
+    1ms at roughly 1400 candidates in one list."""
+    index = TriggerIndex.compile(
+        [
+            definition(f"a{i}", [("site", "dc1"), ("status", "firing")])
+            for i in range(7)
+        ]
+        + [definition("b", [("site", "dc2"), ("status", "firing")])]
+    )
+    assert index.largest_posting_list == 7
+
+
+def test_the_largest_posting_list_is_zero_for_an_empty_index():
+    assert TriggerIndex.empty().largest_posting_list == 0

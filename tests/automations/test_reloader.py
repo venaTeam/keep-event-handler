@@ -565,3 +565,39 @@ def test_the_staleness_clock_is_not_refreshed_by_a_failure():
     assert (
         metric_value("keep_automation_index_last_successful_reload_timestamp") == fresh
     )
+
+
+def test_hydrate_failures_are_redacted_before_logging(caplog):
+    """SQLAlchemy puts the connection target in the message, and
+    src/logging_conf.py ships logs onward by default. The deploy ordering this
+    story prescribes guarantees these ERRORs fire on the first deploy."""
+
+    def boom():
+        raise RuntimeError(
+            "could not connect to postgresql://keep:hunter2@db-host:5432/keep"
+        )
+
+    service = TriggerIndexService(hydrate_fn=boom)
+    with caplog.at_level("ERROR"):
+        service.reload_now("boot")
+
+    assert caplog.text, "nothing was logged"
+    assert "hunter2" not in caplog.text
+    assert "db-host" in caplog.text  # the useful part survives
+
+
+def test_the_skip_path_still_records_hydrate_duration(metric_delta):
+    """At steady state essentially every cycle is a digest skip. Observing the
+    duration only on the applied path leaves the histogram empty, so a hydrate
+    degrading from 5ms to 5s would be invisible until statement_timeout."""
+    from tests.automations.conftest import metric_value
+
+    rows = [row("a", "site", "dc1")]
+    service = TriggerIndexService(hydrate_fn=lambda: list(rows))
+    service.reload_now("boot")
+
+    before = metric_value("keep_automation_index_reload_duration_seconds_count")
+    service.reload_now("periodic")  # the skip path
+    after = metric_value("keep_automation_index_reload_duration_seconds_count")
+
+    assert after == before + 1

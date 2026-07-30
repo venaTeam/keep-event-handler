@@ -34,6 +34,7 @@ from src.bl.automations.index import TriggerIndex
 from src.core.metrics import (
     automation_index_generation,
     automation_index_hydrate_rate_limited_total,
+    automation_index_largest_posting_list,
     automation_index_last_successful_reload_timestamp,
     automation_index_matches_skipped_total,
     automation_index_ready,
@@ -192,9 +193,13 @@ class TriggerIndexService:
         try:
             return index.match(tenant_id, alert)
         finally:
-            # Bare observe, not the .time() context manager: that allocates a
-            # Timer object per call and would cost more than the probe it
-            # measures (~4us of instrument against a ~15us realistic probe).
+            # Bare observe, not the .time() context manager: that allocates
+            # a Timer object per call. Measured, this instrument still costs
+            # ~1.5us (MutexValue) to ~2.9us (multiprocess) against a realistic
+            # probe of ~0.3-0.7us -- i.e. it costs MORE than what it measures,
+            # and the histogram's lowest bucket (50us) means it can only ever
+            # distinguish a degenerate posting list from a healthy one. That is
+            # the intended resolution; do not read it as a microbenchmark.
             automation_match_duration_seconds.observe(time.perf_counter() - started)
 
     # -- write path --------------------------------------------------------
@@ -215,6 +220,9 @@ class TriggerIndexService:
                     self._last_hydrate_at = time.time()
                     self._consecutive_failures = 0
                     automation_index_last_successful_reload_timestamp.set(time.time())
+                    automation_index_reload_duration_seconds.observe(
+                        time.perf_counter() - started
+                    )
                     automation_index_reloads_total.labels(
                         trigger=trigger, result="skipped"
                     ).inc()
@@ -241,6 +249,7 @@ class TriggerIndexService:
             automation_index_size.set(new_index.size)
             automation_index_tenants.set(new_index.tenants)
             automation_index_generation.set(new_index.generation)
+            automation_index_largest_posting_list.set(new_index.largest_posting_list)
             automation_index_ready.set(1)
             automation_index_last_successful_reload_timestamp.set(time.time())
             automation_index_reload_duration_seconds.observe(
@@ -271,7 +280,12 @@ class TriggerIndexService:
         message = (
             "automations: index reload failed (trigger=%s, consecutive=%d, kind=%s): %s"
         )
-        args = (trigger, self._consecutive_failures, _failure_kind(error), error)
+        args = (
+            trigger,
+            self._consecutive_failures,
+            _failure_kind(error),
+            settings.redact_url(str(error)),
+        )
         if self._consecutive_failures <= _LOUD_FAILURES:
             logger.error(message, *args)
         elif self._consecutive_failures % 20 == 0:
@@ -346,9 +360,22 @@ class TriggerIndexService:
                     # this is what degrades a publish storm to the periodic
                     # cadence instead of amplifying it onto the shared database.
                     automation_index_hydrate_rate_limited_total.inc()
-                self._wait(seconds)
-            except Exception:  # noqa: BLE001 - the loop must never die
-                logger.exception("automations: reload worker iteration failed")
+                    # Wait on the STOP event, not the signal event. Waiting on
+                    # the signal would let the next publish wake the loop
+                    # immediately, so a flood on the unauthenticated `reload`
+                    # channel would spin this thread at the attacker's publish
+                    # rate -- no database traffic, but real GIL contention with
+                    # the single synchronous consumer thread. Sleeping out the
+                    # floor is the point of having one.
+                    self._stop.wait(seconds)
+                else:
+                    self._wait(seconds)
+            except Exception as error:  # noqa: BLE001 - the loop must never die
+                logger.error(
+                    "automations: reload worker iteration failed: %s",
+                    settings.redact_url(str(error)),
+                    exc_info=False,
+                )
                 self._stop.wait(settings.read_boot_retry_seconds())
 
     def _jitter(self) -> float:
