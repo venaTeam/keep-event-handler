@@ -18,12 +18,19 @@ Two things here are load-bearing rather than convenience:
    hook's infra-down pattern looks for "Connection refused".
 """
 
+import os
 import socket
+from urllib.parse import urlparse
 
 import pytest
 from prometheus_client import REGISTRY
 
 _PROBE_TIMEOUT_SECONDS = 0.25
+
+
+def _host_port(url: str, default_port: int = 5432) -> tuple[str, int]:
+    parsed = urlparse(url)
+    return (parsed.hostname or "localhost", parsed.port or default_port)
 
 
 def metric_value(name: str, labels: dict | None = None) -> float:
@@ -63,15 +70,48 @@ def _port_open(host: str, port: int) -> bool:
 
 @pytest.fixture(scope="session")
 def redis_url_or_skip() -> str:
-    """A reachable local Redis, or skip. Session-scoped: one probe, not one per test."""
-    if not _port_open("localhost", 6379):
-        pytest.skip("redis not reachable on localhost:6379")
-    return "redis://localhost:6379/0"
+    """A reachable Redis, or skip. Session-scoped: one probe, not one per test.
+
+    Honours REDIS_URL so the suite can be pointed at a throwaway instance.
+    """
+    url = os.environ.get("REDIS_URL") or "redis://localhost:6379/0"
+    host, port = _host_port(url, default_port=6379)
+    if not _port_open(host, port):
+        pytest.skip(f"redis not reachable on {host}:{port}")
+    return url
 
 
 @pytest.fixture(scope="session")
 def automations_db_or_skip() -> str:
-    """A reachable local Postgres carrying the gateway schema, or skip."""
-    if not _port_open("localhost", 5432):
-        pytest.skip("postgres not reachable on localhost:5432")
-    return "postgresql://keep:keep@localhost:5432/keep"
+    """A USABLE local `keep` database, or skip.
+
+    An open port is not enough, and this is not a hypothetical: another
+    project's container has been observed holding 5432 without the `keep`
+    role (recorded in VAULT). A port-only probe passes there and every test
+    then fails on `password authentication failed` -- reported as a code
+    failure, which is exactly wrong.
+
+    So the probe actually connects. Skipping on any connection error also
+    covers the Windows/POSIX message difference the Stop hook's infra-down
+    pattern trips over.
+    """
+    # Honour the DSN this service actually reads, so the integration tests can
+    # be pointed at a throwaway instance without editing them. Hydration uses
+    # the shared engine built from this same variable.
+    url = os.environ.get(
+        "DATABASE_CONNECTION_STRING", "postgresql://keep:keep@localhost:5432/keep"
+    )
+    host, port = _host_port(url)
+    if not _port_open(host, port):
+        pytest.skip(f"postgres not reachable on {host}:{port}")
+
+    try:
+        from sqlalchemy import create_engine, text
+
+        probe_engine = create_engine(url, connect_args={"connect_timeout": 2})
+        with probe_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        probe_engine.dispose()
+    except Exception as error:  # noqa: BLE001 - any failure means "not usable"
+        pytest.skip(f"the keep database is not usable at {host}:{port}: {error}")
+    return url
