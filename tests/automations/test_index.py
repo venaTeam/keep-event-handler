@@ -167,6 +167,45 @@ def test_unknown_tenant_returns_empty():
     assert list(index.match("no-such-tenant", make_alert(severity="critical"))) == []
 
 
+def test_an_unknown_tenant_gets_nothing_even_when_the_alert_fully_matches():
+    """The guarantee this whole story exists to deliver.
+
+    Every matchable field is settable straight from a webhook body, so an
+    attacker-shaped alert can satisfy another tenant's conditions exactly. The
+    previous unknown-tenant tests used alerts that matched nothing anyway, so a
+    fallback to a fleet-wide scan would have passed them. This one probes with
+    an alert that DOES satisfy tenant A's automation.
+    """
+    index = TriggerIndex.compile(
+        [definition("theirs", [("severity", "critical"), ("site", "dc1")], TENANT)]
+    )
+    fully_matching = make_alert(severity="critical", site="dc1")
+
+    # Sanity: the alert really does match, for the tenant that owns it.
+    assert matched_ids(index, TENANT, fully_matching) == ["theirs"]
+
+    # ...and reaches nothing from any other tenant identity.
+    assert matched_ids(index, "unknown-tenant", fully_matching) == []
+    assert matched_ids(index, OTHER_TENANT, fully_matching) == []
+    assert matched_ids(index, "", fully_matching) == []
+
+
+def test_a_known_tenant_cannot_see_another_tenants_matching_automation():
+    """Same guarantee, with real automations on BOTH sides so neither result is
+    empty for the trivial reason."""
+    index = TriggerIndex.compile(
+        [
+            definition("a-only", [("severity", "critical"), ("site", "dc1")], TENANT),
+            definition(
+                "b-only", [("severity", "critical"), ("site", "dc1")], OTHER_TENANT
+            ),
+        ]
+    )
+    alert = make_alert(severity="critical", site="dc1")
+    assert matched_ids(index, TENANT, alert) == ["a-only"]
+    assert matched_ids(index, OTHER_TENANT, alert) == ["b-only"]
+
+
 def test_pivot_frequency_is_counted_per_tenant_not_fleet_wide():
     """A pair common fleet-wide but rare in one tenant is a good pivot there.
 
@@ -385,3 +424,76 @@ def test_match_results_are_frozen():
     (result,) = index.match(TENANT, make_alert(severity="critical", site="dc1"))
     with pytest.raises(Exception):
         result.automation_id = "mutated"
+
+
+# --------------------------------------------------------------------------
+# Pivot selection, asserted on the compiled structure
+# --------------------------------------------------------------------------
+#
+# Asserting on match RESULTS cannot test pivot choice: results are invariant to
+# which condition is the pivot. A review proved it -- replacing the rarest-pair
+# selection with `conditions[0]`, and dropping the lexicographic tie-break, both
+# survived the whole file. Pivot choice is what the SLO rests on, so it is
+# asserted where it is observable: the compiled index.
+
+
+def _pivot_field_of(index, tenant_id, automation_id):
+    for field, bucket in index._by_tenant[tenant_id]:  # noqa: SLF001
+        for candidates in bucket.values():
+            for definition_ in candidates:
+                if definition_.match.automation_id == automation_id:
+                    return field
+    raise AssertionError(f"{automation_id} is not in the index")
+
+
+def test_the_pivot_is_the_rarest_pair_not_the_first_condition():
+    """`status=firing` is on every row; `application` is unique per row.
+
+    An implementation pivoting on `conditions[0]` would put every automation
+    into one posting list -- the degenerate case the benchmark measures at
+    ~170us instead of the realistic sub-microsecond.
+    """
+    definitions = [
+        definition(f"a{i}", [("status", "firing"), ("application", f"app-{i}")])
+        for i in range(5)
+    ]
+    index = TriggerIndex.compile(definitions)
+    for i in range(5):
+        assert _pivot_field_of(index, TENANT, f"a{i}") == "application"
+
+
+def test_pivot_choice_is_independent_of_condition_order_within_a_row():
+    """The rarest pair wins wherever it sits in the list."""
+    definitions = [
+        definition("target", [("application", "unique"), ("status", "firing")]),
+        definition("other1", [("status", "firing"), ("severity", "critical")]),
+        definition("other2", [("status", "firing"), ("severity", "warning")]),
+    ]
+    forward = TriggerIndex.compile(definitions)
+    reversed_row = [
+        definition("target", [("status", "firing"), ("application", "unique")]),
+        definitions[1],
+        definitions[2],
+    ]
+    backward = TriggerIndex.compile(reversed_row)
+
+    assert _pivot_field_of(forward, TENANT, "target") == "application"
+    assert _pivot_field_of(backward, TENANT, "target") == "application"
+
+
+def test_ties_break_lexicographically_so_the_index_is_reproducible():
+    """Both pairs have frequency 1, so only the tie-break decides.
+
+    Without a deterministic tie-break two hydrates of identical rows could
+    produce different indexes, which would make the digest-based reload skip
+    meaningless.
+    """
+    forward = TriggerIndex.compile(
+        [definition("a", [("site", "dc1"), ("application", "payments")])]
+    )
+    backward = TriggerIndex.compile(
+        [definition("a", [("application", "payments"), ("site", "dc1")])]
+    )
+    # ("application", ...) sorts before ("site", ...).
+    assert _pivot_field_of(forward, TENANT, "a") == "application"
+    assert _pivot_field_of(backward, TENANT, "a") == "application"

@@ -25,6 +25,21 @@ def test_start_is_called_between_health_server_and_consume_loop():
     assert health_at < start_at < consumer_at
 
 
+def test_stop_is_actually_called_from_main():
+    """Deleting the call used to leave the ordering test green.
+
+    `rindex` fell back to matching the `def` line, which sits before
+    `shutdown_sse_pool` -- so the ordering assertion still held with the call
+    removed entirely. That is the "watcher never starts in deployment" failure
+    class wearing a passing test, so the existence of the call is asserted
+    separately from its position.
+    """
+    source = consumer_main.__loader__.get_source("src.consumer_main")
+    # One for the `def`, at least one for the call site.
+    assert source.count("_stop_trigger_index_safely()") >= 2
+    assert source.count("_start_trigger_index_safely()") >= 2
+
+
 def test_stop_runs_before_the_unbounded_sse_flush():
     """shutdown_sse_pool wraps ThreadPoolExecutor.shutdown, which takes no
     timeout on 3.11. The bounded stop has to go first or it may never run
@@ -33,6 +48,9 @@ def test_stop_runs_before_the_unbounded_sse_flush():
     stop_at = source.rindex("_stop_trigger_index_safely()")
     flush_at = source.index("shutdown_sse_pool(wait=True)")
     assert stop_at < flush_at
+    # The call must be inside main()'s finally, not merely somewhere above the
+    # flush -- the `def` also satisfies a naive ordering check.
+    assert stop_at > source.index("def main():")
 
 
 def test_a_failing_start_does_not_propagate(monkeypatch, caplog):
