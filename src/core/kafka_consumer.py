@@ -23,6 +23,7 @@ from src.config.consts import (
     KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
 from src.config.config import config
+from src.core.consumer_health import consumer_health
 from src.core.metrics import (
     events_in_counter,
     events_out_counter,
@@ -36,6 +37,13 @@ from src.models.event_dto import EventDTO
 
 
 logger = logging.getLogger(__name__)
+
+
+class ShutdownInterrupted(Exception):
+    """Raised when a shutdown signal arrives between retry attempts. The message
+    is left unresolved and uncommitted, so it is redelivered after the rebalance
+    (at-least-once) rather than burning the termination grace period on retries
+    the pod no longer has time for."""
 
 
 class PoisonMessageError(Exception):
@@ -95,11 +103,15 @@ class RetryBudget:
         safety_factor: float = KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR,
         max_sleep_seconds: int = KAFKA_RETRY_MAX_SLEEP_SECONDS,
         clock=time.monotonic,
+        stop_event: Optional[threading.Event] = None,
     ):
         self._budget_seconds = (max_poll_interval_ms / 1000.0) * safety_factor
         self._max_sleep_seconds = max_sleep_seconds
         self._clock = clock
         self._started_at = clock()
+        # When provided, backoff sleeps wake immediately on shutdown instead of
+        # sitting out the full delay inside the termination grace period.
+        self._stop_event = stop_event
 
     def reset(self):
         """Call right after a successful poll: the budget is measured from the
@@ -117,13 +129,23 @@ class RetryBudget:
 
     def sleep_for(self, attempt: int) -> float:
         """Bounded backoff for this attempt, never overrunning the remaining
-        budget. Returns the seconds slept."""
+        budget. Returns the seconds slept (or the time slept before shutdown
+        interrupted the wait)."""
         backoff = min(2 ** attempt, self._max_sleep_seconds)
         # Never sleep past the budget deadline.
         backoff = max(0.0, min(backoff, self.remaining()))
-        if backoff > 0:
+        if backoff <= 0:
+            return 0.0
+
+        if self._stop_event is None:
             time.sleep(backoff)
-        return backoff
+
+            return backoff
+
+        started = self._clock()
+        self._stop_event.wait(timeout=backoff)
+
+        return self._clock() - started
 
 
 class EventConsumer(abc.ABC):
@@ -169,7 +191,20 @@ class KafkaEventConsumer(EventConsumer):
         # Batch consume. BATCH_SIZE=1 (default) reproduces the single-message loop.
         self._batch_size = max(1, KAFKA_CONSUMER_BATCH_SIZE)
         self._batch_timeout = KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS
+        # session.timeout.ms is the single highest-leverage setting here: a pod
+        # that dies without sending LeaveGroup (SIGKILL after a grace-period
+        # overrun) leaves its partitions unassigned for up to this long. Keep it
+        # in the tens of seconds, not the 10 minutes prod was running.
         self._session_timeout = int(config("KAFKA_SESSION_TIMEOUT_MS", default="45000"))
+        # Must track session.timeout.ms: the broker needs several heartbeats
+        # inside one session window, so lowering the session timeout alone gets
+        # the config rejected. A third of it, capped at librdkafka's 3s default.
+        self._heartbeat_interval = int(
+            config(
+                "KAFKA_HEARTBEAT_INTERVAL_MS",
+                default=str(max(1000, min(3000, self._session_timeout // 3))),
+            )
+        )
         self._max_poll_interval = int(config("KAFKA_MAX_POLL_INTERVAL_MS", default="300000"))
 
         # Security config
@@ -191,6 +226,7 @@ class KafkaEventConsumer(EventConsumer):
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,  # Manual commit after processing
             "session.timeout.ms": self._session_timeout,
+            "heartbeat.interval.ms": self._heartbeat_interval,
             "max.poll.interval.ms": self._max_poll_interval,
             "security.protocol": self.security_protocol,
         }
@@ -249,18 +285,32 @@ class KafkaEventConsumer(EventConsumer):
             self._cleanup()
 
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully."""
+        """Handle shutdown signals gracefully.
+
+        `_shutdown_event` is what makes SIGTERM observable *inside* an in-flight
+        batch and inside retry backoff — see `_process_batch` for why that
+        matters.
+        """
         self.logger.info(f"Received signal {signum}, initiating graceful shutdown...")
         self._running = False
         self._shutdown_event.set()
+        consumer_health.mark_stopping(f"signal {signum} received")
+
+    @property
+    def assigned_partitions(self) -> tuple:
+        """Partitions currently assigned to this consumer (readiness input)."""
+        return tuple(consumer_health.snapshot()["assigned_partitions"])
 
     def _on_assign(self, consumer, partitions):
         """Callback when partitions are assigned."""
-        self.logger.info(f"Partitions assigned: {[p.partition for p in partitions]}")
+        assigned = [p.partition for p in partitions]
+        self.logger.info(f"Partitions assigned: {assigned}")
+        consumer_health.set_assignment(assigned)
 
     def _on_revoke(self, consumer, partitions):
         """Callback when partitions are revoked (rebalance)."""
         self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
+        consumer_health.clear_assignment()
         # Commit any pending offsets before rebalance
         try:
             consumer.commit(asynchronous=False)
@@ -270,6 +320,7 @@ class KafkaEventConsumer(EventConsumer):
     def _consume_loop(self):
         """Main consumption loop - blocking and synchronous."""
         self.logger.info("Entering consume loop...")
+        consumer_health.mark_consuming()
         consecutive_errors = 0
         max_consecutive_errors = 10
 
@@ -278,6 +329,9 @@ class KafkaEventConsumer(EventConsumer):
                 messages = self._consumer.consume(
                     num_messages=self._batch_size, timeout=self._batch_timeout
                 )
+                # Recorded even for an empty poll: the loop turning *is* the
+                # liveness heartbeat.
+                consumer_health.record_poll()
 
                 if not messages:
                     # No messages available this poll.
@@ -310,7 +364,9 @@ class KafkaEventConsumer(EventConsumer):
                 # Fresh batch-wide retry budget measured from this poll, so
                 # accumulated retry sleep across the batch can't overrun the
                 # poll interval and trigger a rebalance.
-                budget = RetryBudget(self._max_poll_interval)
+                budget = RetryBudget(
+                    self._max_poll_interval, stop_event=self._shutdown_event
+                )
 
                 self._process_batch(records, budget)
 
@@ -330,6 +386,7 @@ class KafkaEventConsumer(EventConsumer):
                 continue
 
         self.logger.info("Exited consume loop")
+        consumer_health.mark_stopped()
 
     def _process_batch(self, records, budget: "RetryBudget"):
         """Process a batch of records and commit the highest *contiguous*
@@ -344,6 +401,16 @@ class KafkaEventConsumer(EventConsumer):
 
         BATCH_SIZE=1 reduces to: one record, one partition, commit it on
         success — identical to the previous single-message loop.
+
+        SIGTERM is honored *between messages*: on shutdown we stop taking new
+        records, commit the contiguous boundary reached so far, and return so
+        `_cleanup` can `close()` the consumer while grace period remains.
+        Running the batch to completion instead (up to BATCH_SIZE messages ×
+        MAX_PROCESSING_RETRIES with backoff) could overrun
+        terminationGracePeriodSeconds; the pod was then SIGKILLed, never sent
+        LeaveGroup, and its partitions sat unassigned for up to
+        session.timeout.ms. Abandoned records are left uncommitted and
+        redelivered — at-least-once is preserved.
         """
         # Observability: record how many records this poll returned. The metric
         # always observes; the log fires only for real batches (>1) to keep the
@@ -362,10 +429,23 @@ class KafkaEventConsumer(EventConsumer):
             key = (msg.topic(), msg.partition())
             partitions.setdefault(key, []).append(msg)
 
+        draining = False
         for key, partition_msgs in partitions.items():
             partition_msgs.sort(key=lambda m: m.offset())
             commit_boundary = None  # last contiguous resolved message
             for msg in partition_msgs:
+                if self._shutdown_event.is_set():
+                    self.logger.info(
+                        "Shutdown signalled mid-batch; abandoning remaining "
+                        "records for redelivery",
+                        extra={
+                            "topic": msg.topic(),
+                            "partition": msg.partition(),
+                            "next_offset": msg.offset(),
+                        },
+                    )
+                    draining = True
+                    break
                 should_commit = self._process_message(msg, budget)
                 if should_commit:
                     commit_boundary = msg
@@ -386,6 +466,10 @@ class KafkaEventConsumer(EventConsumer):
                 # commit(message=...) commits boundary.offset()+1 for its
                 # partition — i.e. the highest contiguous processed offset.
                 self._consumer.commit(commit_boundary, asynchronous=False)
+
+            if draining:
+                # Don't start another partition's records while shutting down.
+                break
 
     def _process_message(self, msg, budget: "RetryBudget") -> bool:
         """Process a single Kafka message.
@@ -447,6 +531,15 @@ class KafkaEventConsumer(EventConsumer):
             self.logger.debug(f"Successfully processed message: {trace_id}")
             return True
 
+        except ShutdownInterrupted as e:
+            # Not an error and not terminal — returning False leaves the offset
+            # uncommitted, so whoever gets this partition next redelivers it.
+            self.logger.info(
+                "Abandoning in-flight message for redelivery on shutdown "
+                f"(trace_id={trace_id}): {e}"
+            )
+            return False
+
         except Exception as e:
             # Should not normally reach here — _process_with_retries handles
             # its own terminal recording. Be defensive: record + commit rather
@@ -473,6 +566,10 @@ class KafkaEventConsumer(EventConsumer):
         retries are exhausted (attempt cap, classified poison, or budget
         exhaustion), the message is recorded via the storm-guarded error sink
         (terminal) and NOT re-raised, so its offset can be committed.
+
+        A shutdown signalled between attempts raises ShutdownInterrupted: the
+        message stays unresolved and uncommitted, to be redelivered after the
+        rebalance.
         """
         for attempt in range(MAX_PROCESSING_RETRIES):
             try:
@@ -509,7 +606,21 @@ class KafkaEventConsumer(EventConsumer):
                     self._record_terminal(payload=payload, error=e)
                     return
 
+                if self._shutdown_event.is_set():
+                    raise ShutdownInterrupted(
+                        f"shutdown during retry {attempt + 1}/"
+                        f"{MAX_PROCESSING_RETRIES}"
+                    ) from e
+
                 budget.sleep_for(attempt)
+
+                # sleep_for returns early on shutdown; don't start another
+                # attempt we don't have the grace period for.
+                if self._shutdown_event.is_set():
+                    raise ShutdownInterrupted(
+                        f"shutdown during retry backoff "
+                        f"{attempt + 1}/{MAX_PROCESSING_RETRIES}"
+                    ) from e
 
     def _record_terminal(self, payload, error: Exception):
         """Terminal sink for a poison / retry-exhausted message: persist the
@@ -534,9 +645,15 @@ class KafkaEventConsumer(EventConsumer):
         self.logger.info("Stopping Kafka consumer...")
         self._running = False
         self._shutdown_event.set()
+        consumer_health.mark_stopping("stop() called")
 
     def _cleanup(self):
-        """Cleanup resources."""
+        """Cleanup resources.
+
+        `close()` is the clean group leave: it commits and sends LeaveGroup so
+        the coordinator reassigns this pod's partitions immediately instead of
+        waiting out session.timeout.ms.
+        """
         if self._consumer:
             self.logger.info("Closing Kafka consumer...")
             try:
@@ -544,4 +661,5 @@ class KafkaEventConsumer(EventConsumer):
             except Exception as e:
                 self.logger.error(f"Error closing consumer: {e}")
             self._consumer = None
+        consumer_health.mark_stopped("consumer closed")
         self.logger.info("Kafka consumer stopped")

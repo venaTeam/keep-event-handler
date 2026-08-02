@@ -140,6 +140,25 @@ KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR = config(
     "KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR", default=0.8, cast=float
 )
 
+# --- Consumer health / K8s probes -------------------------------------------
+# Readiness = partitions assigned AND a recent successful poll. Keep the gap
+# comfortably above the batch timeout + worst-case batch processing time.
+KEEP_CONSUMER_READY_MAX_POLL_GAP_SECONDS = config(
+    "KEEP_CONSUMER_READY_MAX_POLL_GAP_SECONDS", default=90, cast=int
+)
+# Liveness = loop heartbeat. Deliberately generous, and anchored to a few
+# minutes rather than to max.poll.interval.ms (too lax to catch anything): an
+# aggressive liveness on a consumer amplifies a rebalance storm.
+KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS = config(
+    "KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS", default=300, cast=int
+)
+# Grace window after a revoke during which readiness stays green, so an ordinary
+# rebalance does not instantly flip the pod NotReady and stall a
+# maxUnavailable: 0 rollout.
+KEEP_CONSUMER_REVOKE_GRACE_SECONDS = config(
+    "KEEP_CONSUMER_REVOKE_GRACE_SECONDS", default=45, cast=int
+)
+
 # Error-storm guard for AlertRaw(error=True) writes.
 KEEP_ERROR_STORM_WINDOW_SECONDS = config(
     "KEEP_ERROR_STORM_WINDOW_SECONDS", default=60, cast=int

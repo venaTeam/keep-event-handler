@@ -13,24 +13,59 @@ from src.providers.providers_service import ProvidersService
 
 logger = logging.getLogger(__name__)
 
-PROVISION_RESOURCES = os.environ.get("PROVISION_RESOURCES", "true") == "true"
+# keep-api-gateway owns the schema and owns provisioning. Defaulting to false
+# keeps provisioning off the consumer's critical path: otherwise all 15 consumer
+# pods provision providers + dedup rules concurrently against the same DB while
+# the gateway does the same, delaying consumption and turning a bad provider in
+# a new image into a startup crash on every pod. Set true for a standalone/dev
+# deployment with no gateway.
+PROVISION_RESOURCES = os.environ.get("PROVISION_RESOURCES", "false") == "true"
+# Provisioning is best-effort by default: a provisioning failure must not stop a
+# consumer from consuming. Set KEEP_PROVISIONING_FATAL=true to get the old
+# fail-fast behaviour (useful in CI, where a bad provider file should fail loud).
+PROVISIONING_FATAL = os.environ.get("KEEP_PROVISIONING_FATAL", "false") == "true"
 
 
 def provision_resources(provision_dashboards_func=None):
-    if PROVISION_RESOURCES:
-        logger.info("Loading providers into cache")
-        # provision providers from env. relevant only on single tenant.
-        logger.info("Provisioning providers and workflows")
-        ProvidersService.provision_providers(SINGLE_TENANT_UUID)
-        logger.info("Providers loaded successfully")
-        if provision_dashboards_func:
-            provision_dashboards_func(SINGLE_TENANT_UUID)
-            logger.info("Dashboards provisioned successfully")
-        logger.info("Provisioning deduplication rules")
-        provision_deduplication_rules_from_env(SINGLE_TENANT_UUID)
-        logger.info("Deduplication rules provisioned successfully")
-    else:
-        logger.info("Provisioning resources is disabled")
+    if not PROVISION_RESOURCES:
+        logger.info(
+            "Provisioning resources is disabled (keep-api-gateway owns "
+            "provisioning; set PROVISION_RESOURCES=true to override)"
+        )
+        return
+
+    # Each step is independently guarded: all are idempotent, so a failure in
+    # one must not skip the others or stop the consume loop from starting.
+    steps = [
+        (
+            "providers",
+            lambda: ProvidersService.provision_providers(SINGLE_TENANT_UUID),
+        ),
+    ]
+    if provision_dashboards_func:
+        steps.append(
+            ("dashboards", lambda: provision_dashboards_func(SINGLE_TENANT_UUID))
+        )
+    steps.append(
+        (
+            "deduplication rules",
+            lambda: provision_deduplication_rules_from_env(SINGLE_TENANT_UUID),
+        )
+    )
+
+    for name, step in steps:
+        logger.info("Provisioning %s", name)
+        try:
+            step()
+            logger.info("%s provisioned successfully", name)
+        except Exception:
+            if PROVISIONING_FATAL:
+                raise
+            logger.exception(
+                "Failed to provision %s — continuing startup (set "
+                "KEEP_PROVISIONING_FATAL=true to fail fast instead)",
+                name,
+            )
 
 
 def init_services(auth_type: str, provision_dashboards_func=None, skip_ngrok=False):
