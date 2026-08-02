@@ -63,7 +63,7 @@ def test_advancing_head_waits_for_it_to_settle():
         db_on_start._wait_for_schema()
 
 
-def test_timeout_raises_the_retryable_error(monkeypatch):
+def test_timeout_raises_the_retryable_error():
     """Never stamped -> SchemaWaitTimeout, which callers retry (it is explicitly
     not a fatal error any more)."""
     with patch.object(db_on_start, "_gateway_alembic_head", return_value=None):

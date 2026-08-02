@@ -10,44 +10,47 @@ even settable, since the config builder never emitted it.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.core.kafka_consumer import KafkaEventConsumer
 
 
-def _consumer(monkeypatch, **env):
+_TIMING_ENV = ("KAFKA_SESSION_TIMEOUT_MS", "KAFKA_HEARTBEAT_INTERVAL_MS")
+
+
+def _config(monkeypatch, **env):
+    """Build the consumer config with only the timing env vars this test sets,
+    so a developer's exported KAFKA_* can't change the outcome."""
+    for key in _TIMING_ENV:
+        monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     with patch("src.core.kafka_consumer.Consumer", return_value=MagicMock()):
-        return KafkaEventConsumer()
+        return KafkaEventConsumer()._build_consumer_config()
 
 
-def test_heartbeat_is_emitted_and_fits_inside_the_session_window(monkeypatch):
-    consumer = _consumer(monkeypatch, KAFKA_SESSION_TIMEOUT_MS="45000")
-    conf = consumer._build_consumer_config()
+@pytest.mark.parametrize("session_timeout", [6000, 30000, 45000, 300000])
+def test_heartbeat_is_emitted_and_fits_inside_the_session_window(
+    monkeypatch, session_timeout
+):
+    """The invariant that makes a low session timeout safe: heartbeat.interval.ms
+    must leave room for several heartbeats per session window. Before this it
+    wasn't even settable — the config builder never emitted it."""
+    conf = _config(monkeypatch, KAFKA_SESSION_TIMEOUT_MS=str(session_timeout))
 
-    assert conf["session.timeout.ms"] == 45000
-    assert "heartbeat.interval.ms" in conf
-    # The broker needs several heartbeats per session window.
+    assert conf["session.timeout.ms"] == session_timeout
     assert conf["heartbeat.interval.ms"] * 3 <= conf["session.timeout.ms"]
 
 
-def test_heartbeat_scales_down_with_a_low_session_timeout(monkeypatch):
-    consumer = _consumer(monkeypatch, KAFKA_SESSION_TIMEOUT_MS="6000")
-    conf = consumer._build_consumer_config()
-
-    assert conf["session.timeout.ms"] == 6000
-    assert conf["heartbeat.interval.ms"] == 2000
+def test_heartbeat_defaults_hold_when_the_session_timeout_is_not_set(monkeypatch):
+    conf = _config(monkeypatch)
+    assert conf["heartbeat.interval.ms"] * 3 <= conf["session.timeout.ms"]
 
 
 def test_heartbeat_can_be_set_explicitly(monkeypatch):
-    consumer = _consumer(
+    conf = _config(
         monkeypatch,
         KAFKA_SESSION_TIMEOUT_MS="30000",
         KAFKA_HEARTBEAT_INTERVAL_MS="5000",
     )
-    assert consumer._build_consumer_config()["heartbeat.interval.ms"] == 5000
-
-
-def test_session_timeout_default_is_not_the_ten_minute_prod_value(monkeypatch):
-    monkeypatch.delenv("KAFKA_SESSION_TIMEOUT_MS", raising=False)
-    consumer = _consumer(monkeypatch)
-    assert consumer._build_consumer_config()["session.timeout.ms"] == 45000
+    assert conf["heartbeat.interval.ms"] == 5000

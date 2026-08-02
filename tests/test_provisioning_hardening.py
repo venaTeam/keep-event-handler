@@ -10,38 +10,62 @@ non-fatal.
 """
 
 import importlib
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.core import init as core_init
 
 
-def test_consumer_does_not_provision_by_default(monkeypatch):
+@pytest.fixture
+def reloaded_init(monkeypatch):
+    """`PROVISION_RESOURCES` is read at import time, so the env-var contract can
+    only be exercised by reimporting. Always restore the module afterwards."""
+
+    def _reload(value=None):
+        if value is None:
+            monkeypatch.delenv("PROVISION_RESOURCES", raising=False)
+        else:
+            monkeypatch.setenv("PROVISION_RESOURCES", value)
+        return importlib.reload(core_init)
+
+    yield _reload
     monkeypatch.delenv("PROVISION_RESOURCES", raising=False)
-    reloaded = importlib.reload(core_init)
-    try:
-        assert reloaded.PROVISION_RESOURCES is False
-        with patch.object(reloaded.ProvidersService, "provision_providers") as prov:
-            reloaded.provision_resources()
-        prov.assert_not_called()
-    finally:
-        importlib.reload(core_init)
+    importlib.reload(core_init)
 
 
-def test_provisioning_can_be_enabled_explicitly(monkeypatch):
-    monkeypatch.setenv("PROVISION_RESOURCES", "true")
-    reloaded = importlib.reload(core_init)
-    try:
-        assert reloaded.PROVISION_RESOURCES is True
-    finally:
-        monkeypatch.delenv("PROVISION_RESOURCES", raising=False)
-        importlib.reload(core_init)
+def test_consumer_does_not_provision_by_default(reloaded_init):
+    """Unset means skip: the gateway owns provisioning, and 15 pods racing it
+    against the same DB only adds startup latency before consumption begins."""
+    module = reloaded_init()
+
+    with patch.object(module.ProvidersService, "provision_providers") as prov:
+        with patch.object(module, "provision_deduplication_rules_from_env") as dedup:
+            module.provision_resources()
+
+    prov.assert_not_called()
+    dedup.assert_not_called()
+
+
+def test_provisioning_can_be_enabled_explicitly(reloaded_init):
+    """The standalone/dev escape hatch actually provisions, rather than merely
+    flipping the flag."""
+    module = reloaded_init("true")
+
+    with patch.object(module.ProvidersService, "provision_providers") as prov:
+        with patch.object(module, "provision_deduplication_rules_from_env") as dedup:
+            module.provision_resources()
+
+    prov.assert_called_once()
+    dedup.assert_called_once()
 
 
 def test_a_failing_step_does_not_stop_startup_or_later_steps(monkeypatch):
+    """Each step is independently guarded, so a bad provider in a new image
+    can't skip dedup rules or stop the consume loop from starting."""
     monkeypatch.setattr(core_init, "PROVISION_RESOURCES", True)
     monkeypatch.setattr(core_init, "PROVISIONING_FATAL", False)
+    dashboards = MagicMock(side_effect=RuntimeError("bad dashboard"))
 
     with patch.object(
         core_init.ProvidersService,
@@ -49,8 +73,9 @@ def test_a_failing_step_does_not_stop_startup_or_later_steps(monkeypatch):
         side_effect=RuntimeError("bad provider in the new image"),
     ):
         with patch.object(core_init, "provision_deduplication_rules_from_env") as dedup:
-            core_init.provision_resources()  # must not raise
+            core_init.provision_resources(dashboards)  # must not raise
 
+    dashboards.assert_called_once()
     dedup.assert_called_once()
 
 

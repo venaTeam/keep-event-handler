@@ -11,8 +11,11 @@ session.timeout.ms — the stranded-partition stall behind the ingestion lag.
 """
 
 import json
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
+from src.config.consts import MAX_PROCESSING_RETRIES
 from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
 
 
@@ -123,9 +126,6 @@ def test_no_shutdown_processes_the_whole_batch():
 def test_retry_backoff_wakes_immediately_on_shutdown():
     """A 30 s backoff that ignores SIGTERM burns the termination grace period
     doing nothing."""
-    import threading
-    import time
-
     stop = threading.Event()
     budget = RetryBudget(max_poll_interval_ms=300000, stop_event=stop)
 
@@ -186,7 +186,7 @@ def test_retries_continue_normally_without_a_shutdown():
                 should_commit = consumer._process_message(msg, budget)
 
     assert should_commit is True
-    assert len(attempts) == 3
+    assert len(attempts) == MAX_PROCESSING_RETRIES
     terminal.assert_called_once()
 
 

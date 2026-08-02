@@ -123,13 +123,30 @@ def test_revoke_grace_keeps_pod_ready_through_a_rebalance():
 def test_reassignment_clears_the_grace_window():
     health, clock = _health()
     health.mark_consuming()
+    health.set_assignment([0])
     health.record_poll()
-    health.clear_assignment()
+
+    health.clear_assignment()  # opens the grace window
     clock.advance(10)
     health.set_assignment([5])
+    health.record_poll()
 
     clock.advance(50)  # past the revoke grace, but we are assigned again
     assert health.readiness()[0] is True
+
+
+def test_never_assigned_consumer_gets_no_revoke_grace():
+    """The grace only applies to a consumer that actually held partitions. A pod
+    that has never been assigned anything must never report ready, or a rollout
+    would advance on a pod that isn't consuming."""
+    health, _ = _health()
+    health.mark_consuming()
+    health.record_poll()
+
+    health.clear_assignment()
+    ready, payload = health.readiness()
+    assert ready is False
+    assert "no partitions assigned" in payload["reason"]
 
 
 def test_liveness_fails_only_on_a_stalled_loop():
