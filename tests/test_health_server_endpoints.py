@@ -90,13 +90,34 @@ def test_readyz_503_when_consuming_without_assignment(probe_server):
     assert "no partitions assigned" in body["reason"]
 
 
-@pytest.mark.parametrize("path", ["/", "/health", "/healthz", "/ready", "/nope"])
-def test_only_the_two_probe_paths_are_served(probe_server, path):
-    """No aliases: a probe aimed at the wrong path must fail loudly rather than
-    get a meaningless 200 back."""
+@pytest.mark.parametrize("path", ["/livez", "/", "/health", "/healthz"])
+def test_liveness_aliases(probe_server, path):
+    """`/` and friends must answer liveness. Prod probes target `/`, so 404ing
+    there would kill every pod the moment the image lands."""
+    base, health = probe_server
+    health.mark_consuming()
+    health.record_poll()  # consuming, but nothing assigned
+
+    status, body = _get(base, path)
+    assert status == 200  # liveness ignores assignment
+    assert body["status"] == "ok"
+
+
+@pytest.mark.parametrize("path", ["/readyz", "/ready"])
+def test_readiness_aliases(probe_server, path):
+    base, health = probe_server
+    health.mark_consuming()
+    health.record_poll()  # consuming, but nothing assigned
+
+    status, body = _get(base, path)
+    assert status == 503  # readiness does not
+    assert "no partitions assigned" in body["reason"]
+
+
+def test_unknown_path_is_404(probe_server):
     base, _ = probe_server
     try:
-        with urllib.request.urlopen(base + path, timeout=5) as resp:
+        with urllib.request.urlopen(base + "/nope", timeout=5) as resp:
             status = resp.status
     except urllib.error.HTTPError as exc:
         status = exc.code

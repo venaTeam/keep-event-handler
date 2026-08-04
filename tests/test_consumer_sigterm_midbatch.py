@@ -190,6 +190,29 @@ def test_retries_continue_normally_without_a_shutdown():
     terminal.assert_called_once()
 
 
+def test_offsets_are_never_stored_automatically():
+    """librdkafka defaults `enable.auto.offset.store` to true, which advances an
+    in-memory offset store the moment a record is *delivered*. A bare commit()
+    would then flush offsets for records this batch deliberately abandoned,
+    silently skipping them even though enable.auto.commit is false."""
+    consumer, _ = _consumer_with_mock_kafka()
+    conf = consumer._build_consumer_config()
+
+    assert conf["enable.auto.commit"] is False
+    assert conf["enable.auto.offset.store"] is False
+
+
+def test_revoke_does_not_blind_commit_delivered_offsets():
+    """The rebalance that follows a drain must not commit what the drain left
+    uncommitted — otherwise honoring SIGTERM mid-batch loses the records it was
+    protecting."""
+    consumer, mock_kafka = _consumer_with_mock_kafka()
+
+    consumer._on_revoke(mock_kafka, [MagicMock(partition=0)])
+
+    mock_kafka.commit.assert_not_called()
+
+
 def test_signal_handler_marks_health_stopping():
     consumer, _ = _consumer_with_mock_kafka()
     from src.core.consumer_health import PHASE_STOPPING, consumer_health

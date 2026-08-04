@@ -242,38 +242,26 @@ def _missing_required_tables() -> list:
 
 
 def _wait_for_schema():
-    """Block until keep-api-gateway has FINISHED provisioning the shared schema.
+    """Block until keep-api-gateway has finished provisioning the shared schema.
 
-    keep-api-gateway is the SINGLE owner of the database schema — it is the only
-    service that ships alembic migrations. This consumer must not build the
-    schema itself: doing so via SQLModel.metadata.create_all() races the
-    gateway's `alembic upgrade head` on an empty shared DB and collides in
-    pg_type (duplicate key (typname)=(tenant)), and it also bypasses migration
-    history (create_all materializes the current model and never stamps
-    alembic_version). Wait for the gateway to finish, then run as a consumer.
+    The gateway is the single schema owner — the only service shipping alembic
+    migrations. This consumer must not build the schema itself: `create_all()`
+    races the gateway's `upgrade head` on an empty DB (colliding in pg_type) and
+    never stamps alembic_version.
 
-    Readiness is detected by quiescence of the gateway's alembic head: the
-    gateway advances `alembic_version` after each migration, so once the revision
-    stops changing across several consecutive polls its migration run is complete
-    and every column is in place. Checking only that core tables exist is NOT
-    enough — the gateway creates alembic_version/alert early but adds columns
-    such as provider.provider_metadata in *later* migrations, so a
-    table-existence check lets this consumer query a not-yet-created column on a
-    cold boot. We also can't compare against a fixed head revision, because the
-    gateway ships migrations (product-BI metrics) that this consumer's own
-    migration chain does not contain — so its head differs from ours.
+    "Finished" is detected by the gateway's alembic head going quiet for
+    _SCHEMA_STABLE_CHECKS polls. Table existence alone is not enough — the
+    gateway creates core tables early but adds columns in later migrations — and
+    we can't compare to a fixed revision, because the gateway ships migrations
+    this consumer's own chain doesn't have.
 
-    Two guards beyond quiescence (both cheap, both closing the "false-early"
-    hole where a *down* gateway makes any head trivially stable):
-      * `KEEP_SCHEMA_EXPECTED_REVISION` — if set, the stamped revision must
-        equal it, not merely stop moving.
-      * `KEEP_SCHEMA_REQUIRED_TABLES` — core tables must exist.
+    Two guards close the "false-early" hole, where a *down* gateway makes any
+    head trivially stable: KEEP_SCHEMA_EXPECTED_REVISION (exact match) and
+    KEEP_SCHEMA_REQUIRED_TABLES (core tables present).
 
-    Transient DB errors (connection-pool saturation during a mass restart, a
-    gateway mid-migration, a broker of a Postgres in failover) only reset the
-    stability counter; they never fail the attempt. Exceeding
-    KEEP_SCHEMA_WAIT_TIMEOUT raises `SchemaWaitTimeout`, which the caller
-    retries — it is explicitly *not* fatal.
+    Transient DB errors only reset the stability counter. Exceeding
+    KEEP_SCHEMA_WAIT_TIMEOUT raises SchemaWaitTimeout, which the caller retries —
+    it is explicitly not fatal.
     """
     deadline = time.monotonic() + _SCHEMA_WAIT_TIMEOUT
     last_head = None
@@ -350,27 +338,21 @@ def _wait_for_schema():
 
 
 def migrate_db(max_attempts: int = 0):
-    """
-    Ensure the DB schema is ready before this service runs.
+    """Ensure the DB schema is ready before this service runs.
 
-    keep-api-gateway owns the schema on the shared server DB, so this service
-    waits for it rather than building it (see _wait_for_schema). On SQLite
-    (tests / standalone single-process dev) there is no shared owner and no
-    possible race, so build the tables locally as before.
+    The gateway owns the schema on a shared server DB, so wait for it rather than
+    build it. On SQLite (tests, standalone dev) there is no shared owner and no
+    race, so create the tables locally.
 
-    A wait that times out is **retried with capped backoff instead of killing
-    the process**. The old behaviour bubbled a RuntimeError up to
-    `consumer_main.main`, which called `sys.exit(1)`; on a full ArgoCD sync the
-    gateway is rolling at the same time, so a slow migration turned every new
-    consumer pod into a crash — and the pod died precisely when the cluster
-    needed it to come up. Staying alive and retrying lets the health server
-    report "starting / not ready" and lets the startupProbe budget (not an
-    application `sys.exit`) decide when to give up on the pod.
+    A timed-out wait is **retried with capped backoff, not fatal**. It used to
+    exit the process — which killed new consumer pods during exactly the full
+    sync that made the wait slow. Staying up lets the probes report
+    "starting / not ready" and lets the startupProbe budget, not the application,
+    decide when to give up on a pod.
 
     Args:
-        max_attempts: 0 (default) retries indefinitely; >0 caps the attempts and
-            re-raises the last SchemaWaitTimeout, for tests and for callers that
-            genuinely want a bounded wait.
+        max_attempts: 0 (default) retries forever; >0 caps attempts and re-raises
+            the last SchemaWaitTimeout.
     """
     if os.environ.get("SKIP_DB_CREATION", "false") == "true":
         logger.info("Skipping DB schema init...")

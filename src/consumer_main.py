@@ -17,8 +17,8 @@ Environment Variables:
     LOG_LEVEL: Logging level (default: INFO)
 
 Kubernetes probes (see create_health_server):
-    /readyz  readiness — partitions assigned + recent poll (gates the rollout)
-    /livez   liveness  — consume-loop heartbeat
+    readiness: /readyz, /ready       — partitions assigned + recent poll
+    liveness:  /livez, /, /health, /healthz — consume-loop heartbeat
 """
 import json
 import logging
@@ -73,27 +73,22 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 def create_health_server(port: int):
-    """
-    Create the health-check HTTP server used by the Kubernetes probes.
+    """Health-check server for the Kubernetes probes. JSON, backed by real
+    consumer state (`src/core/consumer_health.py`); unknown paths are 404.
 
-    Exactly two endpoints, both JSON, both backed by real consumer state (see
-    `src/core/consumer_health.py`). Anything else is a 404, so a probe aimed at
-    the wrong path fails loudly instead of getting a meaningless 200:
+    Readiness (`/readyz`, `/ready`) — consuming, partitions assigned, poll
+    recent. No inbound traffic reaches this service, so readiness gates the
+    *rollout*, not routing: with `maxUnavailable: 0` it stops Kubernetes killing
+    an old pod before the new one consumes. Point the startupProbe here too.
 
-    * ``/readyz`` — 200 only when the consume loop is running, partitions are
-      assigned (or were revoked inside the rebalance grace window), and the last
-      poll is recent. The event-handler takes no inbound HTTP traffic, so
-      readiness gates the *rollout*: with ``maxUnavailable: 0`` / ``maxSurge: 1``
-      it is what stops Kubernetes tearing down an old pod before the new one
-      consumes. A ``startupProbe`` should point here too.
-    * ``/livez`` — consume-loop heartbeat, *not* "the HTTP thread answers".
-      Startup and shutdown always report alive. Keep `failureThreshold` high in
-      the Deployment: an aggressive liveness on a consumer amplifies a rebalance
-      storm instead of fixing it.
+    Liveness (`/livez`, `/`, `/health`, `/healthz`) — consume-loop heartbeat,
+    not "the HTTP thread answers". Green during startup and shutdown. Keep
+    `failureThreshold` high: aggressive liveness on a consumer amplifies a
+    rebalance storm. The bare aliases exist because prod probes target `/` —
+    404ing there would kill every pod the moment the image lands.
 
-    Started **before** the blocking `init_services()`: connection-refused for
-    the whole schema wait is what let the ~90 s prod liveness probe kill booting
-    pods (CrashLoopBackOff).
+    Started *before* the blocking `init_services()`, so a slow boot reports
+    "starting" instead of refusing connections and being killed at ~90 s.
     """
 
     def _payload(ok: bool, payload: dict) -> bytes:
@@ -101,10 +96,30 @@ def create_health_server(port: int):
         body["status"] = "ok" if ok else "unavailable"
         return json.dumps(body).encode("utf-8")
 
+    # The bare aliases exist because prod probes target `/` — 404ing there would
+    # kill every pod the moment the image lands.
+    PROBES = {
+        "ready": {
+            "check": consumer_health.readiness,
+            "paths": ("/readyz", "/ready"),
+        },
+        "live": {
+            "check": consumer_health.liveness,
+            "paths": ("/livez", "/", "/health", "/healthz"),
+        },
+    }
+
     class HealthHandler(BaseHTTPRequestHandler):
         # Probes are HTTP/1.1 clients; answering 1.0 forces a new connection per
         # check, which is fine and keeps the handler simple.
         protocol_version = "HTTP/1.0"
+
+        # Flattened once for O(1) lookup per request.
+        ROUTES = {
+            path: probe["check"]
+            for probe in PROBES.values()
+            for path in probe["paths"]
+        }
 
         def _respond(self, ok: bool, payload: dict):
             body = _payload(ok, payload)
@@ -113,11 +128,6 @@ def create_health_server(port: int):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-
-        ROUTES = {
-            "/readyz": consumer_health.readiness,
-            "/livez": consumer_health.liveness,
-        }
 
         def do_GET(self):
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
@@ -150,6 +160,7 @@ def create_health_server(port: int):
 
     thread = threading.Thread(target=serve, daemon=True, name="health-server")
     thread.start()
+
     return server
 
 

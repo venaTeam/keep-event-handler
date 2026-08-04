@@ -1,20 +1,14 @@
 """
-Process-wide consumer health state, shared between the Kafka consume loop and
-the health-check HTTP server used by the Kubernetes probes.
+Consumer health state shared between the consume loop (writer) and the probe
+HTTP server (reader): lifecycle phase, current partition assignment, and the
+time of the last successful poll.
 
-The health server used to answer 200 on every path, so readiness returned 200
-before the consumer had joined the group (with `maxUnavailable: 0` Kubernetes
-tore down an old pod before the new one consumed anything), and liveness only
-proved the HTTP daemon thread was alive — a wedged consume loop was never
-restarted.
+A module-level singleton, so the probe server can start *before* the consumer
+object exists — that ordering is what stops a slow boot being killed by the
+liveness probe.
 
-This module holds the state both probes need (lifecycle phase, current
-partition assignment, timestamp of the last successful poll) behind a lock, as a
-module-level singleton so the health server can be started *before* the consumer
-object exists.
-
-Timestamps use `time.monotonic()` so clock changes can't make a stalled loop
-look healthy; `snapshot()` also exposes wall-clock for humans reading the JSON.
+Timestamps are `time.monotonic()` so a clock change can't make a stalled loop
+look healthy. `snapshot()` also reports wall-clock, for humans reading the JSON.
 """
 
 import threading
@@ -116,106 +110,94 @@ class ConsumerHealth:
             return None
         return now - self._last_poll
 
+    def _snapshot_locked(self, now: float) -> dict:
+        poll_age = self._poll_age(now)
+
+        return {
+            "phase": self._phase,
+            "detail": self._phase_detail,
+            "assigned_partitions": list(self._assigned),
+            "uptime_seconds": round(now - self._started_at, 3),
+            "consuming_for_seconds": (
+                None
+                if self._consuming_since is None
+                else round(now - self._consuming_since, 3)
+            ),
+            "last_poll_age_seconds": None if poll_age is None else round(poll_age, 3),
+            "timestamp": time.time(),
+        }
+
     def snapshot(self) -> dict:
         with self._lock:
-            now = self._clock()
-            poll_age = self._poll_age(now)
-            return {
-                "phase": self._phase,
-                "detail": self._phase_detail,
-                "assigned_partitions": list(self._assigned),
-                "uptime_seconds": round(now - self._started_at, 3),
-                "consuming_for_seconds": (
-                    None
-                    if self._consuming_since is None
-                    else round(now - self._consuming_since, 3)
-                ),
-                "last_poll_age_seconds": (
-                    None if poll_age is None else round(poll_age, 3)
-                ),
-                "timestamp": time.time(),
-            }
+            return self._snapshot_locked(self._clock())
 
-    def readiness(self) -> tuple:
-        """Ready only when the consumer is genuinely consuming: the loop is
-        running, partitions are assigned (or were revoked within the grace
-        window), and the last poll is recent.
-
-        Returns (ready: bool, payload: dict).
-        """
+    def _evaluate(self, check) -> tuple[bool, dict]:
+        """Run a probe check and build its payload under one lock, from one
+        clock reading — otherwise the reason can contradict the numbers beside
+        it (the consume loop updates this state continuously)."""
         with self._lock:
             now = self._clock()
-            poll_age = self._poll_age(now)
-            phase = self._phase
-            assigned = self._assigned
-            revoked_at = self._revoked_at
-            grace = self._revoke_grace
-            max_gap = self._ready_max_poll_gap
+            ok, reason = check(now)
+            payload = self._snapshot_locked(now)
+        payload["reason"] = reason
+        return ok, payload
 
-        payload = self.snapshot()
+    def _readiness_locked(self, now: float) -> tuple[bool, str]:
+        if self._phase != PHASE_CONSUMING:
+            return False, f"not consuming (phase={self._phase})"
 
-        if phase != PHASE_CONSUMING:
-            payload["reason"] = f"not consuming (phase={phase})"
-            return False, payload
-
-        if not assigned:
-            if revoked_at is not None and (now - revoked_at) < grace:
-                payload["reason"] = (
-                    "partitions revoked, within rebalance grace "
-                    f"({round(now - revoked_at, 1)}s < {grace}s)"
+        if not self._assigned:
+            # A revoke that is still inside the grace window is an ordinary
+            # rebalance, not a reason to fail the rollout.
+            revoked_ago = (
+                None if self._revoked_at is None else now - self._revoked_at
+            )
+            if revoked_ago is not None and revoked_ago < self._revoke_grace:
+                return True, (
+                    f"partitions revoked {revoked_ago:.1f}s ago, within "
+                    f"{self._revoke_grace}s rebalance grace"
                 )
-                return True, payload
-            payload["reason"] = "no partitions assigned"
-            return False, payload
+            return False, "no partitions assigned"
 
+        poll_age = self._poll_age(now)
         if poll_age is None:
-            payload["reason"] = "no successful poll yet"
-            return False, payload
-
-        if poll_age > max_gap:
-            payload["reason"] = (
-                f"last poll {round(poll_age, 1)}s ago exceeds {max_gap}s"
+            return False, "no successful poll yet"
+        if poll_age > self._ready_max_poll_gap:
+            return False, (
+                f"last poll {poll_age:.1f}s ago exceeds "
+                f"{self._ready_max_poll_gap}s"
             )
-            return False, payload
+        return True, "consuming"
 
-        payload["reason"] = "consuming"
-        return True, payload
+    def _liveness_locked(self, now: float) -> tuple[bool, str]:
+        if self._phase in (PHASE_STARTING, PHASE_STOPPING, PHASE_STOPPED):
+            return True, f"phase={self._phase} (liveness not evaluated)"
 
-    def liveness(self) -> tuple:
-        """Loop heartbeat: alive unless the consume loop has stopped polling for
-        longer than the (deliberately generous) liveness gap.
-
-        Startup and shutdown are always reported alive: killing a booting pod is
-        what caused the CrashLoop, and killing a draining one just truncates the
-        in-flight batch.
-
-        Returns (alive: bool, payload: dict).
-        """
-        with self._lock:
-            now = self._clock()
-            poll_age = self._poll_age(now)
-            phase = self._phase
-            consuming_since = self._consuming_since
-            max_gap = self._live_max_poll_gap
-
-        payload = self.snapshot()
-
-        if phase in (PHASE_STARTING, PHASE_STOPPING, PHASE_STOPPED):
-            payload["reason"] = f"phase={phase} (liveness not evaluated)"
-            return True, payload
-
-        # Consuming but no poll recorded yet: measure from when the loop started,
-        # so a loop that wedges before its first poll is still caught.
-        age = poll_age if poll_age is not None else (now - (consuming_since or now))
-        if age > max_gap:
-            payload["reason"] = (
-                f"consume loop stalled: no poll for {round(age, 1)}s "
-                f"(threshold {max_gap}s)"
+        # No poll yet? Measure from loop start, so a loop that wedges before its
+        # first poll is still caught.
+        poll_age = self._poll_age(now)
+        age = (
+            poll_age
+            if poll_age is not None
+            else now - (self._consuming_since or now)
+        )
+        if age > self._live_max_poll_gap:
+            return False, (
+                f"consume loop stalled: no poll for {age:.1f}s "
+                f"(threshold {self._live_max_poll_gap}s)"
             )
-            return False, payload
+        return True, "consume loop alive"
 
-        payload["reason"] = "consume loop alive"
-        return True, payload
+    def readiness(self) -> tuple[bool, dict]:
+        """Ready only when genuinely consuming: loop running, partitions assigned
+        (or revoked within the grace window), and the last poll recent."""
+        return self._evaluate(self._readiness_locked)
+
+    def liveness(self) -> tuple[bool, dict]:
+        """Consume-loop heartbeat. Startup and shutdown always report alive:
+        killing a booting pod is what caused the CrashLoop, and killing a
+        draining one just truncates the in-flight batch."""
+        return self._evaluate(self._liveness_locked)
 
 
 # Process-wide singleton. The health server reads it; the consume loop writes it.

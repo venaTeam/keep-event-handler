@@ -191,14 +191,11 @@ class KafkaEventConsumer(EventConsumer):
         # Batch consume. BATCH_SIZE=1 (default) reproduces the single-message loop.
         self._batch_size = max(1, KAFKA_CONSUMER_BATCH_SIZE)
         self._batch_timeout = KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS
-        # session.timeout.ms is the single highest-leverage setting here: a pod
-        # that dies without sending LeaveGroup (SIGKILL after a grace-period
-        # overrun) leaves its partitions unassigned for up to this long. Keep it
-        # in the tens of seconds, not the 10 minutes prod was running.
+        # How long a SIGKILLed pod's partitions stay unassigned (it never sent
+        # LeaveGroup). Tens of seconds — prod ran 10 minutes.
         self._session_timeout = int(config("KAFKA_SESSION_TIMEOUT_MS", default="45000"))
-        # Must track session.timeout.ms: the broker needs several heartbeats
-        # inside one session window, so lowering the session timeout alone gets
-        # the config rejected. A third of it, capped at librdkafka's 3s default.
+        # Must track the session timeout: the broker needs several heartbeats per
+        # session window. A third of it, capped at librdkafka's 3s default.
         self._heartbeat_interval = int(
             config(
                 "KAFKA_HEARTBEAT_INTERVAL_MS",
@@ -206,6 +203,15 @@ class KafkaEventConsumer(EventConsumer):
             )
         )
         self._max_poll_interval = int(config("KAFKA_MAX_POLL_INTERVAL_MS", default="300000"))
+
+        # Revokes only the partitions that move, instead of the whole group
+        # stopping on every join/leave (librdkafka's eager default).
+        # WARNING: cannot coexist with eager members, so changing this — in
+        # either direction — needs a full group restart, not a rolling deploy.
+        self._assignment_strategy = config(
+            "KAFKA_PARTITION_ASSIGNMENT_STRATEGY", default="cooperative-sticky"
+        ).strip()
+        self._cooperative = "cooperative-sticky" == self._assignment_strategy.lower()
 
         # Security config
         self.security_protocol = config("KAFKA_SECURITY_PROTOCOL", default="PLAINTEXT")
@@ -225,11 +231,19 @@ class KafkaEventConsumer(EventConsumer):
             "group.id": self.group_id,
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,  # Manual commit after processing
+            # We commit explicitly; auto-store marks records committable on
+            # *delivery*, so a bare commit() could flush ones we never processed.
+            "enable.auto.offset.store": False,
             "session.timeout.ms": self._session_timeout,
             "heartbeat.interval.ms": self._heartbeat_interval,
             "max.poll.interval.ms": self._max_poll_interval,
             "security.protocol": self.security_protocol,
         }
+
+        # Only emitted when set, so the default config is byte-for-byte what it
+        # was before cooperative support existed.
+        if self._assignment_strategy:
+            conf["partition.assignment.strategy"] = self._assignment_strategy
 
         # SASL configuration
         if self.security_protocol in ["SASL_PLAINTEXT", "SASL_SSL"]:
@@ -271,7 +285,8 @@ class KafkaEventConsumer(EventConsumer):
         self._consumer.subscribe(
             [self.topic],
             on_assign=self._on_assign,
-            on_revoke=self._on_revoke
+            on_revoke=self._on_revoke,
+            on_lost=self._on_lost,
         )
         self._running = True
 
@@ -301,21 +316,74 @@ class KafkaEventConsumer(EventConsumer):
         """Partitions currently assigned to this consumer (readiness input)."""
         return tuple(consumer_health.snapshot()["assigned_partitions"])
 
+    def _sync_assignment_state(self, consumer):
+        """Refresh readiness from what the consumer *actually* owns.
+
+        Cooperative-path only: there the callback argument is a delta, so
+        recording it verbatim would read a partial revoke as "I own nothing" and
+        flip the pod NotReady mid-rebalance, stalling a maxUnavailable: 0
+        rollout. On the eager path the argument already is the full assignment.
+        """
+        try:
+            current = [p.partition for p in consumer.assignment()]
+        except Exception:
+            self.logger.warning("Could not read current assignment", exc_info=True)
+            return
+        if current:
+            consumer_health.set_assignment(current)
+        else:
+            consumer_health.clear_assignment()
+
     def _on_assign(self, consumer, partitions):
-        """Callback when partitions are assigned."""
-        assigned = [p.partition for p in partitions]
-        self.logger.info(f"Partitions assigned: {assigned}")
-        consumer_health.set_assignment(assigned)
+        """Callback when partitions are assigned.
+
+        Under the cooperative protocol this is a delta and the application must
+        apply it itself via `incremental_assign`. Under the eager protocol it is
+        the full new assignment and librdkafka applies it for us.
+        """
+        added = [p.partition for p in partitions]
+        if self._cooperative:
+            consumer.incremental_assign(partitions)
+            self.logger.info(f"Partitions incrementally assigned: {added}")
+            self._sync_assignment_state(consumer)
+        else:
+            self.logger.info(f"Partitions assigned: {added}")
+            consumer_health.set_assignment(added)
 
     def _on_revoke(self, consumer, partitions):
-        """Callback when partitions are revoked (rebalance)."""
-        self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
-        consumer_health.clear_assignment()
-        # Commit any pending offsets before rebalance
-        try:
-            consumer.commit(asynchronous=False)
-        except KafkaException as e:
-            self.logger.warning(f"Failed to commit during rebalance: {e}")
+        """Partitions revoked by a rebalance.
+
+        Deliberately does *not* commit. `_process_batch` already commits each
+        partition as it finishes, so nothing processed is pending here — an
+        argument-less commit() would only flush offsets for records that were
+        delivered but never processed, committing away exactly the ones we mean
+        to have redelivered.
+        """
+        revoked = [p.partition for p in partitions]
+        if self._cooperative:
+            # Only these move; the partitions we keep carry on being consumed.
+            consumer.incremental_unassign(partitions)
+            self.logger.info(f"Partitions incrementally revoked: {revoked}")
+            self._sync_assignment_state(consumer)
+        else:
+            self.logger.info(f"Partitions revoked: {revoked}")
+            consumer_health.clear_assignment()
+
+    def _on_lost(self, consumer, partitions):
+        """Partitions lost, not revoked — the group moved on without us.
+
+        Separate from `_on_revoke` because these may already be owned by another
+        member, so committing for them is at best rejected and at worst
+        overwrites a newer owner's progress. Registered explicitly, or
+        confluent-kafka would route them to `on_revoke` as an ordinary rebalance.
+        """
+        lost = [p.partition for p in partitions]
+        self.logger.warning(f"Partitions LOST (already reassigned?): {lost}")
+        if self._cooperative:
+            consumer.incremental_unassign(partitions)
+            self._sync_assignment_state(consumer)
+        else:
+            consumer_health.clear_assignment()
 
     def _consume_loop(self):
         """Main consumption loop - blocking and synchronous."""
@@ -389,32 +457,22 @@ class KafkaEventConsumer(EventConsumer):
         consumer_health.mark_stopped()
 
     def _process_batch(self, records, budget: "RetryBudget"):
-        """Process a batch of records and commit the highest *contiguous*
-        successfully-resolved offset per partition.
+        """Process a batch, committing the highest *contiguous* resolved offset
+        per partition.
 
-        Within each partition, records are processed in ascending offset order.
-        Contiguity stops at the first unresolved record (one whose processing
-        returned should_commit=False); a poison record handled by the terminal
-        sink counts as resolved (should_commit=True), so it does not break the
-        chain. Offsets after a break are NOT committed — they'll be redelivered
-        (at-least-once), never silently skipped.
+        Each partition is processed in ascending offset order and stops at the
+        first unresolved record; everything after it stays uncommitted and is
+        redelivered, never silently skipped. A poison record counts as resolved
+        (the terminal sink handled it), so it doesn't break the chain.
 
-        BATCH_SIZE=1 reduces to: one record, one partition, commit it on
-        success — identical to the previous single-message loop.
-
-        SIGTERM is honored *between messages*: on shutdown we stop taking new
-        records, commit the contiguous boundary reached so far, and return so
-        `_cleanup` can `close()` the consumer while grace period remains.
-        Running the batch to completion instead (up to BATCH_SIZE messages ×
-        MAX_PROCESSING_RETRIES with backoff) could overrun
-        terminationGracePeriodSeconds; the pod was then SIGKILLed, never sent
-        LeaveGroup, and its partitions sat unassigned for up to
-        session.timeout.ms. Abandoned records are left uncommitted and
-        redelivered — at-least-once is preserved.
+        SIGTERM is checked between messages: on shutdown we commit the boundary
+        reached so far and return, leaving the rest for redelivery. Finishing the
+        batch instead could overrun terminationGracePeriodSeconds, and a
+        SIGKILLed pod never sends LeaveGroup — its partitions then sit unassigned
+        for a full session.timeout.ms.
         """
-        # Observability: record how many records this poll returned. The metric
-        # always observes; the log fires only for real batches (>1) to keep the
-        # single-message baseline quiet.
+        # The metric always observes; the log fires only for real batches, to
+        # keep the BATCH_SIZE=1 baseline quiet.
         batch_len = len(records)
         consume_batch_size.observe(batch_len)
         if batch_len > 1:
