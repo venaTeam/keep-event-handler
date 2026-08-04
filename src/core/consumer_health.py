@@ -13,6 +13,7 @@ look healthy. `snapshot()` also reports wall-clock, for humans reading the JSON.
 
 import threading
 import time
+from enum import StrEnum
 from typing import Iterable, Optional
 
 from src.config.consts import (
@@ -21,11 +22,17 @@ from src.config.consts import (
     KEEP_CONSUMER_REVOKE_GRACE_SECONDS,
 )
 
-# Lifecycle phases.
-PHASE_STARTING = "starting"  # process booted, init_services / consumer not up yet
-PHASE_CONSUMING = "consuming"  # consume loop is turning
-PHASE_STOPPING = "stopping"  # SIGTERM received, draining
-PHASE_STOPPED = "stopped"  # consume loop exited
+class Phase(StrEnum):
+    """Consumer lifecycle phases.
+
+    A `StrEnum`, so members compare equal to — and serialize as — their bare
+    value: the probe JSON keeps reporting `"phase": "consuming"`, not an object.
+    """
+
+    STARTING = "starting"  # process booted, init_services / consumer not up yet
+    CONSUMING = "consuming"  # consume loop is turning
+    STOPPING = "stopping"  # SIGTERM received, draining
+    STOPPED = "stopped"  # consume loop exited
 
 
 class ConsumerHealth:
@@ -44,7 +51,7 @@ class ConsumerHealth:
         self._live_max_poll_gap = live_max_poll_gap
         self._revoke_grace = revoke_grace
 
-        self._phase = PHASE_STARTING
+        self._phase = Phase.STARTING
         self._phase_detail = "process starting"
         self._started_at = clock()
         self._consuming_since: Optional[float] = None
@@ -56,23 +63,23 @@ class ConsumerHealth:
 
     def mark_starting(self, detail: str = "process starting"):
         with self._lock:
-            self._phase = PHASE_STARTING
+            self._phase = Phase.STARTING
             self._phase_detail = detail
 
     def mark_consuming(self, detail: str = "consume loop running"):
         with self._lock:
-            self._phase = PHASE_CONSUMING
+            self._phase = Phase.CONSUMING
             self._phase_detail = detail
             self._consuming_since = self._clock()
 
     def mark_stopping(self, detail: str = "shutdown signalled"):
         with self._lock:
-            self._phase = PHASE_STOPPING
+            self._phase = Phase.STOPPING
             self._phase_detail = detail
 
     def mark_stopped(self, detail: str = "consume loop exited"):
         with self._lock:
-            self._phase = PHASE_STOPPED
+            self._phase = Phase.STOPPED
             self._phase_detail = detail
             self._assigned = ()
 
@@ -143,7 +150,7 @@ class ConsumerHealth:
         return ok, payload
 
     def _readiness_locked(self, now: float) -> tuple[bool, str]:
-        if self._phase != PHASE_CONSUMING:
+        if self._phase != Phase.CONSUMING:
             return False, f"not consuming (phase={self._phase})"
 
         if not self._assigned:
@@ -170,7 +177,7 @@ class ConsumerHealth:
         return True, "consuming"
 
     def _liveness_locked(self, now: float) -> tuple[bool, str]:
-        if self._phase in (PHASE_STARTING, PHASE_STOPPING, PHASE_STOPPED):
+        if self._phase in (Phase.STARTING, Phase.STOPPING, Phase.STOPPED):
             return True, f"phase={self._phase} (liveness not evaluated)"
 
         # No poll yet? Measure from loop start, so a loop that wedges before its

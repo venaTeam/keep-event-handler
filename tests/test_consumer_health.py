@@ -10,11 +10,7 @@ proved the HTTP thread was alive). These tests pin the replacement semantics:
   liveness  = consume-loop heartbeat, never failing during startup/shutdown
 """
 
-from src.core.consumer_health import (
-    PHASE_CONSUMING,
-    PHASE_STARTING,
-    ConsumerHealth,
-)
+from src.core.consumer_health import ConsumerHealth, Phase
 
 
 class FakeClock:
@@ -47,7 +43,7 @@ def test_starting_is_not_ready_but_is_alive():
 
     ready, payload = health.readiness()
     assert ready is False
-    assert payload["phase"] == PHASE_STARTING
+    assert payload["phase"] == Phase.STARTING
 
     alive, _ = health.liveness()
     assert alive is True
@@ -81,7 +77,7 @@ def test_ready_when_assigned_and_recently_polled():
 
     ready, payload = health.readiness()
     assert ready is True
-    assert payload["phase"] == PHASE_CONSUMING
+    assert payload["phase"] == Phase.CONSUMING
     assert payload["assigned_partitions"] == [1, 2, 3]
 
     clock.advance(10)

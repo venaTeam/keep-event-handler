@@ -13,8 +13,7 @@ Two things these tests pin:
   rebuilt from `consumer.assignment()` rather than from the delta — recording the
   delta would flip a pod NotReady mid-rebalance and, with `maxUnavailable: 0`,
   stall the rollout.
-
-⚠️ These use a mocked consumer. They verify *our* logic, not librdkafka's protocol
+ These use a mocked consumer. They verify *our* logic, not librdkafka's protocol
 behaviour — cooperative mode still needs a live-broker test before it is enabled
 anywhere.
 """

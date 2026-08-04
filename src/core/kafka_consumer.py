@@ -240,8 +240,9 @@ class KafkaEventConsumer(EventConsumer):
             "security.protocol": self.security_protocol,
         }
 
-        # Only emitted when set, so the default config is byte-for-byte what it
-        # was before cooperative support existed.
+        # Emitted on the default path — cooperative-sticky is the default. The
+        # guard is the opt-out: blanking KAFKA_PARTITION_ASSIGNMENT_STRATEGY
+        # drops the key entirely, leaving librdkafka on its own eager default.
         if self._assignment_strategy:
             conf["partition.assignment.strategy"] = self._assignment_strategy
 

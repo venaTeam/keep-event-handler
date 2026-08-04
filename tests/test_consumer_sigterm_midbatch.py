@@ -215,9 +215,9 @@ def test_revoke_does_not_blind_commit_delivered_offsets():
 
 def test_signal_handler_marks_health_stopping():
     consumer, _ = _consumer_with_mock_kafka()
-    from src.core.consumer_health import PHASE_STOPPING, consumer_health
+    from src.core.consumer_health import Phase, consumer_health
 
     consumer._signal_handler(15, None)
-    assert consumer_health.snapshot()["phase"] == PHASE_STOPPING
+    assert consumer_health.snapshot()["phase"] == Phase.STOPPING
     # Liveness must stay green while draining.
     assert consumer_health.liveness()[0] is True
