@@ -31,9 +31,8 @@ from dotenv import find_dotenv, load_dotenv
 from prometheus_client import start_http_server
 from src import logging_conf
 from src.config.config import config
-from src.core.db.db_on_start import abort_schema_wait
 from src.core.consumer_health import consumer_health
-from src.core.db.db_on_start import SchemaWaitAborted
+from src.core.db.db_on_start import SchemaWaitAborted, abort_schema_wait
 from src.core.kafka_consumer import KafkaEventConsumer
 
 # Load environment variables before any other imports
