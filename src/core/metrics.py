@@ -1,39 +1,11 @@
-import logging
-import os
-import tempfile
+"""Metric definitions for the event handler.
 
-logger = logging.getLogger(__name__)
+prometheus_client is imported via `prometheus_multiproc`, never directly: the
+multiprocess directory has to be settled before that library first loads, and
+that ordering is isolated in the one module whose job it is.
+"""
 
-
-def _resolve_prometheus_multiproc_dir() -> str:
-    """Pick the multiprocess dir, refusing the two silent failure modes.
-
-    A *set-but-empty* PROMETHEUS_MULTIPROC_DIR must not bypass the default:
-    prometheus_client joins the dir with ``counter_<pid>.db``, so an empty
-    string writes metric mmap files into the process CWD — which is how four
-    ``*.db`` files once ended up committed at the repo root. An uncreatable
-    dir must not be silently swallowed for the same reason; fall back to the
-    system temp dir and say so, never to the CWD.
-    """
-    configured = os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "/tmp/prometheus"
-    try:
-        os.makedirs(configured, exist_ok=True)
-        return configured
-    except OSError:
-        fallback = os.path.join(tempfile.gettempdir(), "prometheus")
-        logger.error(
-            "PROMETHEUS_MULTIPROC_DIR %r cannot be created; using %r instead",
-            configured,
-            fallback,
-        )
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
-
-
-# Must be settled before prometheus_client is imported.
-os.environ["PROMETHEUS_MULTIPROC_DIR"] = _resolve_prometheus_multiproc_dir()
-
-from prometheus_client import Counter, Gauge, Histogram, Summary  # noqa: E402
+from src.core.prometheus_multiproc import Counter, Gauge, Histogram, Summary
 
 METRIC_PREFIX = "keep_"
 

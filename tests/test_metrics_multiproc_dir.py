@@ -1,4 +1,4 @@
-"""Prometheus multiprocess-dir hygiene (src/core/metrics.py).
+"""Prometheus multiprocess-dir resolution (src/core/prometheus_multiproc.py).
 
 Regression for the committed-``*.db``-files incident: a *set-but-empty*
 PROMETHEUS_MULTIPROC_DIR bypassed the ``os.environ.get(..., default)``
@@ -10,7 +10,7 @@ every collector against the default registry).
 """
 import os
 
-from src.core.metrics import _resolve_prometheus_multiproc_dir
+from src.core.prometheus_multiproc import _resolve_prometheus_multiproc_dir
 
 
 def test_empty_env_falls_back_to_default_not_cwd(monkeypatch):
@@ -42,7 +42,7 @@ def test_uncreatable_dir_falls_back_to_tempdir_and_logs(
 
     import tempfile
 
-    with caplog.at_level("ERROR", logger="src.core.metrics"):
+    with caplog.at_level("ERROR", logger="src.core.prometheus_multiproc"):
         resolved = _resolve_prometheus_multiproc_dir()
 
     assert resolved == os.path.join(tempfile.gettempdir(), "prometheus")
