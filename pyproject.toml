@@ -52,6 +52,9 @@ pympler = "*"
 elasticsearch = "*"
 pusher = "*"
 prometheus-client = "*"
+# Automations trigger index: the `reload` pub/sub listener. Present transitively
+# via arq already, but relied on directly now, so it is pinned directly.
+redis = "^5.0"
 
 [tool.poetry.group.dev.dependencies]
 vulture = "^2.14"
@@ -59,7 +62,20 @@ pytest = "^7.0"
 freezegun = "^1.5.5"
 tenacity = "^9.1.4"
 pytest-asyncio = "^0.23.0"
+# The trigger index adds two daemon threads and socket-touching tests to a suite
+# the Stop hook runs with no wall-clock bound. Also un-breaks the three existing
+# @pytest.mark.timeout markers in tests/test_counting_integration.py, which
+# pytest reports as PytestUnknownMarkWarning (i.e. silent no-ops) without this.
+pytest-timeout = "^2.3"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+# A default wall-clock bound for EVERY test, not just the ones that remembered
+# a marker. The Stop hook and CI both run pytest with no timeout of their own,
+# and this suite now contains daemon threads, a socket-polling loop and real
+# connection probes -- any one of which can hang a run indefinitely.
+# Per-test @pytest.mark.timeout still overrides this.
+timeout = 120

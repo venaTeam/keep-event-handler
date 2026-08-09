@@ -84,6 +84,43 @@ def create_health_server(port: int):
     return server
 
 
+def _start_trigger_index_safely():
+    """Start the automations trigger index without ever risking the consumer.
+
+    The IMPORT is inside the try, not just the call. main()'s `except Exception`
+    calls sys.exit(1), so a bare module-level import of the new package would
+    let any import-time error -- a missing redis wheel, a bad
+    PROMETHEUS_MULTIPROC_DIR, a typo -- crashloop the entire alert-ingestion
+    consumer. That is precisely the outcome fail-open exists to prevent: the
+    index degrading must never be able to stop alerts flowing.
+    """
+    try:
+        from src.bl.automations.reloader import start_trigger_index
+
+        if start_trigger_index():
+            logger.info("Automations trigger index started")
+        else:
+            logger.info(
+                "Automations trigger index is switched off "
+                "(AUTOMATION_INDEX_ENABLED); alerts are processed as before"
+            )
+    except Exception:
+        logger.exception(
+            "Failed to start the automations trigger index; "
+            "alert processing continues without automation matching"
+        )
+
+
+def _stop_trigger_index_safely():
+    """Stop it, in its own try so it can never mask the SSE pool flush."""
+    try:
+        from src.bl.automations.reloader import stop_trigger_index
+
+        stop_trigger_index()
+    except Exception:
+        logger.exception("Failed to stop the automations trigger index")
+
+
 def main():
     """Main entrypoint for the Kafka consumer service."""
     logger.info("=" * 60)
@@ -109,7 +146,12 @@ def main():
         
         # Step 3: Start health check server (for K8s probes)
         create_health_server(health_port)
-        
+
+        # Step 3.5: Start the automations trigger index (non-blocking).
+        # After the metrics/health servers so the first hydrate attempt is
+        # already scrapable, and before the blocking consume loop.
+        _start_trigger_index_safely()
+
         # Step 4: Create and start Kafka consumer (blocking)
         from src.core.kafka_consumer import KafkaEventConsumer
         
@@ -124,6 +166,13 @@ def main():
         logger.exception(f"Fatal error in event handler: {e}")
         sys.exit(1)
     finally:
+        # Ordering is load-bearing: the trigger index stop is BOUNDED, while
+        # shutdown_sse_pool wraps ThreadPoolExecutor.shutdown, which takes no
+        # timeout on 3.11 and is genuinely unbounded. Stopping the bounded half
+        # first guarantees it completes inside the k8s grace period even when
+        # the SSE flush hangs.
+        _stop_trigger_index_safely()
+
         # Flush any pending SSE notifications queued on the background pool so
         # they aren't lost on a graceful shutdown of the standalone consumer.
         try:
