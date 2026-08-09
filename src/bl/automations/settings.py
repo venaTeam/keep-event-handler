@@ -19,6 +19,7 @@ import re
 
 from src.config.consts import (
     AUTOMATION_INDEX_BOOT_RETRY_SECONDS,
+    AUTOMATION_INDEX_ENABLED,
     AUTOMATION_INDEX_MAX_ROWS,
     AUTOMATION_INDEX_MAX_TOTAL_BYTES,
     AUTOMATION_INDEX_MAX_VALUE_BYTES,
@@ -36,6 +37,16 @@ from src.config.consts import (
 # being true. Clamped rather than rejected: a bad value must not stop the
 # matcher from running.
 _MAX_JITTER_FRACTION = 0.5
+
+
+def read_index_enabled() -> bool:
+    """The deployment gate for the whole automations surface here.
+
+    No clamping: `config()` already maps "true"/"1"/"yes" to True and anything
+    else -- including "false", "0" and "" -- to False, so the unset and
+    misspelled cases both land on OFF, which is the safe side of this switch.
+    """
+    return bool(AUTOMATION_INDEX_ENABLED)
 
 
 def read_reload_seconds() -> int:

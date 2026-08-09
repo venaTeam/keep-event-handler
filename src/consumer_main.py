@@ -97,8 +97,13 @@ def _start_trigger_index_safely():
     try:
         from src.bl.automations.reloader import start_trigger_index
 
-        start_trigger_index()
-        logger.info("Automations trigger index started")
+        if start_trigger_index():
+            logger.info("Automations trigger index started")
+        else:
+            logger.info(
+                "Automations trigger index is switched off "
+                "(AUTOMATION_INDEX_ENABLED); alerts are processed as before"
+            )
     except Exception:
         logger.exception(
             "Failed to start the automations trigger index; "

@@ -28,6 +28,24 @@ from prometheus_client import REGISTRY
 _PROBE_TIMEOUT_SECONDS = 0.25
 
 
+@pytest.fixture(autouse=True)
+def automations_enabled(monkeypatch):
+    """These tests exercise the feature switched ON.
+
+    AUTOMATION_INDEX_ENABLED defaults to OFF so the code can ship without
+    running (deployment gate), which would otherwise turn every behavioural
+    test in this package into an assertion about a no-op. Patched on the
+    settings module rather than via the environment because
+    `src/config/consts.py` reads the variable once at import.
+
+    The tests for the gate itself re-patch this to False -- an autouse fixture
+    runs first, so a test-level monkeypatch still wins.
+    """
+    from src.bl.automations import settings
+
+    monkeypatch.setattr(settings, "AUTOMATION_INDEX_ENABLED", True)
+
+
 def _host_port(url: str, default_port: int = 5432) -> tuple[str, int]:
     parsed = urlparse(url)
     return (parsed.hostname or "localhost", parsed.port or default_port)

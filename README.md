@@ -70,6 +70,7 @@ this service performs.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `AUTOMATION_INDEX_ENABLED` | `false` | **Deployment gate for this whole surface.** Off means no reload worker, no `reload` subscriber, no hydrate query, and `match()` returns nothing for every alert. The automations feature spans several stories and repos, so the code ships before it is ready to run. |
 | `REDIS_URL` | *(empty)* | The `reload` pub/sub channel. See the degradation note below. |
 | `AUTOMATION_RELOAD_CHANNEL` | `reload` | Channel name, pinned by `automation-contracts.md`. |
 | `AUTOMATION_INDEX_RELOAD_SECONDS` | `30` | Unconditional full reload interval. This is the staleness bound. |
@@ -89,26 +90,36 @@ Every interval is clamped at read time: `config()` accepts a literal `"0"`,
 which would turn the reload timer into a hot loop stealing GIL from the single
 synchronous consumer thread.
 
-**Two degraded states, deliberately distinguishable.** They mean different
-things and have different runbooks:
+**Three states, deliberately distinguishable.** They mean different things and
+have different runbooks:
 
 | Signal | Meaning |
 |---|---|
-| `keep_automation_index_ready == 0` | No usable index. Matching is silently doing nothing. |
+| `keep_automation_index_enabled == 0` | Switched off on purpose. Nothing is running and nothing is wrong. |
+| `keep_automation_index_ready == 0` | Enabled, but no usable index. Matching is silently doing nothing. |
 | `keep_automation_index_config_missing{setting="redis_url"} == 1` | The index is fine; only sub-second convergence is lost. Reloads still happen every `AUTOMATION_INDEX_RELOAD_SECONDS`. |
 
-An unset `REDIS_URL` is the second, not the first. Nothing switches the feature
-off — the one setting that can be forgotten costs latency, not correctness.
+An unset `REDIS_URL` is the third, not the second — the one setting that can be
+forgotten costs latency, not correctness. Only `AUTOMATION_INDEX_ENABLED`
+switches the feature off.
+
+**Qualify every automations alert with `keep_automation_index_enabled == 1`.**
+That gauge exists so "off on purpose" and "should be running but isn't" are
+different observations; without it, any alert below fires on every correctly
+switched-off pod, and an alert that cries wolf gets muted.
 
 **The alert that catches a dead reload worker** is staleness, not `index_ready`:
 
 ```
-time() - keep_automation_index_last_successful_reload_timestamp > 3 * AUTOMATION_INDEX_RELOAD_SECONDS
+keep_automation_index_enabled == 1
+  and time() - keep_automation_index_last_successful_reload_timestamp > 3 * AUTOMATION_INDEX_RELOAD_SECONDS
 ```
 
 A worker thread that died leaves `index_ready` at 1. Write `index_ready` alerts
 as `absent(...) or == 0` — a bare `== 0` is *no data* when the scrape port is
-wrong, which is the same failure one layer up.
+wrong, which is the same failure one layer up. Note this is the one case the
+`index_enabled == 1` qualifier does not cover: if the whole scrape is missing,
+that gauge is absent too, so `absent()` is still doing the work.
 
 Log budget: steady-state reloads at DEBUG, state transitions at INFO once per
 transition, repeated failures at ERROR for the first few then WARN. On a

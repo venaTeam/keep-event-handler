@@ -32,6 +32,7 @@ import time
 from src.bl.automations import hydration, settings
 from src.bl.automations.index import TriggerIndex
 from src.core.metrics import (
+    automation_index_enabled,
     automation_index_generation,
     automation_index_hydrate_rate_limited_total,
     automation_index_largest_posting_list,
@@ -145,6 +146,11 @@ class TriggerIndexService:
     """Holds the published index and owns the only thread that replaces it."""
 
     def __init__(self, reload_seconds=None, wait_fn=None, hydrate_fn=None):
+        # The deployment gate, resolved once. Read here and not per call: match()
+        # runs per alert against a 1ms p99 budget, and an os.environ lookup on
+        # that path would cost more than the probe it guards. A deploy gate does
+        # not need to be flippable without a restart.
+        self._enabled = settings.read_index_enabled()
         # Published at construction so match() is legal before start().
         self._index = TriggerIndex.empty()
         self._ready = False
@@ -184,7 +190,16 @@ class TriggerIndexService:
         return self._ready
 
     def match(self, tenant_id: str, alert):
-        """Never raises, never blocks. Empty when not ready."""
+        """Never raises, never blocks. Empty when disabled or not ready."""
+        # Checked here, not only at startup: this is the boundary every caller
+        # goes through, so a future call site (B5/B6) cannot switch the feature
+        # on by forgetting to ask whether it is enabled. With the gate off no
+        # index is ever published, so this is belt-and-braces -- which is the
+        # point, since the failure it prevents is an automation running in an
+        # environment where the feature was declared off.
+        if not self._enabled:
+            automation_index_matches_skipped_total.labels(reason="disabled").inc()
+            return ()
         index = self._index  # exactly one read, for the whole probe
         if not self._ready:
             automation_index_matches_skipped_total.labels(reason="not_ready").inc()
@@ -299,6 +314,10 @@ class TriggerIndexService:
         self._signal.set()
 
     def start(self) -> None:
+        if not self._enabled:
+            # No worker, so no hydrate query and no connection taken from the
+            # pool alert ingestion shares.
+            return
         if self._thread is not None:
             return
         self._thread = threading.Thread(
@@ -400,14 +419,27 @@ def match(tenant_id: str, alert):
     return _service.match(tenant_id, alert)
 
 
-def start_trigger_index() -> None:
+def start_trigger_index() -> bool:
     """Start the reload worker, and the `reload` subscriber if configured.
+
+    Returns whether anything was started, so the caller can log the truth
+    rather than announcing a component that is switched off.
 
     Non-blocking: it kicks the worker and returns rather than waiting for the
     first hydrate, so a slow database cannot add a second to ingestion startup.
     `index_ready` makes the warm-up window observable instead.
     """
     global _subscriber
+    # Always reported, both ways: this gauge is what keeps "off on purpose"
+    # separable from "should be running but isn't".
+    enabled = settings.read_index_enabled()
+    automation_index_enabled.set(1 if enabled else 0)
+    if not enabled:
+        logger.info(
+            "automations: AUTOMATION_INDEX_ENABLED is off -- no trigger index, "
+            "no reload subscriber, and match() returns no matches"
+        )
+        return False
     _service.start()
     # Imported here, not at module scope: this pulls in redis, and an import
     # error must not be able to take down the consumer (see the wrapped import
@@ -417,6 +449,7 @@ def start_trigger_index() -> None:
     if _subscriber is None:
         _subscriber = ReloadSubscriber(_service)
     _subscriber.start()
+    return True
 
 
 def stop_trigger_index() -> None:

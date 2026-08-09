@@ -161,6 +161,20 @@ KEEP_ERROR_GUARD_MAX_ENTRIES = config(
 # the reload timer into a hot loop -- a pure-Python thread spinning against the
 # GIL steals time from the single synchronous Kafka consumer thread. Precedent
 # for the clamp: kafka_consumer.py's `max(1, KAFKA_CONSUMER_BATCH_SIZE)`.
+# Deployment gate for the whole automations surface in this service, OFF by
+# default. The feature ships across several stories and several repos; this
+# lets the code merge and deploy while the feature is not ready to run.
+#
+# Off means: no reload worker, no `reload` subscriber, no hydrate query, and
+# match() returns no matches for every alert. It is deliberately checked inside
+# match() as well as at startup, so a future call site cannot bypass it by
+# forgetting to ask.
+#
+# `automation_index_enabled` is exported so "off on purpose" stays
+# distinguishable from "failed to start" -- see src/core/metrics.py.
+AUTOMATION_INDEX_ENABLED = config(
+    "AUTOMATION_INDEX_ENABLED", default=False, cast=bool
+)
 AUTOMATION_INDEX_RELOAD_SECONDS = config(
     "AUTOMATION_INDEX_RELOAD_SECONDS", default=30, cast=int
 )
