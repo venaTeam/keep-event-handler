@@ -176,42 +176,92 @@ class ReloadSubscriber:
                     logger.debug("automations: reload signal received")
                 else:
                     self._refresh_liveness()
-            except Exception as error:  # noqa: BLE001
+            except _transport_error_types() as error:
+                # Redis is unreachable, flapping, or idle-timed-out: the
+                # expected failure of a long-lived subscription, handled by
+                # backoff + re-subscribe.
                 if _is_idle_timeout(error):
                     # An idle poll, not a disconnect. Treating it as one would
                     # tear down a healthy subscription every poll.
                     self._refresh_liveness()
                     continue
-                self._failures += 1
-                automation_pubsub_reconnects_total.inc()
-                automation_pubsub_connected.set(0)
-                delay = self._backoff_seconds()
-                if self._failures <= 3:
-                    logger.error(
-                        "automations: reload subscriber lost (%s); retrying in %ss",
-                        _redacted(error, self._url),
-                        delay,
-                    )
-                else:
-                    logger.debug(
-                        "automations: reload subscriber still down (%s)",
-                        _redacted(error, self._url),
-                    )
-                self._close()
-                # stop_event.wait, never time.sleep -- otherwise shutdown stalls
-                # for the whole backoff.
-                self._stop.wait(delay)
-                if not self._stop.is_set():
-                    try:
-                        self._subscribe()
-                        # Reload-on-reconnect: a publish during the outage is
-                        # gone (pub/sub is at-most-once), so converge now rather
-                        # than waiting for the timer.
-                        self._service.signal()
-                    except Exception:  # noqa: BLE001
-                        # Next iteration retries with a longer backoff.
-                        pass
+                self._recover_from(error)
+            except Exception as error:  # noqa: BLE001
+                # NOT a transport failure — a bug in this loop or in the
+                # service callback. Kept separate on purpose: it is logged with
+                # a traceback at ERROR *every* time, never budgeted down to
+                # DEBUG the way a flapping connection is, because it will not
+                # fix itself and must not hide inside reconnect noise.
+                #
+                # Still non-fatal. Letting it kill the thread would drop
+                # sub-second convergence while `index_ready` stays 1 — the
+                # silent half-dead state this module exists to avoid.
+                logger.exception(
+                    "automations: unexpected error in the reload subscriber; "
+                    "recovering, but this is a bug, not a network fault"
+                )
+                self._recover_from(error)
         automation_pubsub_connected.set(0)
+
+    def _recover_from(self, error: Exception) -> None:
+        """Count the failure, back off, and re-subscribe."""
+        self._failures += 1
+        automation_pubsub_reconnects_total.inc()
+        automation_pubsub_connected.set(0)
+        delay = self._backoff_seconds()
+        if self._failures <= 3:
+            logger.error(
+                "automations: reload subscriber lost (%s); retrying in %ss",
+                _redacted(error, self._url),
+                delay,
+            )
+        else:
+            logger.debug(
+                "automations: reload subscriber still down (%s)",
+                _redacted(error, self._url),
+            )
+        self._close()
+        # stop_event.wait, never time.sleep -- otherwise shutdown stalls
+        # for the whole backoff.
+        self._stop.wait(delay)
+        if self._stop.is_set():
+            return
+        try:
+            self._subscribe()
+            # Reload-on-reconnect: a publish during the outage is gone (pub/sub
+            # is at-most-once), so converge now rather than waiting for the
+            # timer.
+            self._service.signal()
+        except Exception:  # noqa: BLE001 - the retry path must never raise onward
+            # Next iteration retries with a longer backoff.
+            logger.debug("automations: re-subscribe attempt failed", exc_info=True)
+
+
+_TRANSPORT_ERRORS: tuple[type[BaseException], ...] | None = None
+
+
+def _transport_error_types() -> tuple[type[BaseException], ...]:
+    """The failures a long-lived subscription is *expected* to hit.
+
+    `redis.RedisError` covers the client's own connection/timeout/protocol
+    errors; `OSError` covers the raw socket failures that can surface from
+    underneath it. Everything outside this tuple is a bug, and the caller
+    treats it differently.
+
+    Resolved lazily and cached: redis is imported lazily throughout this module
+    so a missing wheel degrades to "no pub/sub" instead of breaking the Kafka
+    consumer. If it is unavailable, OSError alone still classifies the socket
+    failures correctly.
+    """
+    global _TRANSPORT_ERRORS
+    if _TRANSPORT_ERRORS is None:
+        try:
+            import redis.exceptions as redis_exceptions
+
+            _TRANSPORT_ERRORS = (redis_exceptions.RedisError, OSError)
+        except Exception:  # pragma: no cover - redis is a hard dependency
+            _TRANSPORT_ERRORS = (OSError,)
+    return _TRANSPORT_ERRORS
 
 
 def _is_idle_timeout(error: Exception) -> bool:

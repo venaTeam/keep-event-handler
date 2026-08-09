@@ -355,3 +355,74 @@ def test_connection_errors_are_redacted_before_logging(service, caplog):
         subscriber._url,
     )
     assert "hunter2" not in message
+
+
+# --------------------------------------------------------------------------
+# Transport failure vs. bug: handled by different branches on purpose
+# --------------------------------------------------------------------------
+
+
+def test_transport_error_types_include_redis_and_socket_errors():
+    from src.bl.automations.pubsub import _transport_error_types
+
+    types = _transport_error_types()
+    assert redis_exceptions.RedisError in types
+    assert OSError in types
+    # A plain bug must NOT be classified as a transport failure — that is the
+    # whole point of the split.
+    assert not isinstance(ValueError("boom"), types)
+
+
+@pytest.mark.timeout(15)
+def test_an_unexpected_error_is_logged_as_a_bug_and_the_listener_survives(caplog):
+    """A non-transport error is a bug in our own loop.
+
+    It must be logged with a traceback at ERROR *and* must not kill the
+    thread: a dead listener leaves index_ready at 1 while sub-second
+    convergence is silently gone.
+    """
+
+    class ExplodingService:
+        def __init__(self):
+            self.calls = 0
+            self.recovered = threading.Event()
+
+        def signal(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("bug in the callback")
+            self.recovered.set()
+
+    service = ExplodingService()
+    # First read delivers a message (-> signal raises ValueError), the loop
+    # recovers and re-subscribes, which signals again.
+    client = FakeClient(script=[{"type": "message", "data": b"x"}])
+    subscriber = ReloadSubscriber(service, url="redis://x", client_factory=lambda: client)
+
+    with caplog.at_level("ERROR", logger="src.bl.automations.pubsub"):
+        subscriber.start()
+        recovered = service.recovered.wait(timeout=10)
+        subscriber.stop(deadline=5)
+
+    assert recovered, "the listener died on an unexpected error"
+    assert any(
+        "bug, not a network fault" in record.message for record in caplog.records
+    ), "an unexpected error must be distinguishable from a reconnect"
+
+
+@pytest.mark.timeout(15)
+def test_a_transport_error_is_not_logged_as_a_bug(service, caplog):
+    """The reconnect path must stay quiet about bugs it hasn't found."""
+    client = FakeClient(
+        script=[redis_exceptions.ConnectionError("gone"), {"type": "message", "data": b"x"}]
+    )
+    subscriber = ReloadSubscriber(service, url="redis://x", client_factory=lambda: client)
+
+    with caplog.at_level("ERROR", logger="src.bl.automations.pubsub"):
+        subscriber.start()
+        service.event.wait(timeout=10)
+        subscriber.stop(deadline=5)
+
+    assert not any(
+        "bug, not a network fault" in record.message for record in caplog.records
+    )
