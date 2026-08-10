@@ -75,7 +75,7 @@ through `src/config/consts.py`.
 | `MESSAGING_TYPE` | `KAFKA` | The consumer hard-exits on anything else. |
 | `HEALTH_CHECK_PORT` / `PROMETHEUS_METRICS_PORT` | `8092` / `8094` | See Ports above. |
 | `KAFKA_PARTITION_ASSIGNMENT_STRATEGY` | `cooperative-sticky` | Eager and cooperative members cannot coexist in one group, so **changing this needs a full-group restart** (scale to 0, then up) — never a rolling update. `range,roundrobin` is the rollback lever. |
-| `KEEP_CONSUMER_*_MAX_POLL_GAP_SECONDS` | `90` (ready) / `300` (live) | Probe thresholds. The liveness gap must stay above the retry budget (`0.8 × max.poll.interval.ms`) or Kubernetes kills pods that are retrying as designed. |
+| `KEEP_CONSUMER_*_MAX_POLL_GAP_SECONDS` | `90` (ready) / derived (live) | Probe thresholds. The liveness default is `max(300, 0.8 × max.poll.interval.ms + 60s)` — never below the retry budget, so it cannot kill a pod that is retrying as designed. Lowering `KAFKA_MAX_POLL_INTERVAL_MS` tightens it automatically. |
 | `KEEP_CONSUMER_READY_REQUIRE_PARTITIONS` | `true` | Set `false` when the topic has fewer partitions than replicas — otherwise a surge pod Kafka gives nothing never goes Ready and the rollout stalls. |
 | `KEEP_SCHEMA_EXPECTED_REVISION` | *(unset)* | Exact alembic revision to wait for. Without it the wait accepts a *quiescent* head, and a **down** gateway's stale head is perfectly quiescent. |
 | `KEEP_PROVISIONING_FATAL` | `false` | Provisioning failures are logged and stepped over. `true` restores fail-fast for CI, where a bad provider file should fail loudly. |

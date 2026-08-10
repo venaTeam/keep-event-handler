@@ -34,20 +34,24 @@ Today's liveness kills at ≈ 90 s (`initialDelay 60` + `failureThreshold 3` ×
 `period 10`) while a schema wait can legitimately run far longer. The
 startupProbe is what suspends liveness until startup finishes.
 
-**Liveness must stay loose.** `/livez` fails after
-`KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS` (default 300 s) without a poll, while
-the retry budget permits `0.8 × max.poll.interval.ms` of legitimate
-non-polling. At production's `KAFKA_MAX_POLL_INTERVAL_MS=6000000` that is **80
-minutes** — far beyond 300 s, so the two values contradict each other.
+**Liveness stays loose by construction.** `/livez` fails after
+`KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS`, whose **default is derived**:
+`max(300, 0.8 × max.poll.interval.ms + 60s)` — i.e. never below the retry
+budget, which is how long a batch may legitimately stay off the poll loop. At
+production's `KAFKA_MAX_POLL_INTERVAL_MS=6000000` the budget is 4800 s, so the
+default lands at 4860 s rather than a fixed 300 s that would kill the pod at ~8
+minutes for working as designed.
 
-> ⚠️ **Decision required before deploy.** Pick one:
-> 1. lower `KAFKA_MAX_POLL_INTERVAL_MS` (the code default is 300000 = 5 min),
->    which also means a wedged consumer is finally evicted; **or**
-> 2. raise `KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS` above
->    `0.8 × max.poll.interval.ms`.
->
-> Shipping neither leaves liveness able to kill pods that are retrying exactly
-> as designed — which amplifies the rebalance storm this change exists to stop.
+Consequences for the chart:
+
+- **Nothing must be set for this to be safe.** An explicit override is still
+  honoured, and one *below* the budget logs a startup warning.
+- **Lowering `KAFKA_MAX_POLL_INTERVAL_MS` tightens liveness automatically** —
+  the correct order of operations (poll interval first, liveness second, never
+  the reverse). At 300000 the threshold becomes 300 s.
+- Until that happens, liveness is deliberately near-useless as a wedge
+  detector: it catches a hung loop in ~81 minutes, not 8. Readiness (90 s) is
+  the fast signal, and it costs only rollout credit, never a restart.
 
 ## 2. Group migration for cooperative-sticky
 
@@ -105,7 +109,7 @@ must be set for the code to work. They exist for tuning and rollback.
 | `KAFKA_PARTITION_ASSIGNMENT_STRATEGY` | **`cooperative-sticky`** | Set `range,roundrobin` for the old behaviour. Changing it either way needs a full-group restart |
 | `KAFKA_HEARTBEAT_INTERVAL_MS` | `min(session//3, 3000)` | Now actually emitted; previously read by nothing. Only bites below ~9 s session timeout |
 | `KEEP_CONSUMER_READY_MAX_POLL_GAP_SECONDS` | `90` | Readiness fails if the last poll is older than this |
-| `KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS` | `300` | Liveness fails if the loop stops polling this long. Keep it above the retry budget |
+| `KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS` | `max(300, 0.8 × max.poll.interval.ms + 60s)` | Liveness fails if the loop stops polling this long. Derived so it can never sit below the retry budget; an override that does is honoured but warned about |
 | `KEEP_CONSUMER_REVOKE_GRACE_SECONDS` | `45` | Readiness stays green this long after a revoke, so a rebalance doesn't flip the group NotReady |
 | `KEEP_CONSUMER_READY_REQUIRE_PARTITIONS` | `true` | Set **false** if the topic has ≤ replicas partitions — see prereq A |
 | `KEEP_SCHEMA_EXPECTED_REVISION` | *(unset)* | Exact alembic revision to wait for. Closes the "gateway is down, so its head is trivially stable" hole |

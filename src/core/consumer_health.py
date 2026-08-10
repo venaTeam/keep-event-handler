@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Iterable, Optional, Tuple
 
 from src.config.config import config
+from src.config.consts import KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +37,53 @@ READY_MAX_POLL_GAP_SECONDS = config(
     "KEEP_CONSUMER_READY_MAX_POLL_GAP_SECONDS", default=90, cast=int
 )
 
-# Liveness fails if the loop stops polling for this long. MUST stay above the
-# retry budget (KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR * max.poll.interval.ms),
-# or Kubernetes will kill pods that are retrying exactly as designed.
+# Liveness fails if the loop stops polling for this long.
+#
+# The default is DERIVED, not fixed, because the two numbers it sits between
+# are configured independently and contradict each other by default:
+# RetryBudget lets a batch legitimately stay off the poll loop for
+# KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR * max.poll.interval.ms -- 80 minutes at a
+# production max.poll.interval.ms of 6000000 -- while a fixed 300s liveness
+# would kill that pod at ~8 minutes. Killing a consumer that is retrying
+# exactly as designed causes the rebalance it then has to recover from, under
+# the load that triggered the retries in the first place.
+#
+# So: never below the retry budget plus a margin, never below a 300s floor.
+# Lowering max.poll.interval.ms tightens this automatically -- which is the
+# correct order of operations (tighten the poll interval first, THEN liveness,
+# never the reverse).
+LIVE_GAP_FLOOR_SECONDS = 300
+LIVE_GAP_MARGIN_SECONDS = 60
+_MAX_POLL_INTERVAL_MS = config("KAFKA_MAX_POLL_INTERVAL_MS", default=300000, cast=int)
+RETRY_BUDGET_SECONDS = (
+    _MAX_POLL_INTERVAL_MS / 1000.0
+) * KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR
+
+
+def default_live_max_poll_gap() -> int:
+    return int(max(LIVE_GAP_FLOOR_SECONDS, RETRY_BUDGET_SECONDS + LIVE_GAP_MARGIN_SECONDS))
+
+
 LIVE_MAX_POLL_GAP_SECONDS = config(
-    "KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS", default=300, cast=int
+    "KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS",
+    default=default_live_max_poll_gap(),
+    cast=int,
 )
+
+if LIVE_MAX_POLL_GAP_SECONDS < RETRY_BUDGET_SECONDS:
+    # An explicit override below the budget is the misconfiguration this
+    # derivation exists to prevent, so say so loudly rather than silently
+    # honouring it.
+    logger.warning(
+        "KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS=%s is below the retry budget "
+        "of %.0fs (%.0f%% of max.poll.interval.ms=%s). Liveness can kill pods "
+        "that are retrying as designed -- lower KAFKA_MAX_POLL_INTERVAL_MS "
+        "instead, or raise this above the budget.",
+        LIVE_MAX_POLL_GAP_SECONDS,
+        RETRY_BUDGET_SECONDS,
+        KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR * 100,
+        _MAX_POLL_INTERVAL_MS,
+    )
 
 # Readiness stays green this long after a revoke, so an ordinary rebalance
 # doesn't flip the whole group NotReady at once and stall a maxUnavailable: 0
