@@ -38,6 +38,13 @@ from src.models.event_dto import EventDTO
 logger = logging.getLogger(__name__)
 
 
+class ShutdownRequested(Exception):
+    """Raised when SIGTERM arrives while a message is still being retried. The
+    message is left UNRESOLVED so its offset is not committed and Kafka
+    redelivers it — never routed to the terminal sink, because nothing is wrong
+    with it."""
+
+
 class PoisonMessageError(Exception):
     """A message that can never succeed on retry (bad payload, unknown type,
     validation failure, or a client/4xx error from the gateway). Routed to the
@@ -95,11 +102,15 @@ class RetryBudget:
         safety_factor: float = KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR,
         max_sleep_seconds: int = KAFKA_RETRY_MAX_SLEEP_SECONDS,
         clock=time.monotonic,
+        shutdown_event: Optional[threading.Event] = None,
     ):
         self._budget_seconds = (max_poll_interval_ms / 1000.0) * safety_factor
         self._max_sleep_seconds = max_sleep_seconds
         self._clock = clock
         self._started_at = clock()
+        # When set, a backoff sleep wakes immediately instead of sitting out
+        # its full delay inside the termination grace period.
+        self._shutdown_event = shutdown_event
 
     def reset(self):
         """Call right after a successful poll: the budget is measured from the
@@ -117,13 +128,24 @@ class RetryBudget:
 
     def sleep_for(self, attempt: int) -> float:
         """Bounded backoff for this attempt, never overrunning the remaining
-        budget. Returns the seconds slept."""
+        budget. Interrupted by shutdown. Returns the seconds actually slept."""
         backoff = min(2 ** attempt, self._max_sleep_seconds)
         # Never sleep past the budget deadline.
         backoff = max(0.0, min(backoff, self.remaining()))
-        if backoff > 0:
-            time.sleep(backoff)
+        if backoff <= 0:
+            return 0.0
+        if self._shutdown_event is not None:
+            # A 30s backoff started just before SIGTERM would otherwise eat the
+            # whole grace period and get the pod SIGKILLed -- which skips
+            # LeaveGroup and strands the partitions for session.timeout.ms.
+            if self._shutdown_event.wait(backoff):
+                return 0.0  # woke early on shutdown
+            return backoff
+        time.sleep(backoff)
         return backoff
+
+    def shutting_down(self) -> bool:
+        return self._shutdown_event is not None and self._shutdown_event.is_set()
 
 
 class EventConsumer(abc.ABC):
@@ -310,7 +332,9 @@ class KafkaEventConsumer(EventConsumer):
                 # Fresh batch-wide retry budget measured from this poll, so
                 # accumulated retry sleep across the batch can't overrun the
                 # poll interval and trigger a rebalance.
-                budget = RetryBudget(self._max_poll_interval)
+                budget = RetryBudget(
+                    self._max_poll_interval, shutdown_event=self._shutdown_event
+                )
 
                 self._process_batch(records, budget)
 
@@ -362,10 +386,30 @@ class KafkaEventConsumer(EventConsumer):
             key = (msg.topic(), msg.partition())
             partitions.setdefault(key, []).append(msg)
 
+        shutting_down = False
         for key, partition_msgs in partitions.items():
             partition_msgs.sort(key=lambda m: m.offset())
             commit_boundary = None  # last contiguous resolved message
             for msg in partition_msgs:
+                # Shutdown is checked per RECORD, not per batch. A 100-message
+                # batch under DB contention can outlive the termination grace
+                # period; a SIGKILLed consumer never sends LeaveGroup, so its
+                # partitions stay unowned for session.timeout.ms. Stop taking
+                # new work, commit what is already resolved, and let _cleanup()
+                # close the consumer so the group leave is prompt.
+                if self._shutdown_event.is_set():
+                    self.logger.info(
+                        "Shutdown requested mid-batch; stopping after the "
+                        "resolved prefix",
+                        extra={
+                            "topic": msg.topic(),
+                            "partition": msg.partition(),
+                            "offset": msg.offset(),
+                        },
+                    )
+                    shutting_down = True
+                    break
+
                 should_commit = self._process_message(msg, budget)
                 if should_commit:
                     commit_boundary = msg
@@ -385,7 +429,14 @@ class KafkaEventConsumer(EventConsumer):
             if commit_boundary is not None:
                 # commit(message=...) commits boundary.offset()+1 for its
                 # partition — i.e. the highest contiguous processed offset.
+                # The `message=` form commits that offset directly and never
+                # touches the offset store (see enable.auto.offset.store).
                 self._consumer.commit(commit_boundary, asynchronous=False)
+
+            if shutting_down:
+                # Every remaining partition's records are simply not committed,
+                # so they are redelivered. At-least-once is preserved.
+                break
 
     def _process_message(self, msg, budget: "RetryBudget") -> bool:
         """Process a single Kafka message.
@@ -446,6 +497,13 @@ class KafkaEventConsumer(EventConsumer):
             events_out_counter.inc()
             self.logger.debug(f"Successfully processed message: {trace_id}")
             return True
+
+        except ShutdownRequested:
+            self.logger.info(
+                "Abandoning in-flight message for redelivery "
+                f"(shutdown, trace_id={trace_id})"
+            )
+            return False
 
         except Exception as e:
             # Should not normally reach here — _process_with_retries handles
@@ -510,6 +568,14 @@ class KafkaEventConsumer(EventConsumer):
                     return
 
                 budget.sleep_for(attempt)
+
+                if budget.shutting_down():
+                    # Not a failure of this message — abandon it uncommitted so
+                    # it is redelivered, rather than burning it in the terminal
+                    # sink because the pod happened to be terminating.
+                    raise ShutdownRequested(
+                        "shutdown during retry; leaving the message unresolved"
+                    ) from e
 
     def _record_terminal(self, payload, error: Exception):
         """Terminal sink for a poison / retry-exhausted message: persist the
