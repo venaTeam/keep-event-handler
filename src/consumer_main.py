@@ -18,6 +18,7 @@ Environment Variables:
 """
 import json
 import logging
+import signal
 import sys
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -116,6 +117,36 @@ def create_health_server(port: int):
     return server
 
 
+_startup_shutdown = threading.Event()
+
+
+def _install_startup_signal_handlers():
+    """Handle SIGTERM/SIGINT during the pre-consume phase.
+
+    The schema wait now retries indefinitely, so without this a pod told to
+    terminate while the gateway is still migrating would ignore the signal
+    until the kubelet SIGKILLed it. KafkaEventConsumer.start() replaces these
+    handlers with its own once the consume loop owns the process.
+
+    The db import is deferred: importing it at module scope would build the DB
+    engine before the probe server binds, which is the ordering this file
+    exists to avoid.
+    """
+
+    def handler(signum, frame):
+        logger.info("Received signal %s during startup; aborting startup", signum)
+        _startup_shutdown.set()
+        try:
+            from src.core.db.db_on_start import request_schema_wait_abort
+
+            request_schema_wait_abort()
+        except Exception:
+            logger.exception("Failed to abort the schema wait")
+
+    signal.signal(signal.SIGTERM, handler)
+    signal.signal(signal.SIGINT, handler)
+
+
 def _start_trigger_index_safely():
     """Start the automations trigger index without ever risking the consumer.
 
@@ -181,12 +212,20 @@ def main():
         # before the internal schema-wait timeout could even be reached.
         # Bound first, the pod answers "alive, not ready" and the startupProbe
         # budget is what decides whether to give up on it.
+        _install_startup_signal_handlers()
         start_metrics_server(metrics_port)
         create_health_server(health_port)
 
         # Step 2: Initialize services (DB, etc.) -- blocking, and slow by
         # design while the gateway's migrations settle.
         init_services()
+
+        if _startup_shutdown.is_set():
+            logger.info(
+                "Shutdown requested during startup; exiting before the "
+                "consume loop"
+            )
+            return
 
         # Step 3: Start the automations trigger index (non-blocking).
         # After init_services because hydration reads the shared schema, and
