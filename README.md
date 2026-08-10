@@ -18,6 +18,25 @@ Two entrypoints:
 | 8092 | health check |
 | 8094 | Prometheus metrics |
 
+### Probes
+
+The health server binds **before** the blocking startup work, so a pod waiting
+on the gateway's schema reports "alive, not ready" instead of refusing
+connections.
+
+| Path | Probe | Green when |
+|---|---|---|
+| `/readyz` | readiness | consuming **and** partitions assigned (or revoked inside the grace window) **and** last poll recent |
+| `/livez`, `/`, `/health`, `/healthz`, `/ready` | liveness | the consume loop is polling; always green while starting or draining |
+
+`/`, `/health`, `/healthz` and `/ready` are legacy aliases kept so the image and
+the chart's probe paths can ship independently — **image first, chart with it or
+after it, never before**. `/ready` stays on the liveness side despite its name:
+it answered an unconditional 200 before, so an existing probe pointing at it
+must keep passing during the schema wait. Deployment details, required
+chart changes and the full-group restart runbook:
+[`docs/deploy/ingestion-resilience.md`](docs/deploy/ingestion-resilience.md).
+
 These are the code defaults *and* the container `ENV`, and they must stay in
 agreement — `config()` reads `os.environ` first, so a Docker `ENV` silently wins
 over the code default. `tests/automations/test_container_ports.py` guards this.
@@ -58,6 +77,16 @@ through `src/config/consts.py`.
 | `DATABASE_CONNECTION_STRING` | `postgresql://keep:keep@localhost:5432/keep` | The shared `keep` database. The automations trigger index reads through this same engine — there is no second DSN. |
 | `MESSAGING_TYPE` | `KAFKA` | The consumer hard-exits on anything else. |
 | `HEALTH_CHECK_PORT` / `PROMETHEUS_METRICS_PORT` | `8092` / `8094` | See Ports above. |
+| `KAFKA_PARTITION_ASSIGNMENT_STRATEGY` | `cooperative-sticky` | Eager and cooperative members cannot coexist in one group, so **changing this needs a full-group restart** (scale to 0, then up) — never a rolling update. `range,roundrobin` is the rollback lever. |
+| `KEEP_CONSUMER_*_MAX_POLL_GAP_SECONDS` | `90` (ready) / derived (live) | Probe thresholds. The liveness default is `max(300, 0.8 × max.poll.interval.ms + 60s)` — never below the retry budget, so it cannot kill a pod that is retrying as designed. Lowering `KAFKA_MAX_POLL_INTERVAL_MS` tightens it automatically. |
+| `KEEP_CONSUMER_READY_REQUIRE_PARTITIONS` | `true` | Set `false` when partitions ≤ replicas — with `maxSurge: 1` the rollout runs `replicas + 1` pods, Kafka gives the extra one no partitions, and it would never go Ready. |
+| `KEEP_SCHEMA_EXPECTED_REVISION` | *(unset)* | Exact alembic revision to wait for. Without it the wait accepts a *quiescent* head, and a **down** gateway's stale head is perfectly quiescent. |
+| `KEEP_PROVISIONING_FATAL` | `false` | Provisioning failures are logged and stepped over. `true` restores fail-fast for CI, where a bad provider file should fail loudly. |
+
+The remaining resilience knobs (`KEEP_SCHEMA_REQUIRED_TABLES`,
+`KEEP_SCHEMA_RETRY_BACKOFF_*`, `KEEP_CONSUMER_REVOKE_GRACE_SECONDS`,
+`KAFKA_HEARTBEAT_INTERVAL_MS`) are documented in
+[`docs/deploy/ingestion-resilience.md`](docs/deploy/ingestion-resilience.md).
 
 ### Automations trigger index
 

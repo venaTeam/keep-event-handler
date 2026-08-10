@@ -21,7 +21,7 @@ def test_start_is_called_between_health_server_and_consume_loop():
     # rindex: the first occurrence is the `def`, the last is the call in main().
     start_at = source.rindex("_start_trigger_index_safely()")
     health_at = source.index("create_health_server(health_port)")
-    consumer_at = source.index("consumer = KafkaEventConsumer()")
+    consumer_at = source.index("consumer = KafkaEventConsumer(")
     assert health_at < start_at < consumer_at
 
 
