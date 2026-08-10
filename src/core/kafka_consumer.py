@@ -243,21 +243,24 @@ class KafkaEventConsumer(EventConsumer):
         return max(1, min(configured, ceiling))
 
     def _build_consumer_config(self) -> dict:
-        """Build confluent-kafka consumer configuration."""
+        """Build confluent-kafka consumer configuration.
+
+        Both offset keys are load-bearing and easy to misread. librdkafka has
+        two stages: STORE an offset locally, then COMMIT the store.
+        `enable.auto.commit=False` only disables the background committer --
+        the store still auto-fills the moment a record is DELIVERED to the
+        application, not when it is processed, so any argument-less `commit()`
+        flushes offsets for records that were never handled. Keeping the store
+        empty (`enable.auto.offset.store=False`) makes that leak unreachable;
+        `_process_batch` commits with `commit(message=...)`, which addresses
+        offsets directly and never reads the store.
+        """
         conf = {
             "bootstrap.servers": self.bootstrap_servers,
             "group.id": self.group_id,
             "auto.offset.reset": "earliest",
-            "enable.auto.commit": False,  # Manual commit after processing
-            # librdkafka has two stages: STORE an offset locally, then COMMIT
-            # the store. enable.auto.commit=False only disables the background
-            # committer -- the store still auto-fills the moment a record is
-            # DELIVERED to the application, not when it is processed. Any
-            # argument-less commit() then flushes offsets for records that were
-            # never handled. Keeping the store empty makes that leak
-            # unreachable; _process_batch commits with commit(message=...),
-            # which addresses offsets directly and never reads the store.
-            "enable.auto.offset.store": False,
+            "enable.auto.commit": False,  # manual commit after processing
+            "enable.auto.offset.store": False,  # see docstring: no implicit commits
             "partition.assignment.strategy": self._assignment_strategy,
             "session.timeout.ms": self._session_timeout,
             "heartbeat.interval.ms": self._heartbeat_interval,

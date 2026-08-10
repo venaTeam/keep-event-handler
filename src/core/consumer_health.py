@@ -37,31 +37,54 @@ READY_MAX_POLL_GAP_SECONDS = config(
     "KEEP_CONSUMER_READY_MAX_POLL_GAP_SECONDS", default=90, cast=int
 )
 
-# Liveness fails if the loop stops polling for this long.
-#
-# The default is DERIVED, not fixed, because the two numbers it sits between
-# are configured independently and contradict each other by default:
-# RetryBudget lets a batch legitimately stay off the poll loop for
-# KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR * max.poll.interval.ms -- 80 minutes at a
-# production max.poll.interval.ms of 6000000 -- while a fixed 300s liveness
-# would kill that pod at ~8 minutes. Killing a consumer that is retrying
-# exactly as designed causes the rebalance it then has to recover from, under
-# the load that triggered the retries in the first place.
-#
-# So: never below the retry budget plus a margin, never below a 300s floor.
-# Lowering max.poll.interval.ms tightens this automatically -- which is the
-# correct order of operations (tighten the poll interval first, THEN liveness,
-# never the reverse).
 LIVE_GAP_FLOOR_SECONDS = 300
 LIVE_GAP_MARGIN_SECONDS = 60
 _MAX_POLL_INTERVAL_MS = config("KAFKA_MAX_POLL_INTERVAL_MS", default=300000, cast=int)
+
+# How long a batch may legitimately stay off the poll loop, per RetryBudget.
 RETRY_BUDGET_SECONDS = (
     _MAX_POLL_INTERVAL_MS / 1000.0
 ) * KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR
 
 
 def default_live_max_poll_gap() -> int:
+    """Seconds without a poll before liveness fails.
+
+    Derived rather than fixed, because the two numbers it sits between are
+    configured independently and contradict each other by default: RetryBudget
+    lets a batch legitimately stay off the poll loop for
+    ``KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR * max.poll.interval.ms`` -- 80 minutes
+    at a production ``max.poll.interval.ms`` of 6000000 -- while a fixed 300s
+    liveness would kill that pod at ~8 minutes. Killing a consumer that is
+    retrying exactly as designed causes the rebalance it then has to recover
+    from, under the load that triggered the retries in the first place.
+
+    So: never below the retry budget plus a margin, never below a 300s floor.
+    Lowering ``max.poll.interval.ms`` tightens this automatically, which is the
+    correct order of operations -- poll interval first, THEN liveness, never
+    the reverse.
+    """
     return int(max(LIVE_GAP_FLOOR_SECONDS, RETRY_BUDGET_SECONDS + LIVE_GAP_MARGIN_SECONDS))
+
+
+def _warn_if_live_gap_below_budget(live_max_poll_gap: int) -> None:
+    """Complain about an explicit override below the retry budget.
+
+    That override is the exact misconfiguration ``default_live_max_poll_gap``
+    exists to prevent, so it is honoured but never silently.
+    """
+    if live_max_poll_gap >= RETRY_BUDGET_SECONDS:
+        return
+    logger.warning(
+        "KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS=%s is below the retry budget "
+        "of %.0fs (%.0f%% of max.poll.interval.ms=%s). Liveness can kill pods "
+        "that are retrying as designed -- lower KAFKA_MAX_POLL_INTERVAL_MS "
+        "instead, or raise this above the budget.",
+        live_max_poll_gap,
+        RETRY_BUDGET_SECONDS,
+        KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR * 100,
+        _MAX_POLL_INTERVAL_MS,
+    )
 
 
 LIVE_MAX_POLL_GAP_SECONDS = config(
@@ -69,21 +92,7 @@ LIVE_MAX_POLL_GAP_SECONDS = config(
     default=default_live_max_poll_gap(),
     cast=int,
 )
-
-if LIVE_MAX_POLL_GAP_SECONDS < RETRY_BUDGET_SECONDS:
-    # An explicit override below the budget is the misconfiguration this
-    # derivation exists to prevent, so say so loudly rather than silently
-    # honouring it.
-    logger.warning(
-        "KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS=%s is below the retry budget "
-        "of %.0fs (%.0f%% of max.poll.interval.ms=%s). Liveness can kill pods "
-        "that are retrying as designed -- lower KAFKA_MAX_POLL_INTERVAL_MS "
-        "instead, or raise this above the budget.",
-        LIVE_MAX_POLL_GAP_SECONDS,
-        RETRY_BUDGET_SECONDS,
-        KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR * 100,
-        _MAX_POLL_INTERVAL_MS,
-    )
+_warn_if_live_gap_below_budget(LIVE_MAX_POLL_GAP_SECONDS)
 
 # Readiness stays green this long after a revoke, so an ordinary rebalance
 # doesn't flip the whole group NotReady at once and stall a maxUnavailable: 0
