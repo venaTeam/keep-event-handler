@@ -195,6 +195,16 @@ class KafkaEventConsumer(EventConsumer):
         self._session_timeout = int(config("KAFKA_SESSION_TIMEOUT_MS", default="45000"))
         self._max_poll_interval = int(config("KAFKA_MAX_POLL_INTERVAL_MS", default="300000"))
         self._heartbeat_interval = self._resolve_heartbeat_interval()
+        # Eager (`range,roundrobin`) surrenders EVERY member's partitions on
+        # any membership change, so a 15-pod rollout stops the whole group ~30
+        # times. Cooperative revokes only what actually moves.
+        #
+        # Changing this value -- in either direction -- requires a full-group
+        # restart: eager and cooperative members cannot coexist in one group,
+        # so deploying this default IS the migration. Never roll it.
+        self._assignment_strategy = config(
+            "KAFKA_PARTITION_ASSIGNMENT_STRATEGY", default="cooperative-sticky"
+        )
 
         # Security config
         self.security_protocol = config("KAFKA_SECURITY_PROTOCOL", default="PLAINTEXT")
@@ -243,6 +253,7 @@ class KafkaEventConsumer(EventConsumer):
             # unreachable; _process_batch commits with commit(message=...),
             # which addresses offsets directly and never reads the store.
             "enable.auto.offset.store": False,
+            "partition.assignment.strategy": self._assignment_strategy,
             "session.timeout.ms": self._session_timeout,
             "heartbeat.interval.ms": self._heartbeat_interval,
             "max.poll.interval.ms": self._max_poll_interval,
@@ -289,7 +300,12 @@ class KafkaEventConsumer(EventConsumer):
         self._consumer.subscribe(
             [self.topic],
             on_assign=self._on_assign,
-            on_revoke=self._on_revoke
+            on_revoke=self._on_revoke,
+            # Registered explicitly: without it confluent-kafka routes lost
+            # partitions to on_revoke as an ordinary rebalance, and they must
+            # NOT be treated as one -- they may already be owned by another
+            # member.
+            on_lost=self._on_lost,
         )
         self._running = True
 
@@ -309,10 +325,41 @@ class KafkaEventConsumer(EventConsumer):
         self._shutdown_event.set()
         consumer_health.set_phase(ConsumerPhase.STOPPING)
 
+    @property
+    def _is_cooperative(self) -> bool:
+        return "cooperative" in (self._assignment_strategy or "").lower()
+
+    def _refresh_assignment(self, consumer, fallback=None):
+        """Record the FULL current assignment from the consumer itself.
+
+        Cooperative callbacks deliver DELTAS, so recording the callback
+        argument verbatim would read a partial revoke as "I own nothing" and
+        flip the pod NotReady mid-rebalance — which, with maxUnavailable: 0,
+        stalls the rollout.
+        """
+        try:
+            current = list(consumer.assignment())
+        except Exception:
+            self.logger.warning(
+                "Could not read consumer.assignment(); falling back to the "
+                "callback partitions",
+                exc_info=True,
+            )
+            current = list(fallback or [])
+        consumer_health.set_assignment(current)
+
     def _on_assign(self, consumer, partitions):
         """Callback when partitions are assigned."""
         self.logger.info(f"Partitions assigned: {[p.partition for p in partitions]}")
-        consumer_health.set_assignment(partitions)
+        if self._is_cooperative:
+            # Under the cooperative protocol librdkafka does NOT apply the
+            # assignment for us. Skipping this leaves the consumer processing
+            # nothing while looking perfectly healthy.
+            try:
+                consumer.incremental_assign(partitions)
+            except Exception:
+                self.logger.exception("incremental_assign failed")
+        self._refresh_assignment(consumer, fallback=partitions)
 
     def _on_revoke(self, consumer, partitions):
         """Callback when partitions are revoked (rebalance).
@@ -325,11 +372,36 @@ class KafkaEventConsumer(EventConsumer):
         _process_batch.
         """
         self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
+        if self._is_cooperative:
+            try:
+                consumer.incremental_unassign(partitions)
+            except Exception:
+                self.logger.exception("incremental_unassign failed")
         # Readiness keeps a grace window after this, so an ordinary rebalance
         # doesn't flip the whole group NotReady and stall a maxUnavailable: 0
         # rollout.
         consumer_health.mark_revoke()
-        consumer_health.set_assignment([])
+        self._refresh_assignment(consumer, fallback=[])
+
+    def _on_lost(self, consumer, partitions):
+        """Partitions lost without a clean revoke (session expiry, fenced
+        member).
+
+        Never commits: a lost partition may already be owned by another member,
+        so committing here would write an offset for records that member is
+        re-processing. Anything unprocessed is redelivered to whoever owns it.
+        """
+        self.logger.warning(
+            f"Partitions LOST: {[p.partition for p in partitions]} — "
+            "not committing; they may already be owned by another member"
+        )
+        if self._is_cooperative:
+            try:
+                consumer.incremental_unassign(partitions)
+            except Exception:
+                self.logger.exception("incremental_unassign failed for lost partitions")
+        consumer_health.mark_revoke()
+        self._refresh_assignment(consumer, fallback=[])
 
     def _consume_loop(self):
         """Main consumption loop - blocking and synchronous."""

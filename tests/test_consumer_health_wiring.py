@@ -16,6 +16,10 @@ def clean_health():
 
 def _consumer_with_mock_kafka():
     mock_consumer_instance = MagicMock()
+    # The rebalance callbacks rebuild readiness from consumer.assignment(),
+    # never from the callback argument (the cooperative protocol delivers
+    # deltas), so the mock has to answer it.
+    mock_consumer_instance.assignment.return_value = []
     with patch("src.core.kafka_consumer.Consumer", return_value=mock_consumer_instance):
         consumer = KafkaEventConsumer()
     consumer._consumer = mock_consumer_instance
@@ -73,7 +77,9 @@ def test_assign_makes_the_pod_ready():
 
     assert consumer_health.is_ready()[0] is False  # nothing owned yet
 
-    consumer._on_assign(mock_kafka, [_partition(partition=0), _partition(partition=1)])
+    assigned = [_partition(partition=0), _partition(partition=1)]
+    mock_kafka.assignment.return_value = assigned
+    consumer._on_assign(mock_kafka, assigned)
 
     ready, reason = consumer_health.is_ready()
     assert ready is True
