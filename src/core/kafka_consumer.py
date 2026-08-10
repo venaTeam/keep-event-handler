@@ -194,6 +194,7 @@ class KafkaEventConsumer(EventConsumer):
         self._batch_timeout = KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS
         self._session_timeout = int(config("KAFKA_SESSION_TIMEOUT_MS", default="45000"))
         self._max_poll_interval = int(config("KAFKA_MAX_POLL_INTERVAL_MS", default="300000"))
+        self._heartbeat_interval = self._resolve_heartbeat_interval()
 
         # Security config
         self.security_protocol = config("KAFKA_SECURITY_PROTOCOL", default="PLAINTEXT")
@@ -205,6 +206,26 @@ class KafkaEventConsumer(EventConsumer):
         self.ssl_cafile = config("KAFKA_SSL_CAFILE", default=None)
         self.ssl_certfile = config("KAFKA_SSL_CERTFILE", default=None)
         self.ssl_keyfile = config("KAFKA_SSL_KEYFILE", default=None)
+
+    def _resolve_heartbeat_interval(self) -> int:
+        """Heartbeat interval, derived from the session timeout.
+
+        KAFKA_HEARTBEAT_INTERVAL_MS existed as an env var but was never emitted
+        into the consumer config, so setting it did nothing — which mattered
+        because the plan's highest-leverage change is lowering
+        KAFKA_SESSION_TIMEOUT_MS "with a matching heartbeat.interval.ms".
+
+        The broker needs several heartbeats inside one session window, so the
+        value is capped at a third of the session timeout; above ~9s session
+        timeout that lands on librdkafka's own 3s default, and it only starts
+        to matter below it.
+        """
+        ceiling = max(1, self._session_timeout // 3)
+        default = min(ceiling, 3000)
+        configured = int(
+            config("KAFKA_HEARTBEAT_INTERVAL_MS", default=str(default))
+        )
+        return max(1, min(configured, ceiling))
 
     def _build_consumer_config(self) -> dict:
         """Build confluent-kafka consumer configuration."""
@@ -223,6 +244,7 @@ class KafkaEventConsumer(EventConsumer):
             # which addresses offsets directly and never reads the store.
             "enable.auto.offset.store": False,
             "session.timeout.ms": self._session_timeout,
+            "heartbeat.interval.ms": self._heartbeat_interval,
             "max.poll.interval.ms": self._max_poll_interval,
             "security.protocol": self.security_protocol,
         }
