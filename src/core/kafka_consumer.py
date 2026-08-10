@@ -23,6 +23,7 @@ from src.config.consts import (
     KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
 from src.config.config import config
+from src.core.consumer_health import ConsumerPhase, consumer_health
 from src.core.metrics import (
     events_in_counter,
     events_out_counter,
@@ -284,10 +285,12 @@ class KafkaEventConsumer(EventConsumer):
         self.logger.info(f"Received signal {signum}, initiating graceful shutdown...")
         self._running = False
         self._shutdown_event.set()
+        consumer_health.set_phase(ConsumerPhase.STOPPING)
 
     def _on_assign(self, consumer, partitions):
         """Callback when partitions are assigned."""
         self.logger.info(f"Partitions assigned: {[p.partition for p in partitions]}")
+        consumer_health.set_assignment(partitions)
 
     def _on_revoke(self, consumer, partitions):
         """Callback when partitions are revoked (rebalance).
@@ -300,10 +303,16 @@ class KafkaEventConsumer(EventConsumer):
         _process_batch.
         """
         self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
+        # Readiness keeps a grace window after this, so an ordinary rebalance
+        # doesn't flip the whole group NotReady and stall a maxUnavailable: 0
+        # rollout.
+        consumer_health.mark_revoke()
+        consumer_health.set_assignment([])
 
     def _consume_loop(self):
         """Main consumption loop - blocking and synchronous."""
         self.logger.info("Entering consume loop...")
+        consumer_health.set_phase(ConsumerPhase.CONSUMING)
         consecutive_errors = 0
         max_consecutive_errors = 10
 
@@ -312,6 +321,11 @@ class KafkaEventConsumer(EventConsumer):
                 messages = self._consumer.consume(
                     num_messages=self._batch_size, timeout=self._batch_timeout
                 )
+
+                # Every poll return counts, empty ones included: an empty poll
+                # is proof the loop is alive, and requiring records would make
+                # an idle topic look wedged to the liveness probe.
+                consumer_health.mark_poll()
 
                 if not messages:
                     # No messages available this poll.
@@ -612,9 +626,11 @@ class KafkaEventConsumer(EventConsumer):
         self.logger.info("Stopping Kafka consumer...")
         self._running = False
         self._shutdown_event.set()
+        consumer_health.set_phase(ConsumerPhase.STOPPING)
 
     def _cleanup(self):
         """Cleanup resources."""
+        consumer_health.set_phase(ConsumerPhase.STOPPING)
         if self._consumer:
             self.logger.info("Closing Kafka consumer...")
             try:
@@ -622,4 +638,6 @@ class KafkaEventConsumer(EventConsumer):
             except Exception as e:
                 self.logger.error(f"Error closing consumer: {e}")
             self._consumer = None
+        consumer_health.set_assignment([])
+        consumer_health.set_phase(ConsumerPhase.STOPPED)
         self.logger.info("Kafka consumer stopped")
