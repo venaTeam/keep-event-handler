@@ -45,6 +45,23 @@ def test_explicit_heartbeat_is_honoured():
     assert conf["heartbeat.interval.ms"] == 5000
 
 
+@pytest.mark.parametrize("strategy", ["cooperative-sticky", "range,roundrobin"])
+def test_librdkafka_accepts_the_config(strategy):
+    """The mocked tests assert config as a dict of strings; nothing else in the
+    suite hands it to librdkafka. A typo'd key or an invalid strategy would
+    CrashLoop every pod at boot with the whole suite green. Constructing a
+    Consumer validates locally — no broker, no network."""
+    from confluent_kafka import Consumer
+
+    conf = build_config({"KAFKA_PARTITION_ASSIGNMENT_STRATEGY": strategy})
+
+    consumer = Consumer(conf)
+    try:
+        assert consumer is not None
+    finally:
+        consumer.close()
+
+
 def test_heartbeat_is_capped_at_a_third_of_the_session():
     """The broker must see several heartbeats per session window; an
     over-large value would make the session expire between beats."""

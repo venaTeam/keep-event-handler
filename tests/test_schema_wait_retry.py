@@ -60,6 +60,31 @@ def test_ready_when_tables_present_and_head_settles(monkeypatch):
         dbos._wait_for_schema()  # returns = ready
 
 
+def test_required_tables_are_read_from_the_live_inspector(monkeypatch):
+    """_missing_required_tables itself, not a stub of it."""
+    monkeypatch.setattr(dbos, "_SCHEMA_REQUIRED_TABLES", ["tenant", "alert"])
+    inspector = MagicMock()
+    inspector.get_table_names.return_value = ["tenant", "alembic_version"]
+
+    assert dbos._missing_required_tables(inspector) == ["alert"]
+
+    inspector.get_table_names.return_value = ["tenant", "alert", "provider"]
+    assert dbos._missing_required_tables(inspector) == []
+
+
+def test_an_unreachable_db_never_marks_the_schema_ready(monkeypatch):
+    """The except-branch also swallows failures from the required-tables check,
+    so it must not be able to fall through to success."""
+    monkeypatch.setattr(dbos, "_SCHEMA_WAIT_TIMEOUT", 0)
+    monkeypatch.setattr(
+        dbos, "_missing_required_tables", MagicMock(side_effect=OSError("no route"))
+    )
+
+    with patch.object(dbos, "sa_inspect"):
+        with pytest.raises(dbos.SchemaWaitTimeout):
+            dbos._wait_for_schema()
+
+
 # -- expected revision --------------------------------------------------
 
 
@@ -162,7 +187,10 @@ def test_abort_stops_the_wait_promptly(monkeypatch):
     dbos.request_schema_wait_abort()
 
     with patch.object(dbos, "sa_inspect"):
-        dbos._wait_for_schema()  # returns instead of blocking for an hour
+        # Aborts instead of blocking for an hour -- and RAISES, so no caller
+        # can mistake it for "the schema is ready".
+        with pytest.raises(dbos.SchemaWaitAborted):
+            dbos._wait_for_schema()
 
     assert dbos.schema_wait_aborted() is True
 
@@ -173,6 +201,23 @@ def test_abort_stops_the_retry_loop(monkeypatch, postgres_engine):
     )
     dbos.request_schema_wait_abort()
 
-    dbos.migrate_db()  # must not loop forever
+    with pytest.raises(dbos.SchemaWaitAborted):
+        dbos.migrate_db()  # must not loop forever, must not claim success
 
     assert dbos.schema_wait_aborted() is True
+
+
+def test_an_aborted_wait_never_reports_the_schema_ready(
+    monkeypatch, postgres_engine, caplog
+):
+    """The lie that mattered: returning normally let migrate_db log 'DB schema
+    ready' and let startup continue against an unverified database."""
+    monkeypatch.setattr(
+        dbos, "_wait_for_schema", MagicMock(side_effect=dbos.SchemaWaitAborted("x"))
+    )
+
+    with caplog.at_level("INFO"):
+        with pytest.raises(dbos.SchemaWaitAborted):
+            dbos.migrate_db()
+
+    assert "DB schema ready" not in caplog.text

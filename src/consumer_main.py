@@ -21,7 +21,7 @@ import logging
 import signal
 import sys
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dotenv import find_dotenv, load_dotenv
 from prometheus_client import start_http_server
@@ -56,12 +56,18 @@ def start_metrics_server(port: int):
     logger.info(f"Prometheus metrics available at http://0.0.0.0:{port}/metrics")
 
 
-READINESS_PATHS = ("/readyz", "/ready")
-# `/`, `/health` and `/healthz` are LEGACY ALIASES and load-bearing: production
-# probes target `/`. Serving only /livez would 404 there and kill every pod the
-# moment this image landed, with no chart change to revert. They keep the image
-# and the probe-path change independently deployable.
-LIVENESS_PATHS = ("/livez", "/", "/health", "/healthz")
+READINESS_PATHS = ("/readyz",)
+# `/`, `/health`, `/healthz` and `/ready` are LEGACY ALIASES and load-bearing:
+# production probes target `/`. Serving only /livez would 404 there and kill
+# every pod the moment this image landed, with no chart change to revert.
+#
+# `/ready` is deliberately in the LIVENESS set even though its name suggests
+# otherwise. It used to answer an unconditional 200, so any existing probe
+# pointing at it -- including a liveness probe -- must keep passing during the
+# schema wait. Giving it real readiness semantics would kill every pod on an
+# image-only deploy: exactly the outage these aliases exist to prevent. Real
+# readiness is /readyz only.
+LIVENESS_PATHS = ("/livez", "/", "/health", "/healthz", "/ready")
 
 
 def create_health_server(port: int):
@@ -102,11 +108,17 @@ def create_health_server(port: int):
                 self.send_response(404)
                 self.end_headers()
 
+        # A client that opens a socket and never finishes its request line
+        # would otherwise wedge a single-threaded server forever -- and with
+        # both probes served here, that kills a perfectly healthy consumer.
+        timeout = 5
+
         def log_message(self, format, *args):
             # Suppress access logs for health checks
             pass
 
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    server.daemon_threads = True
     
     def serve():
         logger.info(f"Health check server started on port {port}")
@@ -218,7 +230,18 @@ def main():
 
         # Step 2: Initialize services (DB, etc.) -- blocking, and slow by
         # design while the gateway's migrations settle.
-        init_services()
+        try:
+            init_services()
+        except BaseException:
+            if _startup_shutdown.is_set():
+                # An aborted schema wait raises rather than returning, so
+                # nothing downstream runs against an unverified schema. A
+                # deliberate terminate must still exit 0, not look like a crash.
+                logger.info(
+                    "Startup aborted by a shutdown signal; exiting cleanly"
+                )
+                return
+            raise
 
         if _startup_shutdown.is_set():
             logger.info(
@@ -235,8 +258,11 @@ def main():
         # Step 4: Create and start Kafka consumer (blocking)
         from src.core.kafka_consumer import KafkaEventConsumer
         
-        consumer = KafkaEventConsumer()
-        
+        # Hand over the startup event: a SIGTERM that landed between the check
+        # above and the consumer installing its own handlers would otherwise be
+        # lost, and the pod would run until SIGKILL.
+        consumer = KafkaEventConsumer(shutdown_event=_startup_shutdown)
+
         logger.info("Starting Kafka consumer loop (blocking)...")
         consumer.start()  # This blocks until shutdown signal
         

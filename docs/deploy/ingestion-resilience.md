@@ -9,17 +9,22 @@ actively breaks.
 
 ---
 
-## 1. Probe paths — must ship with the image, or before it
+## 1. Probe paths — ship the image FIRST, the chart with it or after it
 
-Production probes target `httpGet /`. The health server still answers `/`,
-`/health`, `/healthz` and `/ready` as aliases precisely so image and chart can
-move independently — but the new probes are the point of the change.
+⚠️ **Never the chart first.** The image running today serves only `/`,
+`/health`, `/healthz` and `/ready`; `/readyz` and `/livez` **404**. A chart
+pointing a startupProbe at `/readyz` against the old image never passes, so
+kubelet kills every pod at `failureThreshold × periodSeconds` — all 15
+CrashLoopBackOff, ingestion down.
+
+The new image satisfies the *old* chart (all four legacy paths still answer, and
+`/ready` keeps its unconditional-200 meaning), so image-first is always safe.
 
 ```yaml
 startupProbe:                              # THE fix for the startup CrashLoop
   httpGet: {path: /readyz, port: health}   # must be /readyz: the health server
   periodSeconds: 10                        # now binds early, so / or /livez
-  failureThreshold: 30                     # would pass in ~1s and gate nothing
+  failureThreshold: 90                     # would pass in ~1s and gate nothing
 readinessProbe:
   httpGet: {path: /readyz, port: health}
   periodSeconds: 10
@@ -33,6 +38,16 @@ livenessProbe:
 Today's liveness kills at ≈ 90 s (`initialDelay 60` + `failureThreshold 3` ×
 `period 10`) while a schema wait can legitimately run far longer. The
 startupProbe is what suspends liveness until startup finishes.
+
+**The startupProbe budget is the real give-up point.** The schema wait retries
+forever in code, but `failureThreshold × periodSeconds` caps it from outside:
+90 × 10 s = **15 minutes**, then the pod is restarted (and tries again). Size
+this above the worst full-sync migration you are willing to wait through — at
+the old `failureThreshold: 30` the cap was 5 minutes, which re-creates the
+CrashLoop at a later threshold on any sync whose migrations run longer.
+
+`KEEP_SCHEMA_WAIT_TIMEOUT` (180 s) also changed meaning: it is now a
+**per-attempt** deadline, not a fatal one.
 
 **Liveness stays loose by construction.** `/livez` fails after
 `KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS`, whose **default is derived**:
@@ -111,7 +126,7 @@ must be set for the code to work. They exist for tuning and rollback.
 | `KEEP_CONSUMER_READY_MAX_POLL_GAP_SECONDS` | `90` | Readiness fails if the last poll is older than this |
 | `KEEP_CONSUMER_LIVE_MAX_POLL_GAP_SECONDS` | `max(300, 0.8 × max.poll.interval.ms + 60s)` | Liveness fails if the loop stops polling this long. Derived so it can never sit below the retry budget; an override that does is honoured but warned about |
 | `KEEP_CONSUMER_REVOKE_GRACE_SECONDS` | `45` | Readiness stays green this long after a revoke, so a rebalance doesn't flip the group NotReady |
-| `KEEP_CONSUMER_READY_REQUIRE_PARTITIONS` | `true` | Set **false** if the topic has ≤ replicas partitions — see prereq A |
+| `KEEP_CONSUMER_READY_REQUIRE_PARTITIONS` | `true` | Set **false** when partitions ≤ replicas — see prereq A |
 | `KEEP_SCHEMA_EXPECTED_REVISION` | *(unset)* | Exact alembic revision to wait for. Closes the "gateway is down, so its head is trivially stable" hole |
 | `KEEP_SCHEMA_REQUIRED_TABLES` | `tenant,provider,alert,lastalert` | Core tables that must exist before the schema counts as ready |
 | `KEEP_SCHEMA_RETRY_BACKOFF_START` / `_MAX` | `5` / `60` | Backoff between schema-wait attempts, now that a timeout retries instead of exiting |
@@ -126,12 +141,19 @@ providers, so a mismatch is destructive in either direction.
 
 ## Prerequisites — answer BEFORE the deploy
 
-**A. Partition count of the alert topic.** With `maxSurge: 1` Kubernetes adds
-one more pod than the current replica count. If the topic has fewer partitions
-than that, Kafka legitimately assigns the surge pod **none** — it is healthy,
-just idle — and readiness never goes green, stalling every future rolling
-update. In that case set `KEEP_CONSUMER_READY_REQUIRE_PARTITIONS=false`, which
-makes readiness mean "joined and polling recently".
+**A. Partition count of the alert topic.** With `maxSurge: 1` Kubernetes runs
+`replicas + 1` pods during a rollout. **If partitions ≤ replicas** (15 and 15 is
+the current shape — this trips), Kafka legitimately assigns the surge pod
+**none** — it is healthy, just idle — readiness never goes green, and every
+future rolling update stalls forever. Set
+`KEEP_CONSUMER_READY_REQUIRE_PARTITIONS=false`, which makes readiness mean
+"joined and polling recently".
+
+**A2. Which paths do the CURRENT probes target?** `grep` every values file. If
+anything targets `/readyz` or `/livez` today it would 404 against the old image
+(see §1). `/ready` is safe either way — it stays an unconditional 200 in the new
+image precisely so an existing liveness probe on it keeps passing during the
+schema wait.
 
 **B. Verify on a dev pod** that `/readyz`, `/livez` and the legacy aliases `/`,
 `/health`, `/healthz`, `/ready` all answer on the new image:

@@ -86,6 +86,32 @@ def test_a_sane_override_is_not_warned_about(caplog):
     assert "below the retry budget" not in caplog.text
 
 
+def test_env_reaches_the_singleton_not_just_the_constants():
+    """The knobs are read at module scope and passed as constructor defaults —
+    a swapped default would leave every explicit-kwarg test green."""
+    ch = reload_health(
+        {
+            "KEEP_CONSUMER_READY_MAX_POLL_GAP_SECONDS": "11",
+            "KEEP_CONSUMER_REVOKE_GRACE_SECONDS": "22",
+        }
+    )
+
+    assert ch.consumer_health._ready_max_poll_gap == 11
+    assert ch.consumer_health._revoke_grace == 22
+    assert ch.consumer_health._live_max_poll_gap == ch.LIVE_MAX_POLL_GAP_SECONDS
+
+
+def test_require_partitions_lever_reaches_the_singleton():
+    """Its failure mode is 'every rolling update hangs forever', so the wiring
+    matters as much as the logic."""
+    ch = reload_health({"KEEP_CONSUMER_READY_REQUIRE_PARTITIONS": "false"})
+    ch.consumer_health.set_phase(ch.ConsumerPhase.CONSUMING)
+    ch.consumer_health.mark_poll()
+
+    assert ch.consumer_health._require_partitions is False
+    assert ch.consumer_health.is_ready()[0] is True  # zero partitions, still ready
+
+
 def test_readiness_gap_is_unaffected():
     """Readiness stays tight on purpose -- a pod deep in retries is genuinely
     not consuming, and going NotReady costs nothing but rollout credit."""

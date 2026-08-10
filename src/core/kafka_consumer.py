@@ -165,11 +165,16 @@ class KafkaEventConsumer(EventConsumer):
     Runs in a blocking loop, suitable for standalone process execution.
     """
 
-    def __init__(self):
+    def __init__(self, shutdown_event: Optional[threading.Event] = None):
         self.logger = logging.getLogger(__name__)
         self._running = False
         self._consumer: Optional[Consumer] = None
-        self._shutdown_event = threading.Event()
+        # The entrypoint hands over its startup event, so a SIGTERM that landed
+        # between the end of init_services() and this consumer installing its
+        # own signal handlers is not lost. Without it that pod runs until the
+        # kubelet SIGKILLs it -- skipping LeaveGroup and stranding partitions
+        # for session.timeout.ms, which is the failure this branch removes.
+        self._shutdown_event = shutdown_event or threading.Event()
 
         # Parse bootstrap servers
         bootstrap_servers = config(
@@ -293,6 +298,14 @@ class KafkaEventConsumer(EventConsumer):
             self.logger.warning("Consumer already running")
             return
 
+        if self._shutdown_event.is_set():
+            self.logger.info(
+                "Shutdown was requested before the consumer started; not "
+                "joining the group"
+            )
+            consumer_health.set_phase(ConsumerPhase.STOPPED)
+            return
+
         conf = self._build_consumer_config()
         self.logger.info(f"Starting Kafka Consumer on topic '{self.topic}' with config: {self._redact_config(conf)}")
 
@@ -309,9 +322,15 @@ class KafkaEventConsumer(EventConsumer):
         )
         self._running = True
 
-        # Register signal handlers for graceful shutdown
+        # Register signal handlers for graceful shutdown. These replace the
+        # entrypoint's startup handlers; anything they already recorded lives
+        # in the shared _shutdown_event, re-checked here to close the handover
+        # window.
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+        if self._shutdown_event.is_set():
+            self.logger.info("Shutdown requested during startup; draining out")
+            self._running = False
 
         try:
             self._consume_loop()
@@ -672,6 +691,14 @@ class KafkaEventConsumer(EventConsumer):
                     return
 
                 # transient
+                if budget.shutting_down():
+                    # Checked BEFORE the exhaustion branches: a SIGTERM landing
+                    # on the last attempt must not burn a healthy record into
+                    # the terminal sink just because the pod is terminating.
+                    raise ShutdownRequested(
+                        "shutdown during retry; leaving the message unresolved"
+                    ) from e
+
                 if attempt == MAX_PROCESSING_RETRIES - 1:
                     self.logger.error(
                         "Retries exhausted (attempt cap) — recording and committing"

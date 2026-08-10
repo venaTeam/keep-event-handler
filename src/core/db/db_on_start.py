@@ -199,6 +199,15 @@ class SchemaWaitTimeout(RuntimeError):
     """One schema-wait attempt timed out. Retryable — never fatal."""
 
 
+class SchemaWaitAborted(RuntimeError):
+    """The wait gave up because shutdown was requested.
+
+    Distinct from success on purpose: returning normally would let migrate_db
+    log "DB schema ready" and let init_services carry on against a schema that
+    was never verified.
+    """
+
+
 def request_schema_wait_abort():
     """Ask an in-flight schema wait to give up (SIGTERM during startup)."""
     _abort_event.set()
@@ -251,8 +260,7 @@ def _wait_for_schema():
     stable = 0
     while True:
         if _abort_event.is_set():
-            logger.info("Schema wait aborted (shutdown requested)")
-            return
+            raise SchemaWaitAborted("schema wait aborted (shutdown requested)")
         try:
             missing = _missing_required_tables(sa_inspect(engine))
             if missing:
@@ -324,8 +332,7 @@ def _wait_for_schema():
             )
         # Interruptible: a SIGTERM during the wait must not sit out the sleep.
         if _abort_event.wait(_SCHEMA_WAIT_INTERVAL):
-            logger.info("Schema wait aborted (shutdown requested)")
-            return
+            raise SchemaWaitAborted("schema wait aborted (shutdown requested)")
 
 
 def migrate_db():
@@ -361,6 +368,8 @@ def migrate_db():
             _wait_for_schema()
             logger.info("DB schema ready")
             return None
+        except SchemaWaitAborted:
+            break
         except SchemaWaitTimeout as exc:
             logger.warning(
                 "Schema not ready yet (%s); retrying in %ss", exc, backoff
@@ -369,5 +378,8 @@ def migrate_db():
                 break
             backoff = min(backoff * 2, _SCHEMA_RETRY_BACKOFF_MAX)
 
+    # Never return normally here: the schema was NOT verified, and the callers
+    # above (provider load, tenant creation, provisioning) would otherwise run
+    # against a database that may not be migrated.
     logger.info("Stopped waiting for the DB schema (shutdown requested)")
-    return None
+    raise SchemaWaitAborted("startup aborted while waiting for the DB schema")

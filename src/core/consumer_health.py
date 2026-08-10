@@ -92,10 +92,10 @@ REVOKE_GRACE_SECONDS = config(
     "KEEP_CONSUMER_REVOKE_GRACE_SECONDS", default=45, cast=int
 )
 
-# Set false when the topic has fewer partitions than replicas: with
-# maxSurge: 1 Kubernetes adds one more pod than there are partitions, Kafka
-# legitimately assigns it none, and a strict "owns >= 1 partition" rule would
-# never go green — stalling every rolling update forever.
+# Set false when partitions <= replicas: with maxSurge: 1 Kubernetes runs
+# replicas+1 pods during a rollout, Kafka legitimately assigns the extra one no
+# partitions, and a strict "owns >= 1 partition" rule would never go green —
+# stalling every rolling update forever.
 READY_REQUIRE_PARTITIONS = config(
     "KEEP_CONSUMER_READY_REQUIRE_PARTITIONS", default=True, cast=bool
 )

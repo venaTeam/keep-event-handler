@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget, ShutdownRequested
+from src.core.kafka_consumer import (
+    KafkaEventConsumer,
+    PoisonMessageError,
+    RetryBudget,
+    ShutdownRequested,
+)
 from src.models.event_dto import EventDTO
 
 
@@ -173,6 +178,95 @@ def test_retry_loop_abandons_the_message_on_shutdown():
                 consumer._process_with_retries(dto, budget, {"tenant_id": "t1"})
 
     terminal.assert_not_called()
+
+
+def test_shutdown_on_the_last_attempt_does_not_burn_the_record():
+    """The exhaustion branches must not win over shutdown: a healthy record
+    would be written to AlertRaw(error=True) and committed purely because the
+    pod was terminating during a sync."""
+    consumer, _ = _consumer_with_mock_kafka()
+    event = consumer._shutdown_event
+    budget = RetryBudget(300000, shutdown_event=event)
+    dto = EventDTO(
+        tenant_id="t1",
+        trace_id="trace-1",
+        event={"data": "x"},
+        provider_type="grafana",
+    )
+    attempts = {"n": 0}
+
+    def fail(_dto):
+        attempts["n"] += 1
+        if attempts["n"] == 3:  # MAX_PROCESSING_RETRIES -- the last attempt
+            event.set()
+        raise OSError("db unreachable")
+
+    with patch("src.core.kafka_consumer.process_event_sync", side_effect=fail):
+        with patch.object(consumer, "_record_terminal") as terminal:
+            with pytest.raises(ShutdownRequested):
+                consumer._process_with_retries(dto, budget, {"tenant_id": "t1"})
+
+    terminal.assert_not_called()
+
+
+def test_shutdown_with_an_exhausted_budget_does_not_burn_the_record():
+    consumer, _ = _consumer_with_mock_kafka()
+    event = consumer._shutdown_event
+    budget = RetryBudget(1, shutdown_event=event)  # budget ~0 -> exhausted
+    dto = EventDTO(
+        tenant_id="t1",
+        trace_id="trace-1",
+        event={"data": "x"},
+        provider_type="grafana",
+    )
+
+    def fail(_dto):
+        event.set()
+        raise OSError("db unreachable")
+
+    with patch("src.core.kafka_consumer.process_event_sync", side_effect=fail):
+        with patch.object(consumer, "_record_terminal") as terminal:
+            with pytest.raises(ShutdownRequested):
+                consumer._process_with_retries(dto, budget, {"tenant_id": "t1"})
+
+    terminal.assert_not_called()
+
+
+def test_poison_is_still_terminal_during_shutdown():
+    """Only transient failures are abandoned: a malformed payload will fail
+    identically on redelivery, so it stays committed."""
+    consumer, _ = _consumer_with_mock_kafka()
+    event = consumer._shutdown_event
+    budget = RetryBudget(300000, shutdown_event=event)
+    dto = EventDTO(
+        tenant_id="t1",
+        trace_id="trace-1",
+        event={"data": "x"},
+        provider_type="grafana",
+    )
+
+    def fail(_dto):
+        event.set()
+        raise PoisonMessageError("unknown event_type")
+
+    with patch("src.core.kafka_consumer.process_event_sync", side_effect=fail):
+        with patch.object(consumer, "_record_terminal") as terminal:
+            consumer._process_with_retries(dto, budget, {"tenant_id": "t1"})
+
+    terminal.assert_called_once()
+
+
+def test_a_consumer_told_to_stop_before_start_never_joins_the_group():
+    """Closes the handover window between the entrypoint's startup handlers
+    and the consumer's own."""
+    event = threading.Event()
+    event.set()
+
+    with patch("src.core.kafka_consumer.Consumer") as ctor:
+        consumer = KafkaEventConsumer(shutdown_event=event)
+        consumer.start()
+
+    ctor.assert_not_called()
 
 
 def test_message_is_unresolved_when_shutdown_interrupts_retries():
