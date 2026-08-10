@@ -74,7 +74,11 @@ class AlertAudit(SQLModel, table=True):
     description: str = Field(sa_column=Column(TEXT))
 
     mentions: list["CommentMention"] = Relationship(
-        back_populates="alert_audit", sa_relationship_kwargs={"lazy": "selectin"}
+        back_populates="alert_audit",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "primaryjoin": "foreign(CommentMention.comment_id) == AlertAudit.id",
+        },
     )
 
     __table_args__ = (
@@ -92,7 +96,6 @@ class CommentMention(SQLModel, table=True):
     comment_id: UUID = Field(
         sa_column=Column(
             UUIDType(binary=False),
-            ForeignKey("alertaudit.id", ondelete="CASCADE"),
             nullable=False,
         )
     )
@@ -101,7 +104,11 @@ class CommentMention(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
     alert_audit: AlertAudit = Relationship(
-        back_populates="mentions", sa_relationship_kwargs={"lazy": "selectin"}
+        back_populates="mentions",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "primaryjoin": "foreign(CommentMention.comment_id) == AlertAudit.id",
+        },
     )
 
 
@@ -165,6 +172,11 @@ class AlertDeduplicationEvent(SQLModel, table=True):
             "provider_type",
             "date_hour",
         ),
+        # SC-05: `timestamp` is the future daily-partition key (partitioning is done
+        # by the DBA, who has elevated DDL rights). Index it to support the time-range
+        # scans that retention/partition-pruning rely on. The date_hour/provider
+        # indexes above are kept for the dedup-distribution analytics queries.
+        Index("ix_alert_deduplication_event_timestamp", "timestamp"),
     )
 
     class Config:
@@ -179,7 +191,7 @@ class Alert(SQLModel, table=True):
     #            with 1M alerts, we see queries goes from >30s to 0s with the index
     #            todo: on MSSQL, the index is "nonclustered" index which cannot be controlled by SQLModel
     timestamp: datetime = Field(
-        sa_column=Column(DATETIME_COLUMN_TYPE, index=True, nullable=False),
+        sa_column=Column(DATETIME_COLUMN_TYPE, index=True, nullable=False, primary_key=True),
         default_factory=lambda: datetime.utcnow().replace(
             microsecond=int(datetime.utcnow().microsecond / 1000) * 1000
         ),
@@ -280,7 +292,7 @@ class Alert(SQLModel, table=True):
 class LastAlert(SQLModel, table=True):
     tenant_id: str = Field(foreign_key="tenant.id", nullable=False, primary_key=True)
     fingerprint: str = Field(primary_key=True, index=True)
-    alert_id: UUID = Field(foreign_key="alert.id")
+    alert_id: UUID = Field()
     timestamp: datetime = Field(nullable=False, index=True)
     first_timestamp: datetime = Field(nullable=False, index=True)
     alert_hash: str | None = Field(nullable=True, index=True)

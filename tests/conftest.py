@@ -23,8 +23,11 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 import tempfile
 
-# Ensure PROMETHEUS_MULTIPROC_DIR is set before any keep imports
-if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+# Ensure PROMETHEUS_MULTIPROC_DIR is set before any keep imports. Truthiness,
+# not presence: a set-but-empty var is the same trap src/core/metrics.py
+# guards against — the presence check would skip the per-run tmpdir and share
+# the global dir's stale per-pid mmap files across test runs.
+if not os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
     os.environ["PROMETHEUS_MULTIPROC_DIR"] = tempfile.mkdtemp(prefix="prometheus_multiproc_")
 
 # This import is required to create the tables

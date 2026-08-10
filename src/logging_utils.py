@@ -1,4 +1,3 @@
-import http.client
 import inspect
 import logging
 import logging.config
@@ -330,10 +329,11 @@ WORKER_TYPE = get_worker_type()
 
 class FluentBitHandler(logging.Handler):
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-    def __init__(self, host, port, tenant="keep", **kwargs):
+    def __init__(self, host, port, tenant="keep", service_name=None, **kwargs):
         super().__init__()
         self.url = f"http://{host}:{port}"
         self.tenant = tenant
+        self.service_name = service_name
         self.queue = queue.Queue(maxsize=1000)
         self.session = requests.Session()
         self._stop = threading.Event()
@@ -347,6 +347,15 @@ class FluentBitHandler(logging.Handler):
                     break
                 json_record = json.loads(record)
                 json_record["tenant"] = self.tenant
+                # Carry service identity in the SAME field the gateway uses
+                # (otelServiceName, populated there by the OTel LoggingInstrumentor)
+                # rather than a bespoke `service` field, so both services share one
+                # Elasticsearch mapping. The consumer has no OTel logging
+                # instrumentation, so this field is null here -- fill it from the
+                # configured service name, without clobbering a real OTel value
+                # (e.g. in the API process where LoggingInstrumentor is active).
+                if self.service_name and not json_record.get("otelServiceName"):
+                    json_record["otelServiceName"] = self.service_name
                 try:
                     self.session.post(self.url, json=json_record, verify=False)
                 except Exception:
@@ -550,46 +559,3 @@ class CustomizedUvicornLogger(logging.Logger):
         logging.Logger._log(
             self, level, msg, args, exc_info, extra, stack_info, stacklevel
         )
-
-
-def setup_logging():
-    # Add file handler if KEEP_LOG_FILE is set
-    # TODO: remove this after we move to fluentbit
-    if KEEP_LOG_FILE:
-        CONFIG["handlers"]["file"] = {
-            "level": "DEBUG",
-            "formatter": ("json"),
-            "class": "logging.handlers.RotatingFileHandler",
-            "filename": KEEP_LOG_FILE,
-            "mode": "a",
-            "maxBytes": 1024 * 1024 * 1024,  # 1GB
-            "backupCount": 5,
-        }
-        # Add file handler to root logger
-        CONFIG["loggers"][""]["handlers"].append("file")
-
-    # Add fluentbit handler if KEEP_FLUENTBIT is set
-    if KEEP_FLUENTBIT:
-        CONFIG["handlers"]["fluentbit"] = {
-            "level": "DEBUG",
-            "formatter": ("json"),
-            "class": "logging.FluentBitHandler",
-            "host": KEEP_FLUENTBIT_HOST,
-            "port": int(KEEP_FLUENTBIT_PORT),
-        }
-        # Add file handler to root logger
-        CONFIG["loggers"][""]["handlers"].append("fluentbit")
-
-    logging.config.dictConfig(CONFIG)
-    # MONKEY PATCHING http.client
-    # See: https://stackoverflow.com/questions/58738195/python-http-request-and-debug-level-logging-to-the-log-file
-    http_client_logger = logging.getLogger("http.client")
-    http_client_logger.setLevel(logging.DEBUG)
-    http.client.HTTPConnection.debuglevel = 1
-
-    def print_to_log(*args):
-        http_client_logger.debug(" ".join(args))
-
-    # monkey-patch a `print` global into the http.client module; all calls to
-    # print() in that module will then use our print_to_log implementation
-    http.client.print = print_to_log

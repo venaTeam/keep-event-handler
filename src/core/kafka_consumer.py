@@ -23,6 +23,7 @@ from src.config.consts import (
     KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
 from src.config.config import config
+from src.core.consumer_health import ConsumerPhase, consumer_health
 from src.core.metrics import (
     events_in_counter,
     events_out_counter,
@@ -36,6 +37,13 @@ from src.models.event_dto import EventDTO
 
 
 logger = logging.getLogger(__name__)
+
+
+class ShutdownRequested(Exception):
+    """Raised when SIGTERM arrives while a message is still being retried. The
+    message is left UNRESOLVED so its offset is not committed and Kafka
+    redelivers it — never routed to the terminal sink, because nothing is wrong
+    with it."""
 
 
 class PoisonMessageError(Exception):
@@ -95,11 +103,15 @@ class RetryBudget:
         safety_factor: float = KAFKA_RETRY_POLL_GAP_SAFETY_FACTOR,
         max_sleep_seconds: int = KAFKA_RETRY_MAX_SLEEP_SECONDS,
         clock=time.monotonic,
+        shutdown_event: Optional[threading.Event] = None,
     ):
         self._budget_seconds = (max_poll_interval_ms / 1000.0) * safety_factor
         self._max_sleep_seconds = max_sleep_seconds
         self._clock = clock
         self._started_at = clock()
+        # When set, a backoff sleep wakes immediately instead of sitting out
+        # its full delay inside the termination grace period.
+        self._shutdown_event = shutdown_event
 
     def reset(self):
         """Call right after a successful poll: the budget is measured from the
@@ -117,13 +129,24 @@ class RetryBudget:
 
     def sleep_for(self, attempt: int) -> float:
         """Bounded backoff for this attempt, never overrunning the remaining
-        budget. Returns the seconds slept."""
+        budget. Interrupted by shutdown. Returns the seconds actually slept."""
         backoff = min(2 ** attempt, self._max_sleep_seconds)
         # Never sleep past the budget deadline.
         backoff = max(0.0, min(backoff, self.remaining()))
-        if backoff > 0:
-            time.sleep(backoff)
+        if backoff <= 0:
+            return 0.0
+        if self._shutdown_event is not None:
+            # A 30s backoff started just before SIGTERM would otherwise eat the
+            # whole grace period and get the pod SIGKILLed -- which skips
+            # LeaveGroup and strands the partitions for session.timeout.ms.
+            if self._shutdown_event.wait(backoff):
+                return 0.0  # woke early on shutdown
+            return backoff
+        time.sleep(backoff)
         return backoff
+
+    def shutting_down(self) -> bool:
+        return self._shutdown_event is not None and self._shutdown_event.is_set()
 
 
 class EventConsumer(abc.ABC):
@@ -142,11 +165,16 @@ class KafkaEventConsumer(EventConsumer):
     Runs in a blocking loop, suitable for standalone process execution.
     """
 
-    def __init__(self):
+    def __init__(self, shutdown_event: Optional[threading.Event] = None):
         self.logger = logging.getLogger(__name__)
         self._running = False
         self._consumer: Optional[Consumer] = None
-        self._shutdown_event = threading.Event()
+        # The entrypoint hands over its startup event, so a SIGTERM that landed
+        # between the end of init_services() and this consumer installing its
+        # own signal handlers is not lost. Without it that pod runs until the
+        # kubelet SIGKILLs it -- skipping LeaveGroup and stranding partitions
+        # for session.timeout.ms, which is the failure this branch removes.
+        self._shutdown_event = shutdown_event or threading.Event()
 
         # Parse bootstrap servers
         bootstrap_servers = config(
@@ -171,6 +199,17 @@ class KafkaEventConsumer(EventConsumer):
         self._batch_timeout = KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS
         self._session_timeout = int(config("KAFKA_SESSION_TIMEOUT_MS", default="45000"))
         self._max_poll_interval = int(config("KAFKA_MAX_POLL_INTERVAL_MS", default="300000"))
+        self._heartbeat_interval = self._resolve_heartbeat_interval()
+        # Eager (`range,roundrobin`) surrenders EVERY member's partitions on
+        # any membership change, so a 15-pod rollout stops the whole group ~30
+        # times. Cooperative revokes only what actually moves.
+        #
+        # Changing this value -- in either direction -- requires a full-group
+        # restart: eager and cooperative members cannot coexist in one group,
+        # so deploying this default IS the migration. Never roll it.
+        self._assignment_strategy = config(
+            "KAFKA_PARTITION_ASSIGNMENT_STRATEGY", default="cooperative-sticky"
+        )
 
         # Security config
         self.security_protocol = config("KAFKA_SECURITY_PROTOCOL", default="PLAINTEXT")
@@ -183,14 +222,48 @@ class KafkaEventConsumer(EventConsumer):
         self.ssl_certfile = config("KAFKA_SSL_CERTFILE", default=None)
         self.ssl_keyfile = config("KAFKA_SSL_KEYFILE", default=None)
 
+    def _resolve_heartbeat_interval(self) -> int:
+        """Heartbeat interval, derived from the session timeout.
+
+        KAFKA_HEARTBEAT_INTERVAL_MS existed as an env var but was never emitted
+        into the consumer config, so setting it did nothing — which mattered
+        because the plan's highest-leverage change is lowering
+        KAFKA_SESSION_TIMEOUT_MS "with a matching heartbeat.interval.ms".
+
+        The broker needs several heartbeats inside one session window, so the
+        value is capped at a third of the session timeout; above ~9s session
+        timeout that lands on librdkafka's own 3s default, and it only starts
+        to matter below it.
+        """
+        ceiling = max(1, self._session_timeout // 3)
+        default = min(ceiling, 3000)
+        configured = int(
+            config("KAFKA_HEARTBEAT_INTERVAL_MS", default=str(default))
+        )
+        return max(1, min(configured, ceiling))
+
     def _build_consumer_config(self) -> dict:
-        """Build confluent-kafka consumer configuration."""
+        """Build confluent-kafka consumer configuration.
+
+        Both offset keys are load-bearing and easy to misread. librdkafka has
+        two stages: STORE an offset locally, then COMMIT the store.
+        `enable.auto.commit=False` only disables the background committer --
+        the store still auto-fills the moment a record is DELIVERED to the
+        application, not when it is processed, so any argument-less `commit()`
+        flushes offsets for records that were never handled. Keeping the store
+        empty (`enable.auto.offset.store=False`) makes that leak unreachable;
+        `_process_batch` commits with `commit(message=...)`, which addresses
+        offsets directly and never reads the store.
+        """
         conf = {
             "bootstrap.servers": self.bootstrap_servers,
             "group.id": self.group_id,
             "auto.offset.reset": "earliest",
-            "enable.auto.commit": False,  # Manual commit after processing
+            "enable.auto.commit": False,  # manual commit after processing
+            "enable.auto.offset.store": False,  # see docstring: no implicit commits
+            "partition.assignment.strategy": self._assignment_strategy,
             "session.timeout.ms": self._session_timeout,
+            "heartbeat.interval.ms": self._heartbeat_interval,
             "max.poll.interval.ms": self._max_poll_interval,
             "security.protocol": self.security_protocol,
         }
@@ -228,6 +301,14 @@ class KafkaEventConsumer(EventConsumer):
             self.logger.warning("Consumer already running")
             return
 
+        if self._shutdown_event.is_set():
+            self.logger.info(
+                "Shutdown was requested before the consumer started; not "
+                "joining the group"
+            )
+            consumer_health.set_phase(ConsumerPhase.STOPPED)
+            return
+
         conf = self._build_consumer_config()
         self.logger.info(f"Starting Kafka Consumer on topic '{self.topic}' with config: {self._redact_config(conf)}")
 
@@ -235,13 +316,24 @@ class KafkaEventConsumer(EventConsumer):
         self._consumer.subscribe(
             [self.topic],
             on_assign=self._on_assign,
-            on_revoke=self._on_revoke
+            on_revoke=self._on_revoke,
+            # Registered explicitly: without it confluent-kafka routes lost
+            # partitions to on_revoke as an ordinary rebalance, and they must
+            # NOT be treated as one -- they may already be owned by another
+            # member.
+            on_lost=self._on_lost,
         )
         self._running = True
 
-        # Register signal handlers for graceful shutdown
+        # Register signal handlers for graceful shutdown. These replace the
+        # entrypoint's startup handlers; anything they already recorded lives
+        # in the shared _shutdown_event, re-checked here to close the handover
+        # window.
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+        if self._shutdown_event.is_set():
+            self.logger.info("Shutdown requested during startup; draining out")
+            self._running = False
 
         try:
             self._consume_loop()
@@ -253,23 +345,90 @@ class KafkaEventConsumer(EventConsumer):
         self.logger.info(f"Received signal {signum}, initiating graceful shutdown...")
         self._running = False
         self._shutdown_event.set()
+        consumer_health.set_phase(ConsumerPhase.STOPPING)
+
+    @property
+    def _is_cooperative(self) -> bool:
+        return "cooperative" in (self._assignment_strategy or "").lower()
+
+    def _refresh_assignment(self, consumer, fallback=None):
+        """Record the FULL current assignment from the consumer itself.
+
+        Cooperative callbacks deliver DELTAS, so recording the callback
+        argument verbatim would read a partial revoke as "I own nothing" and
+        flip the pod NotReady mid-rebalance — which, with maxUnavailable: 0,
+        stalls the rollout.
+        """
+        try:
+            current = list(consumer.assignment())
+        except Exception:
+            self.logger.warning(
+                "Could not read consumer.assignment(); falling back to the "
+                "callback partitions",
+                exc_info=True,
+            )
+            current = list(fallback or [])
+        consumer_health.set_assignment(current)
 
     def _on_assign(self, consumer, partitions):
         """Callback when partitions are assigned."""
         self.logger.info(f"Partitions assigned: {[p.partition for p in partitions]}")
+        if self._is_cooperative:
+            # Under the cooperative protocol librdkafka does NOT apply the
+            # assignment for us. Skipping this leaves the consumer processing
+            # nothing while looking perfectly healthy.
+            try:
+                consumer.incremental_assign(partitions)
+            except Exception:
+                self.logger.exception("incremental_assign failed")
+        self._refresh_assignment(consumer, fallback=partitions)
 
     def _on_revoke(self, consumer, partitions):
-        """Callback when partitions are revoked (rebalance)."""
+        """Callback when partitions are revoked (rebalance).
+
+        Deliberately does NOT commit. An argument-less commit() here flushes
+        the offset store, which holds every offset DELIVERED in the last poll —
+        including records abandoned mid-batch for redelivery. Committing them
+        marks unprocessed alerts as done, silently, on every rebalance. Records
+        that were processed are already committed individually by
+        _process_batch.
+        """
         self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
-        # Commit any pending offsets before rebalance
-        try:
-            consumer.commit(asynchronous=False)
-        except KafkaException as e:
-            self.logger.warning(f"Failed to commit during rebalance: {e}")
+        if self._is_cooperative:
+            try:
+                consumer.incremental_unassign(partitions)
+            except Exception:
+                self.logger.exception("incremental_unassign failed")
+        # Readiness keeps a grace window after this, so an ordinary rebalance
+        # doesn't flip the whole group NotReady and stall a maxUnavailable: 0
+        # rollout.
+        consumer_health.mark_revoke()
+        self._refresh_assignment(consumer, fallback=[])
+
+    def _on_lost(self, consumer, partitions):
+        """Partitions lost without a clean revoke (session expiry, fenced
+        member).
+
+        Never commits: a lost partition may already be owned by another member,
+        so committing here would write an offset for records that member is
+        re-processing. Anything unprocessed is redelivered to whoever owns it.
+        """
+        self.logger.warning(
+            f"Partitions LOST: {[p.partition for p in partitions]} — "
+            "not committing; they may already be owned by another member"
+        )
+        if self._is_cooperative:
+            try:
+                consumer.incremental_unassign(partitions)
+            except Exception:
+                self.logger.exception("incremental_unassign failed for lost partitions")
+        consumer_health.mark_revoke()
+        self._refresh_assignment(consumer, fallback=[])
 
     def _consume_loop(self):
         """Main consumption loop - blocking and synchronous."""
         self.logger.info("Entering consume loop...")
+        consumer_health.set_phase(ConsumerPhase.CONSUMING)
         consecutive_errors = 0
         max_consecutive_errors = 10
 
@@ -278,6 +437,11 @@ class KafkaEventConsumer(EventConsumer):
                 messages = self._consumer.consume(
                     num_messages=self._batch_size, timeout=self._batch_timeout
                 )
+
+                # Every poll return counts, empty ones included: an empty poll
+                # is proof the loop is alive, and requiring records would make
+                # an idle topic look wedged to the liveness probe.
+                consumer_health.mark_poll()
 
                 if not messages:
                     # No messages available this poll.
@@ -310,7 +474,9 @@ class KafkaEventConsumer(EventConsumer):
                 # Fresh batch-wide retry budget measured from this poll, so
                 # accumulated retry sleep across the batch can't overrun the
                 # poll interval and trigger a rebalance.
-                budget = RetryBudget(self._max_poll_interval)
+                budget = RetryBudget(
+                    self._max_poll_interval, shutdown_event=self._shutdown_event
+                )
 
                 self._process_batch(records, budget)
 
@@ -362,10 +528,30 @@ class KafkaEventConsumer(EventConsumer):
             key = (msg.topic(), msg.partition())
             partitions.setdefault(key, []).append(msg)
 
+        shutting_down = False
         for key, partition_msgs in partitions.items():
             partition_msgs.sort(key=lambda m: m.offset())
             commit_boundary = None  # last contiguous resolved message
             for msg in partition_msgs:
+                # Shutdown is checked per RECORD, not per batch. A 100-message
+                # batch under DB contention can outlive the termination grace
+                # period; a SIGKILLed consumer never sends LeaveGroup, so its
+                # partitions stay unowned for session.timeout.ms. Stop taking
+                # new work, commit what is already resolved, and let _cleanup()
+                # close the consumer so the group leave is prompt.
+                if self._shutdown_event.is_set():
+                    self.logger.info(
+                        "Shutdown requested mid-batch; stopping after the "
+                        "resolved prefix",
+                        extra={
+                            "topic": msg.topic(),
+                            "partition": msg.partition(),
+                            "offset": msg.offset(),
+                        },
+                    )
+                    shutting_down = True
+                    break
+
                 should_commit = self._process_message(msg, budget)
                 if should_commit:
                     commit_boundary = msg
@@ -385,7 +571,14 @@ class KafkaEventConsumer(EventConsumer):
             if commit_boundary is not None:
                 # commit(message=...) commits boundary.offset()+1 for its
                 # partition — i.e. the highest contiguous processed offset.
+                # The `message=` form commits that offset directly and never
+                # touches the offset store (see enable.auto.offset.store).
                 self._consumer.commit(commit_boundary, asynchronous=False)
+
+            if shutting_down:
+                # Every remaining partition's records are simply not committed,
+                # so they are redelivered. At-least-once is preserved.
+                break
 
     def _process_message(self, msg, budget: "RetryBudget") -> bool:
         """Process a single Kafka message.
@@ -447,6 +640,13 @@ class KafkaEventConsumer(EventConsumer):
             self.logger.debug(f"Successfully processed message: {trace_id}")
             return True
 
+        except ShutdownRequested:
+            self.logger.info(
+                "Abandoning in-flight message for redelivery "
+                f"(shutdown, trace_id={trace_id})"
+            )
+            return False
+
         except Exception as e:
             # Should not normally reach here — _process_with_retries handles
             # its own terminal recording. Be defensive: record + commit rather
@@ -494,6 +694,14 @@ class KafkaEventConsumer(EventConsumer):
                     return
 
                 # transient
+                if budget.shutting_down():
+                    # Checked BEFORE the exhaustion branches: a SIGTERM landing
+                    # on the last attempt must not burn a healthy record into
+                    # the terminal sink just because the pod is terminating.
+                    raise ShutdownRequested(
+                        "shutdown during retry; leaving the message unresolved"
+                    ) from e
+
                 if attempt == MAX_PROCESSING_RETRIES - 1:
                     self.logger.error(
                         "Retries exhausted (attempt cap) — recording and committing"
@@ -510,6 +718,14 @@ class KafkaEventConsumer(EventConsumer):
                     return
 
                 budget.sleep_for(attempt)
+
+                if budget.shutting_down():
+                    # Not a failure of this message — abandon it uncommitted so
+                    # it is redelivered, rather than burning it in the terminal
+                    # sink because the pod happened to be terminating.
+                    raise ShutdownRequested(
+                        "shutdown during retry; leaving the message unresolved"
+                    ) from e
 
     def _record_terminal(self, payload, error: Exception):
         """Terminal sink for a poison / retry-exhausted message: persist the
@@ -534,9 +750,11 @@ class KafkaEventConsumer(EventConsumer):
         self.logger.info("Stopping Kafka consumer...")
         self._running = False
         self._shutdown_event.set()
+        consumer_health.set_phase(ConsumerPhase.STOPPING)
 
     def _cleanup(self):
         """Cleanup resources."""
+        consumer_health.set_phase(ConsumerPhase.STOPPING)
         if self._consumer:
             self.logger.info("Closing Kafka consumer...")
             try:
@@ -544,4 +762,6 @@ class KafkaEventConsumer(EventConsumer):
             except Exception as e:
                 self.logger.error(f"Error closing consumer: {e}")
             self._consumer = None
+        consumer_health.set_assignment([])
+        consumer_health.set_phase(ConsumerPhase.STOPPED)
         self.logger.info("Kafka consumer stopped")

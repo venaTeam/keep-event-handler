@@ -16,6 +16,7 @@ for creating the database and tables, while the worker processes should only be 
 import hashlib
 import logging
 import os
+import threading
 import time
 
 import alembic.command
@@ -168,6 +169,57 @@ _SCHEMA_WAIT_INTERVAL = int(os.environ.get("KEEP_SCHEMA_WAIT_INTERVAL", "2"))
 # How many consecutive polls the gateway's alembic head must stay unchanged
 # before we treat its `alembic upgrade head` run as finished.
 _SCHEMA_STABLE_CHECKS = int(os.environ.get("KEEP_SCHEMA_STABLE_CHECKS", "3"))
+# Backoff between whole schema-wait attempts, after the change from
+# exit-on-timeout to retry-forever.
+_SCHEMA_RETRY_BACKOFF_START = int(os.environ.get("KEEP_SCHEMA_RETRY_BACKOFF_START", "5"))
+_SCHEMA_RETRY_BACKOFF_MAX = int(os.environ.get("KEEP_SCHEMA_RETRY_BACKOFF_MAX", "60"))
+# Core tables that must exist before the schema counts as ready. Quiescence
+# alone is not enough: if the gateway is DOWN, its (stale) head is trivially
+# stable, and this consumer would proceed against a not-yet-migrated schema.
+_SCHEMA_REQUIRED_TABLES = [
+    t.strip()
+    for t in os.environ.get(
+        "KEEP_SCHEMA_REQUIRED_TABLES", "tenant,provider,alert,lastalert"
+    ).split(",")
+    if t.strip()
+]
+# Optional exact revision to wait for. Stronger than quiescence — it is the
+# only guard that distinguishes "the gateway finished" from "the gateway never
+# started". Unset by default because the gateway ships migrations this repo's
+# own chain does not contain, so no head can be hardcoded here; set it per
+# release when the deploy knows the target revision.
+_SCHEMA_EXPECTED_REVISION = os.environ.get("KEEP_SCHEMA_EXPECTED_REVISION") or None
+
+# Set by the entrypoint's startup signal handler so a SIGTERM during the wait
+# aborts promptly instead of blocking for the whole grace period.
+_abort_event = threading.Event()
+
+
+class SchemaWaitTimeout(RuntimeError):
+    """One schema-wait attempt timed out. Retryable — never fatal."""
+
+
+class SchemaWaitAborted(RuntimeError):
+    """The wait gave up because shutdown was requested.
+
+    Distinct from success on purpose: returning normally would let migrate_db
+    log "DB schema ready" and let init_services carry on against a schema that
+    was never verified.
+    """
+
+
+def request_schema_wait_abort():
+    """Ask an in-flight schema wait to give up (SIGTERM during startup)."""
+    _abort_event.set()
+
+
+def schema_wait_aborted() -> bool:
+    return _abort_event.is_set()
+
+
+def _missing_required_tables(inspector) -> list:
+    existing = set(inspector.get_table_names())
+    return [t for t in _SCHEMA_REQUIRED_TABLES if t not in existing]
 
 
 def _gateway_alembic_head():
@@ -207,9 +259,40 @@ def _wait_for_schema():
     last_head = None
     stable = 0
     while True:
+        if _abort_event.is_set():
+            raise SchemaWaitAborted("schema wait aborted (shutdown requested)")
         try:
-            head = _gateway_alembic_head()
-            if head is None:
+            missing = _missing_required_tables(sa_inspect(engine))
+            if missing:
+                # Catches an empty or half-built database before any head
+                # comparison can call it "stable".
+                last_head, stable = None, 0
+                logger.info(
+                    "Waiting for keep-api-gateway: required tables missing %s",
+                    missing,
+                )
+                head = None
+            else:
+                head = _gateway_alembic_head()
+
+            if head is not None and _SCHEMA_EXPECTED_REVISION:
+                # An exact match beats quiescence: a stale head on a down
+                # gateway is perfectly quiescent, and this is what tells the
+                # two apart.
+                if head == _SCHEMA_EXPECTED_REVISION:
+                    logger.info(
+                        "DB schema is ready (alembic head %s matches "
+                        "KEEP_SCHEMA_EXPECTED_REVISION)",
+                        head,
+                    )
+                    return
+                logger.info(
+                    "keep-api-gateway alembic head %s != expected %s; waiting",
+                    head,
+                    _SCHEMA_EXPECTED_REVISION,
+                )
+                last_head, stable = head, 0
+            elif head is None:
                 last_head, stable = None, 0
                 logger.info(
                     "Waiting for keep-api-gateway to initialize the DB schema "
@@ -242,12 +325,14 @@ def _wait_for_schema():
             logger.warning("Waiting for the DB to become reachable: %s", exc)
             last_head, stable = None, 0
         if time.monotonic() >= deadline:
-            raise RuntimeError(
+            raise SchemaWaitTimeout(
                 "Timed out waiting for keep-api-gateway to provision the DB "
                 f"schema (waited {_SCHEMA_WAIT_TIMEOUT}s; last alembic head "
                 f"{last_head!r})"
             )
-        time.sleep(_SCHEMA_WAIT_INTERVAL)
+        # Interruptible: a SIGTERM during the wait must not sit out the sleep.
+        if _abort_event.wait(_SCHEMA_WAIT_INTERVAL):
+            raise SchemaWaitAborted("schema wait aborted (shutdown requested)")
 
 
 def migrate_db():
@@ -258,6 +343,13 @@ def migrate_db():
     waits for it rather than building it (see _wait_for_schema). On SQLite
     (tests / standalone single-process dev) there is no shared owner and no
     possible race, so build the tables locally as before.
+
+    A wait that times out is RETRIED with capped backoff, indefinitely. It used
+    to raise, which reached consumer_main and called sys.exit(1) — killing the
+    pod at exactly the moment the cluster needed it up, because a full sync is
+    when the gateway's migrations are slowest to settle. A slow gateway must
+    make this consumer slow, not dead: the pod stays alive reporting "alive,
+    not ready", and the startupProbe budget decides when to give up on it.
     """
     if os.environ.get("SKIP_DB_CREATION", "false") == "true":
         logger.info("Skipping DB schema init...")
@@ -270,5 +362,24 @@ def migrate_db():
         return None
 
     logger.info("Waiting for keep-api-gateway to provision the DB schema...")
-    _wait_for_schema()
-    logger.info("DB schema ready")
+    backoff = _SCHEMA_RETRY_BACKOFF_START
+    while not _abort_event.is_set():
+        try:
+            _wait_for_schema()
+            logger.info("DB schema ready")
+            return None
+        except SchemaWaitAborted:
+            break
+        except SchemaWaitTimeout as exc:
+            logger.warning(
+                "Schema not ready yet (%s); retrying in %ss", exc, backoff
+            )
+            if _abort_event.wait(backoff):
+                break
+            backoff = min(backoff * 2, _SCHEMA_RETRY_BACKOFF_MAX)
+
+    # Never return normally here: the schema was NOT verified, and the callers
+    # above (provider load, tenant creation, provisioning) would otherwise run
+    # against a database that may not be migrated.
+    logger.info("Stopped waiting for the DB schema (shutdown requested)")
+    raise SchemaWaitAborted("startup aborted while waiting for the DB schema")

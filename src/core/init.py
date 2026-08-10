@@ -14,21 +14,50 @@ from src.providers.providers_service import ProvidersService
 logger = logging.getLogger(__name__)
 
 PROVISION_RESOURCES = os.environ.get("PROVISION_RESOURCES", "true") == "true"
+# Provisioning writes provider definitions and dedup rules from env vars into
+# the DB before the consumer starts consuming. A malformed provider definition
+# in a new image therefore CrashLooped EVERY consumer pod, over configuration
+# that has nothing to do with consuming. Failures are now logged and stepped
+# over; set this true in CI, where a bad provider file should fail loudly.
+KEEP_PROVISIONING_FATAL = os.environ.get("KEEP_PROVISIONING_FATAL", "false") == "true"
+
+
+def _provisioning_step(name: str, func, *args):
+    """Run one provisioning step. Each is guarded independently so a failing
+    step neither skips the others nor stops the consume loop."""
+    try:
+        func(*args)
+        logger.info("Provisioning step '%s' completed", name)
+    except Exception:
+        if KEEP_PROVISIONING_FATAL:
+            logger.exception(
+                "Provisioning step '%s' failed and KEEP_PROVISIONING_FATAL is "
+                "set — failing startup",
+                name,
+            )
+            raise
+        logger.exception(
+            "Provisioning step '%s' failed; continuing without it. Alert "
+            "processing is unaffected.",
+            name,
+        )
 
 
 def provision_resources(provision_dashboards_func=None):
     if PROVISION_RESOURCES:
-        logger.info("Loading providers into cache")
-        # provision providers from env. relevant only on single tenant.
-        logger.info("Provisioning providers and workflows")
-        ProvidersService.provision_providers(SINGLE_TENANT_UUID)
-        logger.info("Providers loaded successfully")
+        logger.info("Provisioning providers, dashboards and deduplication rules")
+        _provisioning_step(
+            "providers", ProvidersService.provision_providers, SINGLE_TENANT_UUID
+        )
         if provision_dashboards_func:
-            provision_dashboards_func(SINGLE_TENANT_UUID)
-            logger.info("Dashboards provisioned successfully")
-        logger.info("Provisioning deduplication rules")
-        provision_deduplication_rules_from_env(SINGLE_TENANT_UUID)
-        logger.info("Deduplication rules provisioned successfully")
+            _provisioning_step(
+                "dashboards", provision_dashboards_func, SINGLE_TENANT_UUID
+            )
+        _provisioning_step(
+            "deduplication_rules",
+            provision_deduplication_rules_from_env,
+            SINGLE_TENANT_UUID,
+        )
     else:
         logger.info("Provisioning resources is disabled")
 

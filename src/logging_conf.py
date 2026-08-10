@@ -7,6 +7,21 @@ import sys
 # Constants
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
+# Fluent Bit log forwarding (mirrors keep-api-gateway/src/utils/logging.py).
+# Forwarding is enabled only when KEEP_FLUENTBIT is truthy AND a host is set;
+# without a host, logging stays stdout-only (local dev / tests) and the
+# src.logging_utils import (and its DB-engine side effects) is never triggered.
+KEEP_FLUENTBIT = os.environ.get("KEEP_FLUENTBIT", "true").lower() == "true"
+KEEP_FLUENTBIT_HOST = os.environ.get("KEEP_FLUENTBIT_HOST")  # None => forwarding off
+KEEP_FLUENTBIT_PORT = os.environ.get("KEEP_FLUENTBIT_PORT", "80")
+# Service identity for forwarded records. Emitted as `otelServiceName` (the same
+# field the gateway populates via OTel) so both services share one Elasticsearch
+# mapping and are distinguishable by value. Uses the same env knobs as the OTel
+# resource in observability.py.
+SERVICE_NAME = os.environ.get(
+    "OTEL_SERVICE_NAME", os.environ.get("SERVICE_NAME", "keep-event-handler")
+)
+
 
 def get_gunicorn_log_level():
     """
@@ -183,4 +198,42 @@ CONFIG = {
 
 
 def setup_logging():
+    # Forward logs to Fluent Bit only when explicitly enabled AND a host is set.
+    # The `and KEEP_FLUENTBIT_HOST` guard is a deliberate improvement over the
+    # gateway (which enables on the flag alone and then POSTs forever to
+    # http://None:80). Declaring the json formatter here (not at module level)
+    # keeps the src.logging_utils import -- and its src.core.db.db engine side
+    # effects -- out of the stdout-only path used by local dev and tests.
+    if KEEP_FLUENTBIT and KEEP_FLUENTBIT_HOST:
+        # Formatter + handler are reused verbatim from src.logging_utils (a
+        # byte-for-byte copy of the gateway's), resolved lazily by dictConfig.
+        CONFIG["formatters"]["json"] = {
+            "()": "src.logging_utils.CustomJsonFormatter",
+            # Schema matches keep-api-gateway/src/utils/logging.py verbatim so
+            # both services emit identical keys into the shared collector.
+            "fmt": (
+                "%(worker_type) %(asctime)s %(message)s %(levelname)s %(name)s "
+                "%(filename)s %(otelTraceID)s %(otelSpanID)s %(otelTraceSampled)s "
+                "%(otelServiceName)s %(threadName)s %(process)s %(module)s"
+            ),
+            "rename_fields": {
+                "levelname": "severity",
+                "asctime": "timestamp",
+                "otelTraceID": "logging.googleapis.com/trace",
+                "otelSpanID": "logging.googleapis.com/spanId",
+                "otelTraceSampled": "logging.googleapis.com/trace_sampled",
+            },
+        }
+        CONFIG["handlers"]["fluentbit"] = {
+            "level": LOG_LEVEL,
+            "formatter": "json",
+            "class": "src.logging_utils.FluentBitHandler",
+            "host": KEEP_FLUENTBIT_HOST,
+            "port": int(KEEP_FLUENTBIT_PORT),
+            "service_name": SERVICE_NAME,
+        }
+        # Idempotent: setup_logging() may run more than once (e.g. in tests).
+        if "fluentbit" not in CONFIG["loggers"][""]["handlers"]:
+            CONFIG["loggers"][""]["handlers"].append("fluentbit")
+
     logging.config.dictConfig(CONFIG)

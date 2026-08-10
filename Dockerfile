@@ -35,18 +35,24 @@ ENV VIRTUAL_ENV="/venv"
 COPY . /app
 
 # Expose ports
-# 8082 - Health check endpoint
-# 8083 - Prometheus metrics
-EXPOSE 8082 8083
+# 8092 - Health check endpoint
+# 8094 - Prometheus metrics
+#
+# These MUST match src/consumer_main.py's defaults. config() reads os.environ
+# first and Docker ENV lands in os.environ, so the ENV block below wins over
+# the code defaults -- which meant the container served metrics on 8083 while
+# the code, CLAUDE.md, .claude/rules/event-handler.md and VAULT all documented
+# 8094. A scrape target written from the documentation collected nothing.
+EXPOSE 8092 8094
 
 # Default environment variables
 ENV MESSAGING_TYPE=KAFKA \
-    PROMETHEUS_METRICS_PORT=8083 \
-    HEALTH_CHECK_PORT=8082
+    PROMETHEUS_METRICS_PORT=8094 \
+    HEALTH_CHECK_PORT=8092
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8082/health || exit 1
+    CMD curl -f http://localhost:8092/health || exit 1
 
 # Run the standalone consumer (no gunicorn)
 CMD ["python", "-m", "src.consumer_main"]
