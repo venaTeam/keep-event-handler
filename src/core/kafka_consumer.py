@@ -212,6 +212,15 @@ class KafkaEventConsumer(EventConsumer):
             "group.id": self.group_id,
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,  # Manual commit after processing
+            # librdkafka has two stages: STORE an offset locally, then COMMIT
+            # the store. enable.auto.commit=False only disables the background
+            # committer -- the store still auto-fills the moment a record is
+            # DELIVERED to the application, not when it is processed. Any
+            # argument-less commit() then flushes offsets for records that were
+            # never handled. Keeping the store empty makes that leak
+            # unreachable; _process_batch commits with commit(message=...),
+            # which addresses offsets directly and never reads the store.
+            "enable.auto.offset.store": False,
             "session.timeout.ms": self._session_timeout,
             "max.poll.interval.ms": self._max_poll_interval,
             "security.protocol": self.security_protocol,
@@ -281,13 +290,16 @@ class KafkaEventConsumer(EventConsumer):
         self.logger.info(f"Partitions assigned: {[p.partition for p in partitions]}")
 
     def _on_revoke(self, consumer, partitions):
-        """Callback when partitions are revoked (rebalance)."""
+        """Callback when partitions are revoked (rebalance).
+
+        Deliberately does NOT commit. An argument-less commit() here flushes
+        the offset store, which holds every offset DELIVERED in the last poll —
+        including records abandoned mid-batch for redelivery. Committing them
+        marks unprocessed alerts as done, silently, on every rebalance. Records
+        that were processed are already committed individually by
+        _process_batch.
+        """
         self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
-        # Commit any pending offsets before rebalance
-        try:
-            consumer.commit(asynchronous=False)
-        except KafkaException as e:
-            self.logger.warning(f"Failed to commit during rebalance: {e}")
 
     def _consume_loop(self):
         """Main consumption loop - blocking and synchronous."""
