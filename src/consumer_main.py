@@ -16,6 +16,7 @@ Environment Variables:
     HEALTH_CHECK_PORT: Port for health checks (default: 8080)
     LOG_LEVEL: Logging level (default: INFO)
 """
+import json
 import logging
 import sys
 import threading
@@ -25,6 +26,7 @@ from dotenv import find_dotenv, load_dotenv
 from prometheus_client import start_http_server
 from src import logging_conf
 from src.config.config import config
+from src.core.consumer_health import consumer_health
 
 # Load environment variables before any other imports
 load_dotenv(find_dotenv())
@@ -53,26 +55,56 @@ def start_metrics_server(port: int):
     logger.info(f"Prometheus metrics available at http://0.0.0.0:{port}/metrics")
 
 
+READINESS_PATHS = ("/readyz", "/ready")
+# `/`, `/health` and `/healthz` are LEGACY ALIASES and load-bearing: production
+# probes target `/`. Serving only /livez would 404 there and kill every pod the
+# moment this image landed, with no chart change to revert. They keep the image
+# and the probe-path change independently deployable.
+LIVENESS_PATHS = ("/livez", "/", "/health", "/healthz")
+
+
 def create_health_server(port: int):
     """
-    Create a simple health check HTTP server.
-    This can be used for K8s liveness/readiness probes.
+    Create the K8s probe server.
+
+    Two behaviours behind six paths, both backed by real consumer state:
+      readiness -- consuming, partitions assigned (or inside the revoke grace),
+                   recent poll. This is what gates the rollout.
+      liveness  -- the consume loop is still polling. Green while starting or
+                   draining, so a slow schema wait is never killed.
     """
     class HealthHandler(BaseHTTPRequestHandler):
+        def _respond(self, ok: bool, reason: str, probe: str):
+            body = json.dumps(
+                {
+                    "status": "ok" if ok else "unhealthy",
+                    "probe": probe,
+                    "reason": reason,
+                    **consumer_health.snapshot(),
+                }
+            ).encode()
+            self.send_response(200 if ok else 503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
-            if self.path in ["/health", "/healthz", "/ready", "/"]:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"status": "ok"}')
+            path = self.path.split("?", 1)[0]
+            if path in READINESS_PATHS:
+                ok, reason = consumer_health.is_ready()
+                self._respond(ok, reason, "readiness")
+            elif path in LIVENESS_PATHS:
+                ok, reason = consumer_health.is_live()
+                self._respond(ok, reason, "liveness")
             else:
                 self.send_response(404)
                 self.end_headers()
-        
+
         def log_message(self, format, *args):
             # Suppress access logs for health checks
             pass
-    
+
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     
     def serve():
@@ -138,18 +170,27 @@ def main():
         sys.exit(1)
     
     try:
-        # Step 1: Initialize services (DB, etc.)
-        init_services()
-        
-        # Step 2: Start Prometheus metrics server
+        # Step 1: Start the metrics and probe servers BEFORE anything blocking.
+        #
+        # This ordering is the fix for the startup CrashLoop. init_services()
+        # blocks on the schema wait, which during a full ArgoCD sync runs for
+        # minutes while keep-api-gateway is itself rolling. Binding the probe
+        # server after it meant kubelet got connection-refused for that entire
+        # window, and the production liveness probe (initialDelay 60 +
+        # failureThreshold 3 x period 10) killed the pod at ~90s -- always
+        # before the internal schema-wait timeout could even be reached.
+        # Bound first, the pod answers "alive, not ready" and the startupProbe
+        # budget is what decides whether to give up on it.
         start_metrics_server(metrics_port)
-        
-        # Step 3: Start health check server (for K8s probes)
         create_health_server(health_port)
 
-        # Step 3.5: Start the automations trigger index (non-blocking).
-        # After the metrics/health servers so the first hydrate attempt is
-        # already scrapable, and before the blocking consume loop.
+        # Step 2: Initialize services (DB, etc.) -- blocking, and slow by
+        # design while the gateway's migrations settle.
+        init_services()
+
+        # Step 3: Start the automations trigger index (non-blocking).
+        # After init_services because hydration reads the shared schema, and
+        # before the blocking consume loop.
         _start_trigger_index_safely()
 
         # Step 4: Create and start Kafka consumer (blocking)
