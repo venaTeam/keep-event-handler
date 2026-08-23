@@ -44,7 +44,7 @@ def alert():
     return {
         "id": "event-789",
         "fingerprint": "fp",
-        "time_created": "2026-01-01T00:00:00Z",
+        "started_at": "2026-01-01T00:00:00Z",
     }
 
 
@@ -68,7 +68,7 @@ def test_missing_source_id_is_rejected_before_kafka():
     with pytest.raises(MatchedContractError, match="alert.id"):
         build_messages(
             "tenant",
-            {"fingerprint": "fp", "time_created": "2026-01-01T00:00:00Z"},
+            {"fingerprint": "fp", "started_at": "2026-01-01T00:00:00Z"},
             (AutomationMatch("a", 300, None),),
         )
 
@@ -82,7 +82,7 @@ def test_source_id_is_preserved_without_history_id():
     assert "history_id" not in messages[0]["alert"]
 
 
-@pytest.mark.parametrize("missing", ["fingerprint", "time_created"])
+@pytest.mark.parametrize("missing", ["fingerprint", "started_at"])
 def test_required_alert_contract_fields_are_rejected(missing):
     payload = alert()
     payload.pop(missing)

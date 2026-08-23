@@ -21,8 +21,8 @@ def _alert_snapshot(alert: Any) -> dict[str, Any]:
         raise MatchedContractError("alert.id is required")
     if not snapshot.get("fingerprint"):
         raise MatchedContractError("alert.fingerprint is required")
-    if not snapshot.get("time_created"):
-        raise MatchedContractError("alert.time_created is required")
+    if not snapshot.get("started_at"):
+        raise MatchedContractError("alert.started_at is required")
     return snapshot
 
 
