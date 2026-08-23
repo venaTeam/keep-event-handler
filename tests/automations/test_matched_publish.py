@@ -26,6 +26,11 @@ class FakeProducer:
         return len(self.queued)
 
 
+class RaisingProducer(FakeProducer):
+    def produce(self, topic, key, value, on_delivery):
+        raise RuntimeError("local producer failure")
+
+
 def alert():
     return {"history_id": str(uuid.uuid4()), "fingerprint": "fp", "time_created": "2026-01-01T00:00:00Z"}
 
@@ -79,4 +84,17 @@ def test_partial_delivery_raises_and_marks_unhealthy(monkeypatch):
     with pytest.raises(MatchedPublishError, match="1/2 acknowledged"):
         producer.publish(messages)
 
-    assert producer.health()[0] is False
+    assert producer.healthy is False
+
+
+def test_unexpected_client_error_is_always_an_unresolved_publish_error(monkeypatch):
+    from src.bl.automations import settings
+
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
+    producer = MatchedProducer(client=RaisingProducer())
+    messages = build_messages(
+        "tenant", alert(), (AutomationMatch("a-1", 300, None),)
+    )
+
+    with pytest.raises(MatchedPublishError):
+        producer.publish(messages)

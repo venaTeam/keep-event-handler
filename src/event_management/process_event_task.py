@@ -22,6 +22,7 @@ from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
+from src.bl.automations.publish_matches import publish_matches
 from src.config.consts import (
     KEEP_CORRELATION_ENABLED,
     MAINTENANCE_WINDOW_ALERT_STRATEGY,
@@ -1233,8 +1234,6 @@ def __handle_formatted_events(
 
     # Broker acknowledgement is part of resolving the raw record. Keep this
     # before optional notifications and let failures reach the Kafka consumer.
-    from src.bl.automations.publish_matches import publish_matches
-
     publish_matches(tenant_id, automation_events)
 
     # let's save all fields to the DB so that we can use them in the future such in deduplication fields suggestions

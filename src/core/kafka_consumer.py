@@ -23,6 +23,7 @@ from src.config.consts import (
     KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
 from src.config.config import config
+from src.bl.automations.producer import MatchedPublishError
 from src.core.consumer_health import ConsumerPhase, consumer_health
 from src.core.metrics import (
     events_in_counter,
@@ -682,8 +683,6 @@ class KafkaEventConsumer(EventConsumer):
                 process_event_sync(event_dto)
                 return True
             except Exception as e:
-                from src.bl.automations.producer import MatchedPublishError
-
                 kind = classify_error(e)
                 self.logger.warning(
                     f"Error processing event "

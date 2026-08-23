@@ -1,13 +1,21 @@
 """Pure message construction plus the small B5 hot-path orchestration."""
+
 import json
 import uuid
+from collections.abc import Sequence
+from typing import Any
 
+from src.bl.automations.models import AutomationMatch
 from src.bl.automations.producer import get_matched_producer
 from src.bl.automations.reloader import match
-from src.core.metrics import automation_alerts_matched_total, automation_alerts_probed_total, automation_matched_m
+from src.core.metrics import (
+    automation_alerts_matched_total,
+    automation_alerts_probed_total,
+    automation_matched_m,
+)
 
 
-def _alert_snapshot(alert) -> dict:
+def _alert_snapshot(alert: Any) -> dict[str, Any]:
     snapshot = json.loads(alert.json()) if hasattr(alert, "json") else dict(alert)
     try:
         uuid.UUID(snapshot.get("history_id"))
@@ -16,26 +24,37 @@ def _alert_snapshot(alert) -> dict:
     return snapshot
 
 
-def build_messages(tenant_id: str, alert, matches) -> list[dict]:
+def build_messages(
+    tenant_id: str,
+    alert: Any,
+    matches: Sequence[AutomationMatch],
+) -> list[dict[str, Any]]:
     snapshot = _alert_snapshot(alert)
     matched_m = len(matches)
     result = []
     for automation in matches:
         cooldown = automation.cooldown
-        result.append({
-            "tenant_id": tenant_id,
-            "alert": snapshot,
-            "automation_id": automation.automation_id,
-            "matched_m": matched_m,
-            "cooldown": None if cooldown is None else {
-                "fields": list(cooldown.fields), "seconds": cooldown.seconds,
-                "scheme_ver": cooldown.scheme_ver,
-            },
-        })
+        result.append(
+            {
+                "tenant_id": tenant_id,
+                "alert": snapshot,
+                "automation_id": automation.automation_id,
+                "matched_m": matched_m,
+                "cooldown": (
+                    None
+                    if cooldown is None
+                    else {
+                        "fields": list(cooldown.fields),
+                        "seconds": cooldown.seconds,
+                        "scheme_ver": cooldown.scheme_ver,
+                    }
+                ),
+            }
+        )
     return result
 
 
-def publish_matches(tenant_id: str, alerts) -> None:
+def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
     producer = get_matched_producer()
     if not producer.enabled:
         return
