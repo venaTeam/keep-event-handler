@@ -1,7 +1,6 @@
 """Pure message construction plus the small B5 hot-path orchestration."""
 
 import json
-import uuid
 from collections.abc import Sequence
 from typing import Any
 
@@ -17,10 +16,9 @@ from src.core.metrics import (
 
 def _alert_snapshot(alert: Any) -> dict[str, Any]:
     snapshot = json.loads(alert.json()) if hasattr(alert, "json") else dict(alert)
-    try:
-        uuid.UUID(snapshot.get("history_id"))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise MatchedContractError("alert.history_id must be a UUID string") from error
+    source_id = snapshot.get("id")
+    if source_id is None or not str(source_id).strip():
+        raise MatchedContractError("alert.id is required")
     if not snapshot.get("fingerprint"):
         raise MatchedContractError("alert.fingerprint is required")
     if not snapshot.get("time_created"):

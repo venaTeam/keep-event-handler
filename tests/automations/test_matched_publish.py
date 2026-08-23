@@ -1,5 +1,3 @@
-import uuid
-
 import pytest
 
 from src.bl.automations import settings
@@ -44,7 +42,7 @@ class MissingTopicProducer(FakeProducer):
 
 def alert():
     return {
-        "history_id": str(uuid.uuid4()),
+        "id": "event-789",
         "fingerprint": "fp",
         "time_created": "2026-01-01T00:00:00Z",
     }
@@ -66,9 +64,22 @@ def test_message_per_pair_exact_contract_and_key(monkeypatch):
     assert set(messages[0]) == {"tenant_id", "alert", "automation_id", "matched_m", "cooldown"}
 
 
-def test_missing_history_id_is_rejected_before_kafka():
-    with pytest.raises(MatchedContractError, match="history_id"):
-        build_messages("tenant", {"fingerprint": "fp"}, (AutomationMatch("a", 300, None),))
+def test_missing_source_id_is_rejected_before_kafka():
+    with pytest.raises(MatchedContractError, match="alert.id"):
+        build_messages(
+            "tenant",
+            {"fingerprint": "fp", "time_created": "2026-01-01T00:00:00Z"},
+            (AutomationMatch("a", 300, None),),
+        )
+
+
+def test_source_id_is_preserved_without_history_id():
+    messages = build_messages(
+        "tenant", alert(), (AutomationMatch("a", 300, None),)
+    )
+
+    assert messages[0]["alert"]["id"] == "event-789"
+    assert "history_id" not in messages[0]["alert"]
 
 
 @pytest.mark.parametrize("missing", ["fingerprint", "time_created"])

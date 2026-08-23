@@ -125,7 +125,9 @@ def test_readiness_body_carries_the_reason(probe_server):
     assert body["reason"] == "no partitions assigned"
 
 
-def test_unhealthy_matched_producer_gates_readyz(probe_server, monkeypatch):
+def test_unhealthy_matched_producer_gates_readyz(
+    probe_server, monkeypatch, caplog
+):
     become_consuming()
     fake = MagicMock()
     fake.health.return_value = (False, "producer unavailable")
@@ -135,6 +137,7 @@ def test_unhealthy_matched_producer_gates_readyz(probe_server, monkeypatch):
 
     assert status == 503
     assert body["reason"] == "producer unavailable"
+    assert "Readiness failed: matched producer is unhealthy" in caplog.text
 
 
 def test_matched_producer_does_not_affect_liveness(probe_server, monkeypatch):

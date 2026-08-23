@@ -104,6 +104,10 @@ def create_health_server(port: int):
                 try:
                     producer_ok, producer_reason = get_matched_producer().health()
                     if not producer_ok:
+                        logger.warning(
+                            "Readiness failed: matched producer is unhealthy (%s)",
+                            producer_reason,
+                        )
                         ok, reason = False, producer_reason
                 except Exception:
                     logger.exception("Matched producer readiness check failed")
