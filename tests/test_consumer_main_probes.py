@@ -21,8 +21,11 @@ class FakePartition:
 
 
 @pytest.fixture
-def probe_server():
+def probe_server(monkeypatch):
     """Real HTTPServer on an ephemeral port — the handler is the unit here."""
+    producer = MagicMock()
+    producer.health.return_value = (True, "producer healthy")
+    monkeypatch.setattr(producer_module, "_producer", producer)
     consumer_health.reset_for_tests()
     server = consumer_main.create_health_server(0)
     yield f"http://127.0.0.1:{server.server_address[1]}"

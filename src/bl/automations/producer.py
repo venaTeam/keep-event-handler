@@ -46,9 +46,8 @@ class MatchedProducer:
         self._clock = clock
         self._wait = wait
         self._lock = threading.Lock()
-        self._enabled = settings.read_matched_publish_enabled()
-        self._healthy = not self._enabled
-        self._client = client or (Producer(self._config()) if self._enabled else None)
+        self._healthy = False
+        self._client = client or Producer(self._config())
 
     @staticmethod
     def _config() -> dict[str, Any]:
@@ -87,24 +86,16 @@ class MatchedProducer:
         return result
 
     @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-    @property
     def healthy(self) -> bool:
         """Last observed state without triggering broker I/O."""
         return self._healthy
 
     def health(self) -> tuple[bool, str]:
-        if not self._enabled:
-            return True, "matched publishing disabled"
         if not self._healthy:
             self.start()
         return self._healthy, "producer healthy" if self._healthy else "producer unavailable"
 
     def start(self) -> bool:
-        if not self._enabled:
-            return False
         try:
             with self._lock:
                 metadata = self._client.list_topics(
@@ -128,7 +119,7 @@ class MatchedProducer:
             return False
 
     def publish(self, messages: Sequence[Mapping[str, Any]]) -> None:
-        if not self._enabled or not messages:
+        if not messages:
             return
         deadline = self._clock() + settings.read_matched_publish_timeout_seconds()
         pending = set(range(len(messages)))

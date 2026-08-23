@@ -211,7 +211,7 @@ def _stop_trigger_index_safely():
 def _start_matched_producer_safely():
     try:
         producer = get_matched_producer()
-        if producer.enabled and not producer.start():
+        if not producer.start():
             logger.error("Matched producer is not ready; /readyz remains unhealthy")
     except Exception:
         logger.exception("Failed to start matched producer")

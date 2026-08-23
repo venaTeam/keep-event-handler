@@ -58,8 +58,6 @@ def build_messages(
 
 def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
     producer = get_matched_producer()
-    if not producer.enabled:
-        return
     for alert in alerts:
         automation_alerts_probed_total.inc()
         matches = tuple(match(tenant_id, alert))

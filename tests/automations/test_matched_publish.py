@@ -1,7 +1,6 @@
 import pytest
 
 import src.bl.automations.publish_matches as matched_publish
-from src.bl.automations import settings
 from src.bl.automations.models import AutomationMatch, CooldownSpec
 from src.bl.automations.producer import (
     MatchedContractError,
@@ -119,8 +118,6 @@ def test_publish_matches_passes_original_alert_to_match(monkeypatch):
     matched_alerts = []
 
     class ProducerStub:
-        enabled = True
-
         def publish(self, messages):
             raise AssertionError("M=0 must not publish")
 
@@ -136,8 +133,7 @@ def test_publish_matches_passes_original_alert_to_match(monkeypatch):
     assert matched_alerts == [("tenant", source_alert)]
 
 
-def test_fanout_is_enqueued_then_acknowledged(monkeypatch):
-    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
+def test_fanout_is_enqueued_then_acknowledged():
     fake = FakeProducer()
     producer = MatchedProducer(client=fake)
     messages = build_messages(
@@ -151,8 +147,7 @@ def test_fanout_is_enqueued_then_acknowledged(monkeypatch):
     assert producer.health()[0] is True
 
 
-def test_partial_delivery_raises_and_marks_unhealthy(monkeypatch):
-    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
+def test_partial_delivery_raises_and_marks_unhealthy():
     producer = MatchedProducer(client=FakeProducer(errors=[None, RuntimeError("broker")]))
     messages = build_messages(
         "tenant", alert(),
@@ -165,8 +160,7 @@ def test_partial_delivery_raises_and_marks_unhealthy(monkeypatch):
     assert producer.healthy is False
 
 
-def test_unexpected_client_error_is_always_an_unresolved_publish_error(monkeypatch):
-    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
+def test_unexpected_client_error_is_always_an_unresolved_publish_error():
     producer = MatchedProducer(client=RaisingProducer())
     messages = build_messages(
         "tenant", alert(), (AutomationMatch("a-1", 300, None),)
@@ -176,8 +170,7 @@ def test_unexpected_client_error_is_always_an_unresolved_publish_error(monkeypat
         producer.publish(messages)
 
 
-def test_start_requires_matched_topic_metadata(monkeypatch):
-    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
+def test_start_requires_matched_topic_metadata():
     producer = MatchedProducer(client=MissingTopicProducer())
 
     assert producer.start() is False
