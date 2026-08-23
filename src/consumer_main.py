@@ -100,6 +100,15 @@ def create_health_server(port: int):
             path = self.path.split("?", 1)[0]
             if path in READINESS_PATHS:
                 ok, reason = consumer_health.is_ready()
+                try:
+                    from src.bl.automations.producer import get_matched_producer
+
+                    producer_ok, producer_reason = get_matched_producer().health()
+                    if not producer_ok:
+                        ok, reason = False, producer_reason
+                except Exception:
+                    logger.exception("Matched producer readiness check failed")
+                    ok, reason = False, "matched producer health check failed"
                 self._respond(ok, reason, "readiness")
             elif path in LIVENESS_PATHS:
                 ok, reason = consumer_health.is_live()
@@ -196,6 +205,26 @@ def _stop_trigger_index_safely():
         logger.exception("Failed to stop the automations trigger index")
 
 
+def _start_matched_producer_safely():
+    try:
+        from src.bl.automations.producer import get_matched_producer
+
+        producer = get_matched_producer()
+        if producer.enabled and not producer.start():
+            logger.error("Matched producer is not ready; /readyz remains unhealthy")
+    except Exception:
+        logger.exception("Failed to start matched producer")
+
+
+def _stop_matched_producer_safely():
+    try:
+        from src.bl.automations.producer import get_matched_producer
+
+        get_matched_producer().stop()
+    except Exception:
+        logger.exception("Failed to stop matched producer")
+
+
 def main():
     """Main entrypoint for the Kafka consumer service."""
     logger.info("=" * 60)
@@ -254,6 +283,7 @@ def main():
         # After init_services because hydration reads the shared schema, and
         # before the blocking consume loop.
         _start_trigger_index_safely()
+        _start_matched_producer_safely()
 
         # Step 4: Create and start Kafka consumer (blocking)
         from src.core.kafka_consumer import KafkaEventConsumer
@@ -278,6 +308,7 @@ def main():
         # first guarantees it completes inside the k8s grace period even when
         # the SSE flush hangs.
         _stop_trigger_index_safely()
+        _stop_matched_producer_safely()
 
         # Flush any pending SSE notifications queued on the background pool so
         # they aren't lost on a graceful shutdown of the standalone consumer.

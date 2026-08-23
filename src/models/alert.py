@@ -128,6 +128,10 @@ class AlertSeverity(SeverityBaseInterface):
 
 
 class AlertDto(BaseModel):
+    # Assigned by the gateway before the raw Kafka publish. This is the
+    # downstream automation idempotency identity; never replace it with the
+    # per-persistence Alert.id/event_id.
+    history_id: str | None = None
     id: str | None
     name: str
     status: AlertStatus

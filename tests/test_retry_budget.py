@@ -204,3 +204,19 @@ def test_success_does_not_record_terminal():
 
     assert mock_process.call_count == 1
     mock_terminal.assert_not_called()
+
+
+def test_matched_publish_exhaustion_is_unresolved_not_terminal():
+    from src.bl.automations.producer import MatchedPublishError
+
+    consumer = KafkaEventConsumer()
+    budget = RetryBudget(300000, max_sleep_seconds=0)
+    payload = {"tenant_id": "t1"}
+    with patch(
+        "src.core.kafka_consumer.process_event_sync",
+        side_effect=MatchedPublishError("broker unavailable"),
+    ), patch("src.core.kafka_consumer.record_terminal_error") as terminal:
+        resolved = consumer._process_with_retries(MagicMock(), budget, payload)
+
+    assert resolved is False
+    terminal.assert_not_called()

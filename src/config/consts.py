@@ -175,6 +175,21 @@ KEEP_ERROR_GUARD_MAX_ENTRIES = config(
 AUTOMATION_INDEX_ENABLED = config(
     "AUTOMATION_INDEX_ENABLED", default=False, cast=bool
 )
+# B5 has an independent rollout gate: an index may be hydrated and measured
+# without emitting downstream work.
+AUTOMATION_MATCHED_PUBLISH_ENABLED = config(
+    "AUTOMATION_MATCHED_PUBLISH_ENABLED", default=False, cast=bool
+)
+MATCHED_ALERTS_TOPIC = config("MATCHED_ALERTS_TOPIC", default="matched-alerts")
+AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS = config(
+    "AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS", default=5.0, cast=float
+)
+AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS = config(
+    "AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS", default=0.01, cast=float
+)
+AUTOMATION_MATCHED_SHUTDOWN_TIMEOUT_SECONDS = config(
+    "AUTOMATION_MATCHED_SHUTDOWN_TIMEOUT_SECONDS", default=3.0, cast=float
+)
 AUTOMATION_INDEX_RELOAD_SECONDS = config(
     "AUTOMATION_INDEX_RELOAD_SECONDS", default=30, cast=int
 )

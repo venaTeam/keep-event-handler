@@ -203,3 +203,33 @@ automation_match_duration_seconds = Histogram(
     "Wall time of a match() probe on the consumer thread",
     buckets=(5e-5, 1e-4, 2.5e-4, 5e-4, 1e-3, 2.5e-3, 5e-3, 1e-2),
 )
+
+# B5 hot-path metrics. No tenant/automation/history labels: those are
+# unbounded cardinality and belong in structured logs/audit, not Prometheus.
+automation_alerts_probed_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}alerts_probed_total",
+    "Accepted alert occurrences probed against the automation index",
+)
+automation_alerts_matched_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}alerts_matched_total",
+    "Alert occurrences with at least one automation match",
+)
+automation_matched_m = Histogram(
+    f"{AUTOMATION_METRIC_PREFIX}matched_m",
+    "Matched automation fan-out per alert occurrence",
+    buckets=(0, 1, 2, 3, 5, 10),
+)
+automation_matched_publish_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}matched_publish_total",
+    "Matched-topic records by delivery result",
+    labelnames=["result"],
+)
+automation_matched_publish_duration_seconds = Histogram(
+    f"{AUTOMATION_METRIC_PREFIX}matched_publish_duration_seconds",
+    "Wall time to acknowledge one alert's complete matched fan-out",
+    buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 1, 5),
+)
+automation_matched_producer_ready = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}matched_producer_ready",
+    "1 when matched publishing is enabled and the producer is healthy",
+)

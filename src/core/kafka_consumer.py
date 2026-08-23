@@ -634,7 +634,10 @@ class KafkaEventConsumer(EventConsumer):
 
             # Process with bounded, batch-wide retries and timing.
             with processing_time_summary.time():
-                self._process_with_retries(event_dto, budget, payload)
+                resolved = self._process_with_retries(event_dto, budget, payload)
+
+            if resolved is False:
+                return False
 
             events_out_counter.inc()
             self.logger.debug(f"Successfully processed message: {trace_id}")
@@ -677,8 +680,10 @@ class KafkaEventConsumer(EventConsumer):
         for attempt in range(MAX_PROCESSING_RETRIES):
             try:
                 process_event_sync(event_dto)
-                return
+                return True
             except Exception as e:
+                from src.bl.automations.producer import MatchedPublishError
+
                 kind = classify_error(e)
                 self.logger.warning(
                     f"Error processing event "
@@ -703,6 +708,11 @@ class KafkaEventConsumer(EventConsumer):
                     ) from e
 
                 if attempt == MAX_PROCESSING_RETRIES - 1:
+                    if isinstance(e, MatchedPublishError):
+                        self.logger.error(
+                            "Matched delivery retries exhausted; leaving raw record unresolved"
+                        )
+                        return False
                     self.logger.error(
                         "Retries exhausted (attempt cap) — recording and committing"
                     )
@@ -710,6 +720,11 @@ class KafkaEventConsumer(EventConsumer):
                     return
 
                 if budget.exhausted():
+                    if isinstance(e, MatchedPublishError):
+                        self.logger.error(
+                            "Matched delivery retry budget exhausted; leaving raw record unresolved"
+                        )
+                        return False
                     self.logger.error(
                         "Retry budget exhausted (poll-interval guard) — "
                         "recording and committing"
