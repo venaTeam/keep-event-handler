@@ -48,6 +48,28 @@ def alert():
     }
 
 
+def test_producer_uses_dedicated_kafka_configuration(monkeypatch):
+    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "raw-kafka:9092")
+    monkeypatch.setenv(
+        "MATCHED_KAFKA_BOOTSTRAP_SERVERS",
+        '["matched-a:9092", "matched-b:9092"]',
+    )
+    monkeypatch.setenv("MATCHED_KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+    monkeypatch.setenv("MATCHED_KAFKA_SASL_MECHANISM", "SCRAM-SHA-512")
+    monkeypatch.setenv("MATCHED_KAFKA_SASL_USERNAME", "matched-user")
+    monkeypatch.setenv("MATCHED_KAFKA_SASL_PASSWORD", "matched-password")
+    monkeypatch.setenv("MATCHED_KAFKA_SSL_CAFILE", "/matched/ca.pem")
+
+    producer_config = MatchedProducer._config()
+
+    assert producer_config["bootstrap.servers"] == "matched-a:9092,matched-b:9092"
+    assert producer_config["security.protocol"] == "SASL_SSL"
+    assert producer_config["sasl.mechanism"] == "SCRAM-SHA-512"
+    assert producer_config["sasl.username"] == "matched-user"
+    assert producer_config["sasl.password"] == "matched-password"
+    assert producer_config["ssl.ca.location"] == "/matched/ca.pem"
+
+
 def test_message_per_pair_exact_contract_and_key(monkeypatch):
     matches = (
         AutomationMatch("a-1", 300, None),

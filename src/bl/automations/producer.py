@@ -52,7 +52,7 @@ class MatchedProducer:
 
     @staticmethod
     def _config() -> dict[str, Any]:
-        servers = config("KAFKA_BOOTSTRAP_SERVERS", default="localhost:29092")
+        servers = config("MATCHED_KAFKA_BOOTSTRAP_SERVERS", default="localhost:29092")
         try:
             parsed = json.loads(servers)
             servers = ",".join(parsed) if isinstance(parsed, list) else str(parsed)
@@ -60,18 +60,26 @@ class MatchedProducer:
             pass
         result = {
             "bootstrap.servers": servers,
-            "security.protocol": config("KAFKA_SECURITY_PROTOCOL", default="PLAINTEXT"),
+            "security.protocol": config(
+                "MATCHED_KAFKA_SECURITY_PROTOCOL", default="PLAINTEXT"
+            ),
             "enable.idempotence": True,
             "acks": "all",
         }
         if result["security.protocol"] in ("SASL_PLAINTEXT", "SASL_SSL"):
-            result["sasl.mechanism"] = config("KAFKA_SASL_MECHANISM", default="PLAIN")
-            result["sasl.username"] = config("KAFKA_SASL_USERNAME", default=None)
-            result["sasl.password"] = config("KAFKA_SASL_PASSWORD", default=None)
+            result["sasl.mechanism"] = config(
+                "MATCHED_KAFKA_SASL_MECHANISM", default="PLAIN"
+            )
+            result["sasl.username"] = config(
+                "MATCHED_KAFKA_SASL_USERNAME", default=None
+            )
+            result["sasl.password"] = config(
+                "MATCHED_KAFKA_SASL_PASSWORD", default=None
+            )
         for env, key in (
-            ("KAFKA_SSL_CAFILE", "ssl.ca.location"),
-            ("KAFKA_SSL_CERTFILE", "ssl.certificate.location"),
-            ("KAFKA_SSL_KEYFILE", "ssl.key.location"),
+            ("MATCHED_KAFKA_SSL_CAFILE", "ssl.ca.location"),
+            ("MATCHED_KAFKA_SSL_CERTFILE", "ssl.certificate.location"),
+            ("MATCHED_KAFKA_SSL_KEYFILE", "ssl.key.location"),
         ):
             value = config(env, default=None)
             if value:
