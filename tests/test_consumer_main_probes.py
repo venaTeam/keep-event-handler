@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src import consumer_main
+from src.bl.automations import producer as producer_module
 from src.core.consumer_health import ConsumerPhase, consumer_health
 
 
@@ -122,6 +123,30 @@ def test_readiness_body_carries_the_reason(probe_server):
 
     assert status == 503
     assert body["reason"] == "no partitions assigned"
+
+
+def test_unhealthy_matched_producer_gates_readyz(probe_server, monkeypatch):
+    become_consuming()
+    fake = MagicMock()
+    fake.health.return_value = (False, "producer unavailable")
+    monkeypatch.setattr(producer_module, "_producer", fake)
+
+    status, body = get(probe_server, "/readyz")
+
+    assert status == 503
+    assert body["reason"] == "producer unavailable"
+
+
+def test_matched_producer_does_not_affect_liveness(probe_server, monkeypatch):
+    fake = MagicMock()
+    fake.health.return_value = (False, "producer unavailable")
+    monkeypatch.setattr(producer_module, "_producer", fake)
+
+    status, body = get(probe_server, "/livez")
+
+    assert status == 200
+    assert body["probe"] == "liveness"
+    fake.health.assert_not_called()
 
 
 # -- startup ordering ---------------------------------------------------

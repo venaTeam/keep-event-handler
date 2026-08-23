@@ -721,7 +721,8 @@ class KafkaEventConsumer(EventConsumer):
                 if budget.exhausted():
                     if isinstance(e, MatchedPublishError):
                         self.logger.error(
-                            "Matched delivery retry budget exhausted; leaving raw record unresolved"
+                            "Matched delivery retry budget exhausted; "
+                            "leaving raw record unresolved"
                         )
                         return False
                     self.logger.error(

@@ -1,8 +1,14 @@
 import uuid
+
 import pytest
 
+from src.bl.automations import settings
 from src.bl.automations.models import AutomationMatch, CooldownSpec
-from src.bl.automations.producer import MatchedProducer, MatchedPublishError
+from src.bl.automations.producer import (
+    MatchedContractError,
+    MatchedProducer,
+    MatchedPublishError,
+)
 from src.bl.automations.publish_matches import build_messages
 
 
@@ -31,8 +37,17 @@ class RaisingProducer(FakeProducer):
         raise RuntimeError("local producer failure")
 
 
+class MissingTopicProducer(FakeProducer):
+    def list_topics(self, timeout):
+        return type("Metadata", (), {"topics": {}})()
+
+
 def alert():
-    return {"history_id": str(uuid.uuid4()), "fingerprint": "fp", "time_created": "2026-01-01T00:00:00Z"}
+    return {
+        "history_id": str(uuid.uuid4()),
+        "fingerprint": "fp",
+        "time_created": "2026-01-01T00:00:00Z",
+    }
 
 
 def test_message_per_pair_exact_contract_and_key(monkeypatch):
@@ -52,12 +67,20 @@ def test_message_per_pair_exact_contract_and_key(monkeypatch):
 
 
 def test_missing_history_id_is_rejected_before_kafka():
-    with pytest.raises(ValueError, match="history_id"):
+    with pytest.raises(MatchedContractError, match="history_id"):
         build_messages("tenant", {"fingerprint": "fp"}, (AutomationMatch("a", 300, None),))
 
 
+@pytest.mark.parametrize("missing", ["fingerprint", "time_created"])
+def test_required_alert_contract_fields_are_rejected(missing):
+    payload = alert()
+    payload.pop(missing)
+
+    with pytest.raises(MatchedContractError, match=missing):
+        build_messages("tenant", payload, (AutomationMatch("a", 300, None),))
+
+
 def test_fanout_is_enqueued_then_acknowledged(monkeypatch):
-    from src.bl.automations import settings
     monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
     fake = FakeProducer()
     producer = MatchedProducer(client=fake)
@@ -73,7 +96,6 @@ def test_fanout_is_enqueued_then_acknowledged(monkeypatch):
 
 
 def test_partial_delivery_raises_and_marks_unhealthy(monkeypatch):
-    from src.bl.automations import settings
     monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
     producer = MatchedProducer(client=FakeProducer(errors=[None, RuntimeError("broker")]))
     messages = build_messages(
@@ -88,8 +110,6 @@ def test_partial_delivery_raises_and_marks_unhealthy(monkeypatch):
 
 
 def test_unexpected_client_error_is_always_an_unresolved_publish_error(monkeypatch):
-    from src.bl.automations import settings
-
     monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
     producer = MatchedProducer(client=RaisingProducer())
     messages = build_messages(
@@ -98,3 +118,11 @@ def test_unexpected_client_error_is_always_an_unresolved_publish_error(monkeypat
 
     with pytest.raises(MatchedPublishError):
         producer.publish(messages)
+
+
+def test_start_requires_matched_topic_metadata(monkeypatch):
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
+    producer = MatchedProducer(client=MissingTopicProducer())
+
+    assert producer.start() is False
+    assert producer.healthy is False

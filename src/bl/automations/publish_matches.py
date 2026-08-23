@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from src.bl.automations.models import AutomationMatch
-from src.bl.automations.producer import get_matched_producer
+from src.bl.automations.producer import MatchedContractError, get_matched_producer
 from src.bl.automations.reloader import match
 from src.core.metrics import (
     automation_alerts_matched_total,
@@ -20,7 +20,11 @@ def _alert_snapshot(alert: Any) -> dict[str, Any]:
     try:
         uuid.UUID(snapshot.get("history_id"))
     except (ValueError, TypeError, AttributeError) as error:
-        raise ValueError("alert.history_id must be a UUID string") from error
+        raise MatchedContractError("alert.history_id must be a UUID string") from error
+    if not snapshot.get("fingerprint"):
+        raise MatchedContractError("alert.fingerprint is required")
+    if not snapshot.get("time_created"):
+        raise MatchedContractError("alert.time_created is required")
     return snapshot
 
 

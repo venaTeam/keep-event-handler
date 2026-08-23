@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dotenv import find_dotenv, load_dotenv
 from prometheus_client import start_http_server
 from src import logging_conf
+from src.bl.automations.producer import get_matched_producer
 from src.config.config import config
 from src.core.consumer_health import consumer_health
 
@@ -101,8 +102,6 @@ def create_health_server(port: int):
             if path in READINESS_PATHS:
                 ok, reason = consumer_health.is_ready()
                 try:
-                    from src.bl.automations.producer import get_matched_producer
-
                     producer_ok, producer_reason = get_matched_producer().health()
                     if not producer_ok:
                         ok, reason = False, producer_reason
@@ -207,8 +206,6 @@ def _stop_trigger_index_safely():
 
 def _start_matched_producer_safely():
     try:
-        from src.bl.automations.producer import get_matched_producer
-
         producer = get_matched_producer()
         if producer.enabled and not producer.start():
             logger.error("Matched producer is not ready; /readyz remains unhealthy")
@@ -218,8 +215,6 @@ def _start_matched_producer_safely():
 
 def _stop_matched_producer_safely():
     try:
-        from src.bl.automations.producer import get_matched_producer
-
         get_matched_producer().stop()
     except Exception:
         logger.exception("Failed to stop matched producer")

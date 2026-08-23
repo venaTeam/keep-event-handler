@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 from requests.exceptions import HTTPError, Timeout
 from sqlalchemy.exc import OperationalError
 
+from src.bl.automations.producer import MatchedPublishError
 from src.core.kafka_consumer import (
     KafkaEventConsumer,
     PoisonMessageError,
@@ -207,8 +208,6 @@ def test_success_does_not_record_terminal():
 
 
 def test_matched_publish_exhaustion_is_unresolved_not_terminal():
-    from src.bl.automations.producer import MatchedPublishError
-
     consumer = KafkaEventConsumer()
     budget = RetryBudget(300000, max_sleep_seconds=0)
     payload = {"tenant_id": "t1"}

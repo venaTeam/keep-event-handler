@@ -25,6 +25,10 @@ class MatchedPublishError(RuntimeError):
     """The raw record is unresolved and must not be committed."""
 
 
+class MatchedContractError(MatchedPublishError):
+    """An upstream alert cannot be serialized to the matched contract."""
+
+
 class ProducerClient(Protocol):
     def produce(self, topic: str, *, key: bytes, value: bytes, on_delivery: Callable) -> None: ...
     def poll(self, timeout: float) -> int: ...
@@ -95,9 +99,17 @@ class MatchedProducer:
             return False
         try:
             with self._lock:
-                self._client.list_topics(
+                metadata = self._client.list_topics(
                     timeout=settings.read_matched_publish_timeout_seconds()
                 )
+                topics = getattr(metadata, "topics", None)
+                if topics is not None:
+                    topic = topics.get(MATCHED_ALERTS_TOPIC)
+                    topic_error = None if topic is None else getattr(topic, "error", None)
+                    if topic is None or topic_error is not None:
+                        raise MatchedPublishError(
+                            f"matched topic metadata unavailable: {MATCHED_ALERTS_TOPIC}"
+                        )
             self._healthy = True
             automation_matched_producer_ready.set(1)
             return True
