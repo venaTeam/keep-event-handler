@@ -1191,8 +1191,8 @@ def __handle_formatted_events(
                 event, deduplication_rules, last_alerts_fingerprint_to_hash
             )
 
-        # Persistence dedup may remove a raw redelivery. B5 must still see it;
-        # downstream idempotency keys on the stable upstream history_id.
+        # Persistence dedup may remove a raw redelivery. B5 must still see it,
+        # preserving the stable upstream alert id in the matched message.
         automation_events = list(formatted_events)
 
         # filter out the deduplicated events

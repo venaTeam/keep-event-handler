@@ -1,5 +1,6 @@
 import pytest
 
+import src.bl.automations.publish_matches as matched_publish
 from src.bl.automations import settings
 from src.bl.automations.models import AutomationMatch, CooldownSpec
 from src.bl.automations.producer import (
@@ -111,6 +112,28 @@ def test_required_alert_contract_fields_are_rejected(missing):
 
     with pytest.raises(MatchedContractError, match=missing):
         build_messages("tenant", payload, (AutomationMatch("a", 300, None),))
+
+
+def test_publish_matches_passes_original_alert_to_match(monkeypatch):
+    source_alert = object()
+    matched_alerts = []
+
+    class ProducerStub:
+        enabled = True
+
+        def publish(self, messages):
+            raise AssertionError("M=0 must not publish")
+
+    def capture_match(tenant_id, candidate):
+        matched_alerts.append((tenant_id, candidate))
+        return ()
+
+    monkeypatch.setattr(matched_publish, "get_matched_producer", ProducerStub)
+    monkeypatch.setattr(matched_publish, "match", capture_match)
+
+    matched_publish.publish_matches("tenant", [source_alert])
+
+    assert matched_alerts == [("tenant", source_alert)]
 
 
 def test_fanout_is_enqueued_then_acknowledged(monkeypatch):

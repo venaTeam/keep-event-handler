@@ -61,10 +61,10 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
     if not producer.enabled:
         return
     for alert in alerts:
-        snapshot = _alert_snapshot(alert)
         automation_alerts_probed_total.inc()
-        matches = tuple(match(tenant_id, snapshot))
+        matches = tuple(match(tenant_id, alert))
         automation_matched_m.observe(len(matches))
+
         if matches:
             automation_alerts_matched_total.inc()
-            producer.publish(build_messages(tenant_id, snapshot, matches))
+            producer.publish(build_messages(tenant_id, alert, matches))
