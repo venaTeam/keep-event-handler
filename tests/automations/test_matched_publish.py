@@ -40,6 +40,11 @@ class MissingTopicProducer(FakeProducer):
         return type("Metadata", (), {"topics": {}})()
 
 
+class FalseyProducer(FakeProducer):
+    def __bool__(self):
+        return False
+
+
 def alert():
     return {
         "id": "event-789",
@@ -68,6 +73,14 @@ def test_producer_uses_dedicated_kafka_configuration(monkeypatch):
     assert producer_config["sasl.username"] == "matched-user"
     assert producer_config["sasl.password"] == "matched-password"
     assert producer_config["ssl.ca.location"] == "/matched/ca.pem"
+
+
+def test_explicit_falsey_client_is_not_replaced():
+    client = FalseyProducer()
+
+    producer = MatchedProducer(client=client)
+
+    assert producer._client is client
 
 
 def test_message_per_pair_exact_contract_and_key(monkeypatch):
@@ -147,7 +160,7 @@ def test_fanout_is_enqueued_then_acknowledged():
     assert producer.health()[0] is True
 
 
-def test_partial_delivery_raises_and_marks_unhealthy():
+def test_partial_delivery_raises_and_marks_unhealthy(caplog):
     producer = MatchedProducer(client=FakeProducer(errors=[None, RuntimeError("broker")]))
     messages = build_messages(
         "tenant", alert(),
@@ -158,6 +171,7 @@ def test_partial_delivery_raises_and_marks_unhealthy():
         producer.publish(messages)
 
     assert producer.healthy is False
+    assert "Matched-message delivery incomplete" in caplog.text
 
 
 def test_unexpected_client_error_is_always_an_unresolved_publish_error():
@@ -167,6 +181,16 @@ def test_unexpected_client_error_is_always_an_unresolved_publish_error():
     )
 
     with pytest.raises(MatchedPublishError):
+        producer.publish(messages)
+
+
+def test_empty_automation_id_is_a_contract_error():
+    producer = MatchedProducer(client=FakeProducer())
+    messages = build_messages(
+        "tenant", alert(), (AutomationMatch("", 300, None),)
+    )
+
+    with pytest.raises(MatchedContractError, match="invalid matched-message"):
         producer.publish(messages)
 
 

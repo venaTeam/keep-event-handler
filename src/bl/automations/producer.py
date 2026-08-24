@@ -30,7 +30,15 @@ class MatchedContractError(MatchedPublishError):
 
 
 class ProducerClient(Protocol):
-    def produce(self, topic: str, *, key: bytes, value: bytes, on_delivery: Callable) -> None: ...
+    def produce(
+        self,
+        topic: str,
+        *,
+        key: bytes,
+        value: bytes,
+        on_delivery: Callable[[object, object], None],
+    ) -> None: ...
+
     def poll(self, timeout: float) -> int: ...
     def flush(self, timeout: float) -> int: ...
     def list_topics(self, timeout: float) -> Any: ...
@@ -47,7 +55,7 @@ class MatchedProducer:
         self._wait = wait
         self._lock = threading.Lock()
         self._healthy = False
-        self._client = client or Producer(self._config())
+        self._client = client if client is not None else Producer(self._config())
 
     @staticmethod
     def _config() -> dict[str, Any]:
@@ -93,7 +101,8 @@ class MatchedProducer:
     def health(self) -> tuple[bool, str]:
         if not self._healthy:
             self.start()
-        return self._healthy, "producer healthy" if self._healthy else "producer unavailable"
+        reason = "producer healthy" if self._healthy else "producer unavailable"
+        return self._healthy, reason
 
     def start(self) -> bool:
         try:
@@ -102,25 +111,32 @@ class MatchedProducer:
                     timeout=settings.read_matched_publish_timeout_seconds()
                 )
                 topics = getattr(metadata, "topics", None)
-                if topics is not None:
-                    topic = topics.get(MATCHED_ALERTS_TOPIC)
-                    topic_error = None if topic is None else getattr(topic, "error", None)
-                    if topic is None or topic_error is not None:
-                        raise MatchedPublishError(
-                            f"matched topic metadata unavailable: {MATCHED_ALERTS_TOPIC}"
-                        )
+                topic = None if topics is None else topics.get(MATCHED_ALERTS_TOPIC)
+                topic_error = None if topic is None else getattr(topic, "error", None)
+                if topic is None or topic_error is not None:
+                    raise MatchedPublishError(
+                        f"matched topic metadata unavailable: {MATCHED_ALERTS_TOPIC}"
+                    )
             self._healthy = True
             automation_matched_producer_ready.set(1)
+            logger.info("Matched producer ready (topic=%s)", MATCHED_ALERTS_TOPIC)
             return True
         except Exception as error:
             self._healthy = False
             automation_matched_producer_ready.set(0)
-            logger.error("Matched producer metadata check failed: %s", type(error).__name__)
+            logger.error(
+                "Matched producer metadata check failed: %s", type(error).__name__
+            )
             return False
 
     def publish(self, messages: Sequence[Mapping[str, Any]]) -> None:
         if not messages:
             return
+        logger.debug(
+            "Publishing matched-message batch (topic=%s, records=%s)",
+            MATCHED_ALERTS_TOPIC,
+            len(messages),
+        )
         deadline = self._clock() + settings.read_matched_publish_timeout_seconds()
         pending = set(range(len(messages)))
         failures: list[object] = []
@@ -137,14 +153,19 @@ class MatchedProducer:
             for index, message in enumerate(messages):
                 try:
                     value = json.dumps(message, separators=(",", ":")).encode("utf-8")
-                    automation_id = str(message["automation_id"]).encode("utf-8")
+                    automation_id = message["automation_id"]
+                    if not str(automation_id).strip():
+                        raise ValueError("automation_id is empty")
+                    key = str(automation_id).encode("utf-8")
                 except (KeyError, TypeError, ValueError) as error:
-                    raise MatchedPublishError("invalid matched-message payload") from error
+                    raise MatchedContractError(
+                        "invalid matched-message payload"
+                    ) from error
                 while True:
                     try:
                         self._client.produce(
                             MATCHED_ALERTS_TOPIC,
-                            key=automation_id,
+                            key=key,
                             value=value,
                             on_delivery=callback(index),
                         )
@@ -176,18 +197,39 @@ class MatchedProducer:
                 ).inc(acknowledged)
             self._healthy = False
             automation_matched_producer_ready.set(0)
+            logger.warning(
+                "Matched-message delivery incomplete "
+                "(topic=%s, acknowledged=%s, total=%s, failed=%s, pending=%s)",
+                MATCHED_ALERTS_TOPIC,
+                acknowledged,
+                len(messages),
+                len(failures),
+                len(pending),
+            )
             raise MatchedPublishError(
                 f"matched delivery incomplete ({acknowledged}/{len(messages)} acknowledged)"
             )
-        automation_matched_publish_total.labels(result="acknowledged").inc(len(messages))
+        automation_matched_publish_total.labels(result="acknowledged").inc(
+            len(messages)
+        )
         self._healthy = True
         automation_matched_producer_ready.set(1)
+        logger.debug(
+            "Matched-message batch acknowledged (topic=%s, records=%s)",
+            MATCHED_ALERTS_TOPIC,
+            len(messages),
+        )
 
     def stop(self) -> None:
-        if self._client is not None:
-            remaining = self._client.flush(settings.read_matched_shutdown_timeout_seconds())
-            if remaining:
-                logger.error("Matched producer stopped with %s undelivered records", remaining)
+        remaining = self._client.flush(
+            settings.read_matched_shutdown_timeout_seconds()
+        )
+        if remaining:
+            logger.error(
+                "Matched producer stopped with %s undelivered records", remaining
+            )
+        else:
+            logger.info("Matched producer stopped cleanly")
 
 
 _producer = MatchedProducer()

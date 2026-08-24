@@ -19,10 +19,10 @@ from sqlmodel import Session, select
 
 # internals
 from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
+from src.bl.automations.publish_matches import publish_matches
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
-from src.bl.automations.publish_matches import publish_matches
 from src.config.consts import (
     KEEP_CORRELATION_ENABLED,
     MAINTENANCE_WINDOW_ALERT_STRATEGY,

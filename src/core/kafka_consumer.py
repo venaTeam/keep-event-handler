@@ -15,6 +15,8 @@ from pydantic import ValidationError
 from requests.exceptions import HTTPError
 from sqlalchemy.exc import OperationalError
 
+from src.bl.automations.producer import MatchedPublishError
+from src.config.config import config
 from src.config.consts import (
     MAX_PROCESSING_RETRIES,
     KAFKA_RETRY_MAX_SLEEP_SECONDS,
@@ -22,8 +24,6 @@ from src.config.consts import (
     KAFKA_CONSUMER_BATCH_SIZE,
     KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
-from src.config.config import config
-from src.bl.automations.producer import MatchedPublishError
 from src.core.consumer_health import ConsumerPhase, consumer_health
 from src.core.metrics import (
     events_in_counter,

@@ -1,6 +1,7 @@
 """Pure message construction plus the small B5 hot-path orchestration."""
 
 import json
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -12,6 +13,8 @@ from src.core.metrics import (
     automation_alerts_probed_total,
     automation_matched_m,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _alert_snapshot(alert: Any) -> dict[str, Any]:
@@ -61,7 +64,13 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
     for alert in alerts:
         automation_alerts_probed_total.inc()
         matches = tuple(match(tenant_id, alert))
-        automation_matched_m.observe(len(matches))
+        matched_m = len(matches)
+        automation_matched_m.observe(matched_m)
+        logger.debug(
+            "Automation matching completed (tenant_id=%s, matched_m=%s)",
+            tenant_id,
+            matched_m,
+        )
 
         if matches:
             automation_alerts_matched_total.inc()
