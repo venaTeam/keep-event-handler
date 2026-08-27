@@ -25,6 +25,8 @@ from src.config.consts import (
 from src.config.config import config
 from src.core.consumer_health import ConsumerPhase, consumer_health
 from src.core.metrics import (
+    EVENT_TYPE_UNDECODABLE,
+    EVENT_TYPE_UNKNOWN,
     events_in_counter,
     events_out_counter,
     events_error_counter,
@@ -588,7 +590,6 @@ class KafkaEventConsumer(EventConsumer):
         genuinely unresolved and should be redelivered (e.g. an unexpected
         error in terminal handling itself).
         """
-        events_in_counter.inc()
         payload = None
 
         # Decode the raw payload. A non-JSON message is poison and committed
@@ -599,12 +600,25 @@ class KafkaEventConsumer(EventConsumer):
             payload = json.loads(raw_text)
         except json.JSONDecodeError as e:
             self.logger.error(f"Failed to decode message (poison): {e}")
+            # Still counted as received. The message arrived and occupied an
+            # offset; leaving it out would make intake and consumption disagree
+            # for a reason that is not alert loss, which is exactly the signal
+            # this counter exists to give.
+            events_in_counter.labels(event_type=EVENT_TYPE_UNDECODABLE).inc()
             events_error_counter.inc()
             self._record_terminal(
                 payload={"raw": raw_text} if raw_text is not None else None,
                 error=e,
             )
             return True  # commit past the malformed message
+
+        # Counted here rather than on entry: the label is only knowable once the
+        # body has been parsed. Every path below this point either returns after
+        # incrementing above, or falls through here, so each message is counted
+        # exactly once.
+        events_in_counter.labels(
+            event_type=payload.get("event_type") or EVENT_TYPE_UNKNOWN
+        ).inc()
 
         trace_id = payload.get("trace_id", "unknown")
         self.logger.debug(f"Processing message: {trace_id}")
@@ -636,7 +650,9 @@ class KafkaEventConsumer(EventConsumer):
             with processing_time_summary.time():
                 self._process_with_retries(event_dto, budget, payload)
 
-            events_out_counter.inc()
+            events_out_counter.labels(
+                event_type=payload.get("event_type") or EVENT_TYPE_UNKNOWN
+            ).inc()
             self.logger.debug(f"Successfully processed message: {trace_id}")
             return True
 

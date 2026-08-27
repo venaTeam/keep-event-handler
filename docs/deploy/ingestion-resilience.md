@@ -194,7 +194,7 @@ kubectl rollout status deploy/keep-event-handler
 | Whole group flips NotReady on a rebalance | `KEEP_CONSUMER_REVOKE_GRACE_SECONDS` too short |
 | Pods Ready but consuming nothing | Someone rolled instead of scale-to-0 → mixed eager/cooperative group |
 | Lag spikes then drains, counters match | Expected, including during the scale-to-0 window. Do not abort |
-| `ingestion_total` > `events_in_total` | Alerts being lost — abort |
+| `alert_ingestion_total` > `events_in_total{event_type="alert"}` | Alerts being lost — abort |
 
 ## Not fixed here
 

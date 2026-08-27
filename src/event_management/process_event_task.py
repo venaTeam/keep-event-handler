@@ -47,8 +47,6 @@ from src.core.db.db import (
 from src.core.elastic import ElasticClient
 from src.core.metrics import (
     events_error_counter,
-    events_in_counter,
-    events_out_counter,
     processing_time_summary,
     alert_enrichment_duration_seconds,
     deduplication_events_total,
@@ -1406,7 +1404,11 @@ def process_event(
     tracer = trace.get_tracer(__name__)
 
     raw_event = copy.deepcopy(event)
-    events_in_counter.inc()
+    # `events_in_total` is incremented once per Kafka message in
+    # `_process_message`, not here. This function is on the ALERT path only, so
+    # incrementing here too counted every alert twice while the other four event
+    # types counted once — leaving a total that could not be reconciled against
+    # the producer's `alert_ingestion_total`.
     session = None
     try:
         logger.info(
@@ -1791,7 +1793,8 @@ def process_event(
                     else 0,
                 },
             )
-            events_out_counter.inc()
+            # Counted once per message in `_process_message`; see the note on
+            # `events_in_counter` above.
             return formatted_events
         else:
             logger.info(

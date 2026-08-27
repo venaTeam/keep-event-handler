@@ -28,13 +28,31 @@ alerts_maintenance_silenced_total = Counter(
 )
 
 # Process event metrics
+#
+# Both carry `event_type` (alert | incident | enrich | batch_enrich | delete, plus
+# the two sentinels below). Without it these count all five types together, so
+# they cannot be reconciled against the producer's `alert_ingestion_total`, which
+# counts alerts only — and that reconciliation is how a cutover proves no alert
+# was dropped. Aggregate queries want `sum(keep_events_in_total)`; a bare
+# `keep_events_in_total` still selects every series, but any rule that assumed a
+# single unlabelled series needs updating.
+#
+# Incremented exactly once per Kafka message, in `_process_message`. They used to
+# be incremented there AND again inside `process_event`, which is on the alert
+# path only — so alerts counted double and the other four types counted single,
+# making the total a number that matched nothing.
+EVENT_TYPE_UNDECODABLE = "undecodable"  # message body was not valid JSON
+EVENT_TYPE_UNKNOWN = "unknown"  # decoded, but carried no event_type
+
 events_in_counter = Counter(
     f"{METRIC_PREFIX}events_in_total",
     "Total number of events received",
+    labelnames=["event_type"],
 )
 events_out_counter = Counter(
     f"{METRIC_PREFIX}events_processed_total",
     "Total number of events processed",
+    labelnames=["event_type"],
 )
 events_error_counter = Counter(
     f"{METRIC_PREFIX}events_error_total",
