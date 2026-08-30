@@ -34,7 +34,6 @@ from src.core.db.db import (
     apply_dismiss_lifecycle,
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
-    get_alerts_by_fingerprint,
     get_all_presets_dtos,
     get_last_alert_by_fingerprint,
     get_last_alert_hashes_by_fingerprints,
@@ -62,13 +61,6 @@ from src.models.db.incident import IncidentStatus
 from src.models.incident import IncidentDto
 from src.event_management.notification_cache import get_notification_cache
 from src.utils.alert_utils import sanitize_alert
-from src.utils.enrichment_helpers import (
-    calculate_firing_time_since_last_resolved,
-    calculated_firing_counter,
-    calculated_start_firing_time,
-    calculated_unresolved_counter,
-    convert_db_alerts_to_dto_alerts,
-)
 from src.providers.providers_factory import ProvidersFactory
 from src.rulesengine.rulesengine import RulesEngine
 
@@ -84,9 +76,6 @@ KEEP_MAINTENANCE_WINDOWS_ENABLED = (
 )
 KEEP_AUDIT_EVENTS_ENABLED = (
     os.environ.get("KEEP_AUDIT_EVENTS_ENABLED", "true") == "true"
-)
-KEEP_CALCULATE_START_FIRING_TIME_ENABLED = (
-    os.environ.get("KEEP_CALCULATE_START_FIRING_TIME_ENABLED", "true") == "true"
 )
 
 logger = logging.getLogger(__name__)
@@ -454,6 +443,10 @@ def __save_to_db(
         },
     )
     try:
+        # Objects stay usable after the commits inside this function, so the
+        # LastAlert row set_last_alert returns can be read back (and reflects
+        # the mapping rules' enrichments) without re-querying it.
+        session.expire_on_commit = False
         enrichments_bl = EnrichmentsBl(tenant_id, session)
         # Deduplicated events don't create a new Alert row and don't call
         # set_last_alert. Update the LastAlert directly here: bump last_received
@@ -600,31 +593,13 @@ def __save_to_db(
             if started_at:
                 formatted_event.started_at = str(started_at)
 
-            if KEEP_CALCULATE_START_FIRING_TIME_ENABLED:
-                # calculate startFiring time
-                previous_alert = get_alerts_by_fingerprint(
-                    tenant_id=tenant_id,
-                    fingerprint=formatted_event.fingerprint,
-                    limit=1,
-                )
-                previous_alert = convert_db_alerts_to_dto_alerts(previous_alert)
-                formatted_event.firing_start_time = calculated_start_firing_time(
-                    formatted_event, previous_alert
-                )
-                formatted_event.firing_start_time_since_last_resolved = (
-                    calculate_firing_time_since_last_resolved(
-                        formatted_event, previous_alert
-                    )
-                )
-
-                # we now need to update the firing and unresolved counters
-                formatted_event.firing_counter = calculated_firing_counter(
-                    formatted_event, previous_alert
-                )
-
-                formatted_event.unresolved_counter = calculated_unresolved_counter(
-                    formatted_event, previous_alert
-                )
+            # firing_start_time / firing_start_time_since_last_resolved /
+            # firing_counter / unresolved_counter are derived inside
+            # set_last_alert from the previous LastAlert row, under the lock it
+            # already takes, and read back onto formatted_event below. Deriving
+            # them here needed a `SELECT ... FROM alert ORDER BY timestamp DESC
+            # LIMIT 1` per ingested alert, which cannot prune the timestamp
+            # partitions of `alert` and dominated database CPU at volume.
 
             # Status/dismiss clearing on re-fire/resolve now happens in
             # set_last_alert (typed columns). assignee persists automatically on
@@ -695,6 +670,8 @@ def __save_to_db(
             alert_args = sanitize_alert(alert_args)
 
             # Build tracking dict for LastAlert (relocated from Alert).
+            # Only the caller-owned columns: the derived ones are computed in
+            # set_last_alert.
             last_received_val = formatted_event.last_received
             if isinstance(last_received_val, str):
                 last_received_val = dateutil.parser.isoparse(last_received_val)
@@ -703,18 +680,7 @@ def __save_to_db(
             alert_args["received_at"] = last_received_val
             tracking = {
                 "last_received": last_received_val,
-                "firing_counter": getattr(formatted_event, "firing_counter", 0) or 0,
-                "unresolved_counter": getattr(
-                    formatted_event, "unresolved_counter", 0
-                )
-                or 0,
                 "started_at": getattr(formatted_event, "started_at", None),
-                "firing_start_time": getattr(
-                    formatted_event, "firing_start_time", None
-                ),
-                "firing_start_time_since_last_resolved": getattr(
-                    formatted_event, "firing_start_time_since_last_resolved", None
-                ),
             }
             if timestamp_forced is not None:
                 alert_args["timestamp"] = timestamp_forced
@@ -869,7 +835,16 @@ def __save_to_db(
                         else None,
                     },
                 )
-                set_last_alert(tenant_id, alert, session=session, tracking=tracking)
+                last_alert = set_last_alert(
+                    tenant_id, alert, session=session, tracking=tracking
+                )
+                if last_alert is not None:
+                    formatted_event.firing_start_time = last_alert.firing_start_time
+                    formatted_event.firing_start_time_since_last_resolved = (
+                        last_alert.firing_start_time_since_last_resolved
+                    )
+                    formatted_event.firing_counter = last_alert.firing_counter
+                    formatted_event.unresolved_counter = last_alert.unresolved_counter
                 logger.debug(
                     "Last alert set",
                     extra={
@@ -914,10 +889,9 @@ def __save_to_db(
                 },
             )
             try:
-                # Enrichment state is on LastAlert typed columns.
-                last_alert = get_last_alert_by_fingerprint(
-                    tenant_id, formatted_event.fingerprint, session=session
-                )
+                # Enrichment state is on LastAlert typed columns — read from the
+                # row set_last_alert already returned (mapping rules enrich
+                # through this same session, so it reflects their writes).
                 enrichments = (
                     last_alert_enrichments_dict(last_alert) if last_alert else {}
                 )
@@ -1000,7 +974,6 @@ def __save_to_db(
                 },
             )
 
-            session.expire_on_commit = False
             incident_bl = IncidentBl(tenant_id, session)
             for alert in saved_alerts:
                 if alert.status == AlertStatus.RESOLVED.value:

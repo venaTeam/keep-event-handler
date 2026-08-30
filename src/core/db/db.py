@@ -54,6 +54,7 @@ from src.models.db.incident import Incident, IncidentType, IncidentStatus, Incid
 from src.models.incident import IncidentDtoIn, IncidentDto
 from src.models.db.tenant import TenantApiKey, Tenant
 from src.models.alert import AlertStatus, DeduplicationRuleDto, DeduplicationRuleRequestDto
+from src.utils.enrichment_helpers import derive_tracking_fields, javascript_iso_format
 from src.models.db.maintenance_window import MaintenanceWindowRule
 from src.models.db.topology import TopologyService
 from src.models.db.extraction import ExtractionRule
@@ -1172,20 +1173,49 @@ def apply_dismiss_lifecycle(last_alert: LastAlert, alert_status: str) -> bool:
     return True
 
 
+def _apply_tracking_columns(
+    row: LastAlert, tracking: dict, tenant_id: str, fingerprint: str
+) -> None:
+    """Write the system tracking columns onto a LastAlert row.
+
+    Strict allow-list — never let `tracking` clobber user-enrichment columns
+    (status/assignee/note/dismiss_*) which the enrich path owns.
+    """
+    for col_name, value in tracking.items():
+        if col_name not in LASTALERT_TRACKING_COLUMNS:
+            logger.warning(
+                "set_last_alert.ignored_tracking_key",
+                extra={
+                    "tenant_id": tenant_id,
+                    "fingerprint": fingerprint,
+                    "key": col_name,
+                },
+            )
+            continue
+        setattr(row, col_name, value)
+
+
 def set_last_alert(
     tenant_id: str,
     alert: Alert,
     session: Optional[Session] = None,
     max_retries=3,
     tracking: Optional[dict] = None,
-) -> None:
+) -> Optional[LastAlert]:
     """Create or repoint the LastAlert row for a fingerprint.
 
-    `tracking` carries the system tracking columns relocated from
-    `alert` (last_received, firing_counter, unresolved_counter, started_at,
-    firing_start_time, firing_start_time_since_last_resolved). When None those
-    columns are left unchanged. Status/dismiss clearing on re-fire/resolve also
-    happens here (replacing the old dispose/make-permanent enrichment dance).
+    `tracking` carries the system tracking columns relocated from `alert`
+    (last_received, started_at). The cross-occurrence derived columns
+    (firing_counter, unresolved_counter, firing_start_time,
+    firing_start_time_since_last_resolved) are computed here from the previous
+    LastAlert row, under the same `FOR UPDATE` lock that repoints it — so they
+    need no read of the partitioned `alert` history and cannot lose an update
+    to a concurrent occurrence of the same fingerprint. Status/dismiss clearing
+    on re-fire/resolve also happens here (replacing the old dispose/
+    make-permanent enrichment dance).
+
+    Returns the LastAlert row as written, so callers can read the derived
+    values (and the user-enrichment columns) back without re-querying.
     """
     fingerprint = alert.fingerprint
     logger.info(f"Setting last alert for `{fingerprint}`")
@@ -1203,6 +1233,12 @@ def set_last_alert(
                 last_alert = get_last_alert_by_fingerprint(
                     tenant_id, fingerprint, session, for_update=True
                 )
+                result_row = last_alert
+                # The derived start-times are stored as canonical UTC strings
+                # ("...Z"), matching what AlertDto.last_received emits.
+                last_received_str = javascript_iso_format(
+                    (tracking or {}).get("last_received") or alert.timestamp
+                )
 
                 # To prevent rare, but possible race condition
                 # For example if older alert failed to process
@@ -1218,27 +1254,23 @@ def set_last_alert(
                             "fingerprint": fingerprint,
                         },
                     )
+                    # Derived columns must be computed from the row as it
+                    # stands *before* this occurrence is applied to it, and
+                    # before apply_dismiss_lifecycle rewrites its status.
+                    derived = derive_tracking_fields(
+                        alert.status, last_received_str, last_alert
+                    )
+
                     last_alert.timestamp = alert.timestamp
                     last_alert.alert_id = alert.id
                     last_alert.alert_hash = alert.alert_hash
 
-                    # Write relocated tracking columns when provided.
-                    # Strict allow-list — never let `tracking` clobber user-
-                    # enrichment columns (status/assignee/note/dismiss_*) which
-                    # the enrich path owns.
-                    if tracking is not None:
-                        for _col, _val in tracking.items():
-                            if _col not in LASTALERT_TRACKING_COLUMNS:
-                                logger.warning(
-                                    "set_last_alert.ignored_tracking_key",
-                                    extra={
-                                        "tenant_id": tenant_id,
-                                        "fingerprint": fingerprint,
-                                        "key": _col,
-                                    },
-                                )
-                                continue
-                            setattr(last_alert, _col, _val)
+                    _apply_tracking_columns(
+                        last_alert,
+                        {**(tracking or {}), **derived},
+                        tenant_id,
+                        fingerprint,
+                    )
 
                     # Status/dismiss clearing on this occurrence's provider
                     # status (auto-undismiss on resolve; dispose-on-new-alert).
@@ -1256,22 +1288,19 @@ def set_last_alert(
                         alert_id=alert.id,
                         alert_hash=alert.alert_hash,
                     )
-                    # Write relocated tracking columns when provided.
-                    # Strict allow-list — see comment above.
-                    if tracking is not None:
-                        for _col, _val in tracking.items():
-                            if _col not in LASTALERT_TRACKING_COLUMNS:
-                                logger.warning(
-                                    "set_last_alert.ignored_tracking_key",
-                                    extra={
-                                        "tenant_id": tenant_id,
-                                        "fingerprint": fingerprint,
-                                        "key": _col,
-                                    },
-                                )
-                                continue
-                            setattr(new_last_alert, _col, _val)
+                    _apply_tracking_columns(
+                        new_last_alert,
+                        {
+                            **(tracking or {}),
+                            **derive_tracking_fields(
+                                alert.status, last_received_str, None
+                            ),
+                        },
+                        tenant_id,
+                        fingerprint,
+                    )
                     session.add(new_last_alert)
+                    result_row = new_last_alert
 
                 session.commit()
             except IntegrityError as ex:
@@ -1349,6 +1378,7 @@ def set_last_alert(
             raise RuntimeError(
                 f"Failed to set last alert for `{fingerprint}` after {max_retries} attempts"
             )
+        return result_row
 
 
 def enrich_incidents_with_enrichments(
