@@ -16,16 +16,21 @@ from src.core.metrics import (
 
 logger = logging.getLogger(__name__)
 
+_REQUIRED_ALERT_FIELDS = ("id", "fingerprint", "time_created")
+
+
+def _validate_required_alert_fields(snapshot: dict[str, Any]) -> None:
+    for field in _REQUIRED_ALERT_FIELDS:
+        value = snapshot.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise MatchedContractError(
+                f"alert.{field} must be a non-empty string"
+            )
+
 
 def _alert_snapshot(alert: Any) -> dict[str, Any]:
     snapshot = json.loads(alert.json()) if hasattr(alert, "json") else dict(alert)
-    source_id = snapshot.get("id")
-    if source_id is None or not str(source_id).strip():
-        raise MatchedContractError("alert.id is required")
-    if not snapshot.get("fingerprint"):
-        raise MatchedContractError("alert.fingerprint is required")
-    if not snapshot.get("started_at"):
-        raise MatchedContractError("alert.started_at is required")
+    _validate_required_alert_fields(snapshot)
     return snapshot
 
 

@@ -49,7 +49,7 @@ def alert():
     return {
         "id": "event-789",
         "fingerprint": "fp",
-        "started_at": "2026-01-01T00:00:00Z",
+        "time_created": "2026-01-01T00:00:00Z",
     }
 
 
@@ -99,13 +99,13 @@ def test_message_per_pair_exact_contract_and_key(monkeypatch):
     assert set(messages[0]) == {"tenant_id", "alert", "automation_id", "matched_m", "cooldown"}
 
 
-def test_missing_source_id_is_rejected_before_kafka():
-    with pytest.raises(MatchedContractError, match="alert.id"):
-        build_messages(
-            "tenant",
-            {"fingerprint": "fp", "started_at": "2026-01-01T00:00:00Z"},
-            (AutomationMatch("a", 300, None),),
-        )
+@pytest.mark.parametrize("field", ["id", "fingerprint", "time_created"])
+def test_missing_required_alert_field_is_rejected_before_kafka(field):
+    payload = alert()
+    payload.pop(field)
+
+    with pytest.raises(MatchedContractError, match=field):
+        build_messages("tenant", payload, (AutomationMatch("a", 300, None),))
 
 
 def test_source_id_is_preserved_without_history_id():
@@ -117,12 +117,15 @@ def test_source_id_is_preserved_without_history_id():
     assert "history_id" not in messages[0]["alert"]
 
 
-@pytest.mark.parametrize("missing", ["fingerprint", "started_at"])
-def test_required_alert_contract_fields_are_rejected(missing):
+@pytest.mark.parametrize("field", ["id", "fingerprint", "time_created"])
+@pytest.mark.parametrize("invalid_value", [None, "", "   ", 7])
+def test_required_alert_contract_fields_are_non_empty_strings(
+    field, invalid_value
+):
     payload = alert()
-    payload.pop(missing)
+    payload[field] = invalid_value
 
-    with pytest.raises(MatchedContractError, match=missing):
+    with pytest.raises(MatchedContractError, match=field):
         build_messages("tenant", payload, (AutomationMatch("a", 300, None),))
 
 
