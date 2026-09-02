@@ -19,6 +19,9 @@ import re
 
 from src.config.consts import (
     AUTOMATION_INDEX_BOOT_RETRY_SECONDS,
+    AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS,
+    AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS,
+    AUTOMATION_MATCHED_SHUTDOWN_TIMEOUT_SECONDS,
     AUTOMATION_INDEX_ENABLED,
     AUTOMATION_INDEX_MAX_ROWS,
     AUTOMATION_INDEX_MAX_TOTAL_BYTES,
@@ -47,6 +50,18 @@ def read_index_enabled() -> bool:
     misspelled cases both land on OFF, which is the safe side of this switch.
     """
     return bool(AUTOMATION_INDEX_ENABLED)
+
+
+def read_matched_publish_timeout_seconds() -> float:
+    return max(0.1, AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS)
+
+
+def read_matched_queue_retry_seconds() -> float:
+    return max(0.001, AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS)
+
+
+def read_matched_shutdown_timeout_seconds() -> float:
+    return max(0.1, AUTOMATION_MATCHED_SHUTDOWN_TIMEOUT_SECONDS)
 
 
 def read_reload_seconds() -> int:

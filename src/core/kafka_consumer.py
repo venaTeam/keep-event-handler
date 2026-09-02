@@ -15,6 +15,8 @@ from pydantic import ValidationError
 from requests.exceptions import HTTPError
 from sqlalchemy.exc import OperationalError
 
+from src.bl.automations.producer import MatchedPublishError
+from src.config.config import config
 from src.config.consts import (
     MAX_PROCESSING_RETRIES,
     KAFKA_RETRY_MAX_SLEEP_SECONDS,
@@ -22,7 +24,6 @@ from src.config.consts import (
     KAFKA_CONSUMER_BATCH_SIZE,
     KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
-from src.config.config import config
 from src.core.consumer_health import ConsumerPhase, consumer_health
 from src.core.metrics import (
     events_in_counter,
@@ -634,7 +635,10 @@ class KafkaEventConsumer(EventConsumer):
 
             # Process with bounded, batch-wide retries and timing.
             with processing_time_summary.time():
-                self._process_with_retries(event_dto, budget, payload)
+                resolved = self._process_with_retries(event_dto, budget, payload)
+
+            if resolved is False:
+                return False
 
             events_out_counter.inc()
             self.logger.debug(f"Successfully processed message: {trace_id}")
@@ -677,7 +681,7 @@ class KafkaEventConsumer(EventConsumer):
         for attempt in range(MAX_PROCESSING_RETRIES):
             try:
                 process_event_sync(event_dto)
-                return
+                return True
             except Exception as e:
                 kind = classify_error(e)
                 self.logger.warning(
@@ -703,6 +707,11 @@ class KafkaEventConsumer(EventConsumer):
                     ) from e
 
                 if attempt == MAX_PROCESSING_RETRIES - 1:
+                    if isinstance(e, MatchedPublishError):
+                        self.logger.error(
+                            "Matched delivery retries exhausted; leaving raw record unresolved"
+                        )
+                        return False
                     self.logger.error(
                         "Retries exhausted (attempt cap) — recording and committing"
                     )
@@ -710,6 +719,12 @@ class KafkaEventConsumer(EventConsumer):
                     return
 
                 if budget.exhausted():
+                    if isinstance(e, MatchedPublishError):
+                        self.logger.error(
+                            "Matched delivery retry budget exhausted; "
+                            "leaving raw record unresolved"
+                        )
+                        return False
                     self.logger.error(
                         "Retry budget exhausted (poll-interval guard) — "
                         "recording and committing"

@@ -19,6 +19,7 @@ from sqlmodel import Session, select
 
 # internals
 from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
+from src.bl.automations.publish_matches import publish_matches
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
@@ -1190,6 +1191,10 @@ def __handle_formatted_events(
                 event, deduplication_rules, last_alerts_fingerprint_to_hash
             )
 
+        # Persistence dedup may remove a raw redelivery. B5 must still see it,
+        # preserving the stable upstream alert id in the matched message.
+        automation_events = list(formatted_events)
+
         # filter out the deduplicated events
         deduplicated_events = list(
             filter(lambda event: event.is_full_duplicate, formatted_events)
@@ -1226,6 +1231,10 @@ def __handle_formatted_events(
             provider_id,
             timestamp_forced,
         )
+
+    # Broker acknowledgement is part of resolving the raw record. Keep this
+    # before optional notifications and let failures reach the Kafka consumer.
+    publish_matches(tenant_id, automation_events)
 
     # let's save all fields to the DB so that we can use them in the future such in deduplication fields suggestions
     # todo: also use it on correlation rules suggestions

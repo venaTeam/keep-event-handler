@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src import consumer_main
+from src.bl.automations import producer as producer_module
 from src.core.consumer_health import ConsumerPhase, consumer_health
 
 
@@ -20,8 +21,11 @@ class FakePartition:
 
 
 @pytest.fixture
-def probe_server():
+def probe_server(monkeypatch):
     """Real HTTPServer on an ephemeral port — the handler is the unit here."""
+    producer = MagicMock()
+    producer.health.return_value = (True, "producer healthy")
+    monkeypatch.setattr(producer_module, "_producer", producer)
     consumer_health.reset_for_tests()
     server = consumer_main.create_health_server(0)
     yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -122,6 +126,33 @@ def test_readiness_body_carries_the_reason(probe_server):
 
     assert status == 503
     assert body["reason"] == "no partitions assigned"
+
+
+def test_unhealthy_matched_producer_gates_readyz(
+    probe_server, monkeypatch, caplog
+):
+    become_consuming()
+    fake = MagicMock()
+    fake.health.return_value = (False, "producer unavailable")
+    monkeypatch.setattr(producer_module, "_producer", fake)
+
+    status, body = get(probe_server, "/readyz")
+
+    assert status == 503
+    assert body["reason"] == "producer unavailable"
+    assert "Readiness failed: matched producer is unhealthy" in caplog.text
+
+
+def test_matched_producer_does_not_affect_liveness(probe_server, monkeypatch):
+    fake = MagicMock()
+    fake.health.return_value = (False, "producer unavailable")
+    monkeypatch.setattr(producer_module, "_producer", fake)
+
+    status, body = get(probe_server, "/livez")
+
+    assert status == 200
+    assert body["probe"] == "liveness"
+    fake.health.assert_not_called()
 
 
 # -- startup ordering ---------------------------------------------------
