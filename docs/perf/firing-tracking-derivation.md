@@ -56,6 +56,20 @@ Deriving outside the lock meant two concurrent occurrences of one fingerprint
 could both read the same previous counter and both write `counter + 1`. The
 derivation now happens under the `FOR UPDATE` that repoints the row.
 
+The lock alone is not sufficient, because `__save_to_db` disables
+`expire_on_commit` (see risk **c**). A `LastAlert` read once in that session
+stays in the identity map with its attributes loaded across every later commit,
+and SQLAlchemy hands back that cached object rather than the row it just locked
+— so the derivation would compute from values a concurrent worker had already
+superseded, and write them back under the lock. `get_last_alert_by_fingerprint`
+therefore pairs `with_for_update()` with `populate_existing=True`: the locking
+read always overwrites the session's copy. Both halves are covered by
+two-session tests in `tests/test_firing_tracking.py`.
+
+Note the identity map holds clean objects *weakly*, so this only bites when
+something keeps the row alive — which `__save_to_db` does, in `last_alert`,
+across the whole loop. A test that drops the reference passes either way.
+
 ## 3. What the mitigation was actually costing
 
 With the calculation disabled the columns are still written — as `0`/`NULL`.
@@ -212,6 +226,12 @@ That is what makes the returned `lastalert` row reusable, but it also changes
 behaviour for every other object in the function. Counter-argument: scope it
 narrowly, or drop the reuse and accept one extra read. Mitigating fact: the
 function already did exactly this for its incident section.
+
+Review found the concrete way this bites: the `LastAlert` read-modify-write
+paths would have derived from the stale cached row. Closed by
+`populate_existing=True` on the locking read (above), which restores freshness
+exactly where correctness depends on it and nowhere else. Other objects in the
+function are written, not read-modify-written, so they are unaffected.
 
 **d. NULL status → firing.**
 Argued above as exactly equivalent. The way it breaks is if some path writes a

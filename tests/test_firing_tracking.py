@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import event
+from sqlmodel import Session
 
 from src.core.db.db import get_last_alert_by_fingerprint, set_last_alert
 from src.core.dependencies import SINGLE_TENANT_UUID
@@ -265,3 +266,85 @@ def test_set_last_alert_never_reads_the_alert_table(db_session):
 
     reads = [s for s in seen if s.startswith("select") and " from alert" in s]
     assert reads == [], f"set_last_alert read the alert table: {reads}"
+
+
+# --------------------------------------------------------------------------- #
+# Concurrency: the locking read must not serve a session-cached row
+# --------------------------------------------------------------------------- #
+
+
+def _bump_from_another_session(bind, fingerprint, firing_counter, unresolved_counter):
+    """Stand in for a second worker processing this fingerprint concurrently."""
+    other = Session(bind)
+    try:
+        row = get_last_alert_by_fingerprint(
+            SINGLE_TENANT_UUID, fingerprint, session=other, for_update=True
+        )
+        row.firing_counter = firing_counter
+        row.unresolved_counter = unresolved_counter
+        other.add(row)
+        other.commit()
+    finally:
+        other.close()
+
+
+def _read_from_another_session(bind, fingerprint):
+    other = Session(bind)
+    try:
+        row = get_last_alert_by_fingerprint(
+            SINGLE_TENANT_UUID, fingerprint, session=other
+        )
+        return row.firing_counter, row.unresolved_counter
+    finally:
+        other.close()
+
+
+def test_locking_read_refreshes_a_session_cached_row(db_session):
+    """FOR UPDATE must return the row as the database has it.
+
+    __save_to_db disables expire_on_commit, so a LastAlert read once survives
+    every later commit in that session. Without populate_existing SQLAlchemy
+    emits the lock but hands back the cached object's stale attributes.
+
+    `cached` is kept alive deliberately: the identity map holds clean objects
+    weakly, so dropping the reference would let the row fall out of it and the
+    next read would look fresh for the wrong reason. __save_to_db holds exactly
+    this reference (`last_alert`) across the loop.
+    """
+    db_session.expire_on_commit = False
+    fp = "fp-refresh"
+    cached = _record(
+        db_session, fp, FIRING, datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc)
+    )
+    db_session.commit()
+    assert cached.firing_counter == 1
+
+    _bump_from_another_session(db_session.bind, fp, 3, 3)
+
+    row = get_last_alert_by_fingerprint(
+        SINGLE_TENANT_UUID, fp, session=db_session, for_update=True
+    )
+    assert row is cached, "expected the identity-mapped row, not a fresh object"
+    assert (row.firing_counter, row.unresolved_counter) == (3, 3)
+
+
+def test_concurrent_occurrence_is_not_lost(db_session):
+    """A second worker's occurrence between ours must not be overwritten.
+
+    The derivation is a read-modify-write of the counters. Deriving from a
+    stale cached row writes `stale + 1` under the lock, silently discarding
+    the other worker's occurrence.
+    """
+    db_session.expire_on_commit = False
+    fp = "fp-race"
+    base = datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc)
+
+    row = _record(db_session, fp, FIRING, base)
+    assert (row.firing_counter, row.unresolved_counter) == (1, 1)
+    db_session.commit()
+
+    _bump_from_another_session(db_session.bind, fp, 3, 3)
+
+    row = _record(db_session, fp, FIRING, base + timedelta(minutes=5))
+    assert (row.firing_counter, row.unresolved_counter) == (4, 4)
+    assert _read_from_another_session(db_session.bind, fp) == (4, 4)

@@ -1114,6 +1114,17 @@ def get_last_alert_by_fingerprint(
     session: Optional[Session] = None,
     for_update: bool = False,
 ) -> Optional[LastAlert]:
+    """Read the LastAlert row for a fingerprint.
+
+    `for_update` takes the row lock *and* forces the loaded row to overwrite
+    whatever copy the session already holds. Both halves are needed: the
+    ingestion path disables `expire_on_commit`, so a LastAlert read earlier in
+    the same session survives the commits between occurrences, and SQLAlchemy
+    would otherwise return that cached object with its stale attribute values
+    while still emitting the lock. Read-modify-write callers (set_last_alert's
+    counter derivation, the deduplicated-event lifecycle) would then compute
+    from values a concurrent worker has already superseded and overwrite it.
+    """
     with existed_or_new_session(session) as session:
         query = select(LastAlert).where(
             and_(
@@ -1122,7 +1133,7 @@ def get_last_alert_by_fingerprint(
             )
         )
         if for_update:
-            query = query.with_for_update()
+            query = query.with_for_update().execution_options(populate_existing=True)
         return session.exec(query).first()
 
 
