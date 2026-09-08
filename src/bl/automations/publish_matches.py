@@ -11,6 +11,7 @@ from src.bl.automations.reloader import match
 from src.core.metrics import (
     automation_alerts_matched_total,
     automation_alerts_probed_total,
+    automation_matched_alerts_rejected_total,
     automation_matched_m,
 )
 
@@ -29,8 +30,14 @@ def _validate_required_alert_fields(snapshot: dict[str, Any]) -> None:
 
 
 def _alert_snapshot(alert: Any) -> dict[str, Any]:
-    snapshot = json.loads(alert.json()) if hasattr(alert, "json") else dict(alert)
+    try:
+        snapshot = json.loads(alert.json()) if hasattr(alert, "json") else dict(alert)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise MatchedContractError("alert snapshot cannot be serialized") from error
+    if not isinstance(snapshot, dict):
+        raise MatchedContractError("alert snapshot must be an object")
     _validate_required_alert_fields(snapshot)
+
     return snapshot
 
 
@@ -66,7 +73,7 @@ def build_messages(
 
 def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
     producer = get_matched_producer()
-    for alert in alerts:
+    for alert_index, alert in enumerate(alerts):
         automation_alerts_probed_total.inc()
         matches = tuple(match(tenant_id, alert))
         matched_m = len(matches)
@@ -80,4 +87,12 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
         if matches:
             automation_alerts_matched_total.inc()
             if producer.enabled:
-                producer.publish(build_messages(tenant_id, alert, matches))
+                try:
+                    producer.publish(build_messages(tenant_id, alert, matches))
+                except MatchedContractError as error:
+                    automation_matched_alerts_rejected_total.inc()
+                    logger.warning(
+                        "Rejected malformed matched alert "
+                        "(tenant_id=%s, alert_index=%s, reason=%s)",
+                        tenant_id, alert_index, error,
+                    )

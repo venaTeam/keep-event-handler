@@ -25,7 +25,7 @@ class MatchedPublishError(RuntimeError):
     """The raw record is unresolved and must not be committed."""
 
 
-class MatchedContractError(MatchedPublishError):
+class MatchedContractError(ValueError):
     """An upstream alert cannot be serialized to the matched contract."""
 
 
@@ -143,6 +143,19 @@ class MatchedProducer:
     def publish(self, messages: Sequence[Mapping[str, Any]]) -> None:
         if not self._enabled or not messages:
             return
+        # Validate the entire alert fan-out before Kafka can accept any part.
+        encoded = []
+        try:
+            for message in messages:
+                automation_id = message["automation_id"]
+                if not isinstance(automation_id, str) or not automation_id.strip():
+                    raise ValueError("automation_id must be a non-empty string")
+                encoded.append((
+                    automation_id.encode("utf-8"),
+                    json.dumps(message, separators=(",", ":"), allow_nan=False).encode("utf-8"),
+                ))
+        except (KeyError, TypeError, ValueError, RecursionError) as error:
+            raise MatchedContractError("invalid matched-message payload") from error
         logger.debug(
             "Publishing matched-message batch (topic=%s, records=%s)",
             MATCHED_ALERTS_TOPIC,
@@ -161,17 +174,7 @@ class MatchedProducer:
 
         started = self._clock()
         with self._lock:
-            for index, message in enumerate(messages):
-                try:
-                    value = json.dumps(message, separators=(",", ":")).encode("utf-8")
-                    automation_id = message["automation_id"]
-                    if not str(automation_id).strip():
-                        raise ValueError("automation_id is empty")
-                    key = str(automation_id).encode("utf-8")
-                except (KeyError, TypeError, ValueError) as error:
-                    raise MatchedContractError(
-                        "invalid matched-message payload"
-                    ) from error
+            for index, (key, value) in enumerate(encoded):
                 while True:
                     try:
                         self._client.produce(

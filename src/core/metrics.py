@@ -219,6 +219,10 @@ automation_matched_m = Histogram(
     "Matched automation fan-out per alert occurrence",
     buckets=(0, 1, 2, 3, 5, 10),
 )
+automation_matched_alerts_rejected_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}matched_alerts_rejected_total",
+    "Alert occurrences rejected from matched publishing due to invalid contract data",
+)
 automation_matched_publish_total = Counter(
     f"{AUTOMATION_METRIC_PREFIX}matched_publish_total",
     "Matched-topic records by delivery result",

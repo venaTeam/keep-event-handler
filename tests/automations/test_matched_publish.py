@@ -1,3 +1,4 @@
+import json
 import pytest
 from unittest.mock import Mock
 
@@ -238,3 +239,69 @@ def test_start_requires_matched_topic_metadata():
 
     assert producer.start() is False
     assert producer.healthy is False
+
+
+@pytest.mark.parametrize("bad_value", [object(), float("nan"), {"circular": None}])
+def test_invalid_later_message_never_partially_enqueues(bad_value):
+    if isinstance(bad_value, dict):
+        bad_value["circular"] = bad_value
+    fake = FakeProducer()
+    producer = MatchedProducer(client=fake)
+    producer._healthy = True
+    with pytest.raises(MatchedContractError):
+        producer.publish([
+            {"automation_id": "valid"},
+            {"automation_id": "invalid", "alert": bad_value},
+        ])
+    assert fake.queued == []
+    assert producer.healthy is True
+
+
+@pytest.mark.parametrize("raw_json", ["[]", "null", "broken"])
+def test_invalid_snapshot_shape_is_contract_error(raw_json):
+    source = Mock()
+    source.json.return_value = raw_json
+    with pytest.raises(MatchedContractError):
+        build_messages("tenant", source, (AutomationMatch("a", 300, None),))
+
+
+def test_bad_alert_is_counted_and_valid_siblings_publish(monkeypatch, caplog):
+    from prometheus_client import generate_latest
+
+    fake = FakeProducer()
+    sent = []
+    original_produce = fake.produce
+
+    def capture(topic, key, value, on_delivery):
+        sent.append(json.loads(value))
+        original_produce(topic, key, value, on_delivery)
+
+    fake.produce = capture
+    producer = MatchedProducer(client=fake)
+    monkeypatch.setattr(matched_publish, "get_matched_producer", lambda: producer)
+    monkeypatch.setattr(matched_publish, "match", lambda *_: (AutomationMatch("a", 300, None),))
+    metric = matched_publish.automation_matched_alerts_rejected_total
+    before = next(s.value for s in metric.collect()[0].samples if s.name.endswith("_total"))
+    bad = dict(alert(), time_created=None, secret="do-not-log-this")
+
+    matched_publish.publish_matches("tenant", [alert(), bad, dict(alert(), id="last")])
+
+    assert [m["alert"]["id"] for m in sent] == ["event-789", "last"]
+    assert fake.queued == []
+    after = next(s.value for s in metric.collect()[0].samples if s.name.endswith("_total"))
+    assert after == before + 1
+    assert b"keep_automation_matched_alerts_rejected_total" in generate_latest()
+    assert "alert_index=1" in caplog.text
+    assert "time_created" in caplog.text
+    assert "do-not-log-this" not in caplog.text
+
+
+def test_delivery_failure_is_not_rejected_as_bad_data(monkeypatch):
+    producer = MatchedProducer(client=FakeProducer(errors=[RuntimeError("broker")]))
+    monkeypatch.setattr(matched_publish, "get_matched_producer", lambda: producer)
+    monkeypatch.setattr(matched_publish, "match", lambda *_: (AutomationMatch("a", 300, None),))
+    rejected = Mock()
+    monkeypatch.setattr(matched_publish, "automation_matched_alerts_rejected_total", rejected)
+    with pytest.raises(MatchedPublishError):
+        matched_publish.publish_matches("tenant", [alert()])
+    rejected.inc.assert_not_called()

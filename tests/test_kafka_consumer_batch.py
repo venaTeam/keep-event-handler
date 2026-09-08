@@ -2,9 +2,40 @@
 Tests for batch consume + contiguous-offset commit per partition.
 """
 import json
+import pytest
 from unittest.mock import MagicMock, patch
 
 from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
+
+
+@pytest.mark.parametrize("delivery_fails", [False, True])
+def test_matched_rejection_advances_partition_only_after_valid_delivery(monkeypatch, delivery_fails):
+    import src.bl.automations.publish_matches as publishing
+    from src.bl.automations.models import AutomationMatch
+    from src.bl.automations.producer import MatchedPublishError
+
+    consumer, kafka = _consumer_with_mock_kafka()
+    producer = MagicMock(enabled=True)
+    if delivery_fails:
+        producer.publish.side_effect = MatchedPublishError("broker unavailable")
+    monkeypatch.setattr(publishing, "get_matched_producer", lambda: producer)
+    monkeypatch.setattr(publishing, "match", lambda *_: (AutomationMatch("a", 300, None),))
+    valid = {"id": "good", "fingerprint": "fp", "time_created": "2026-01-01T00:00:00Z"}
+    records = [_make_msg("raw", 0, i) for i in range(2)]
+
+    def process(dto):
+        publishing.publish_matches(dto.tenant_id, [{}, valid])
+
+    with patch("src.core.kafka_consumer.process_event_sync", side_effect=process) as processing, patch.object(consumer, "_record_terminal") as terminal:
+        consumer._process_batch(records, RetryBudget(300000, max_sleep_seconds=0))
+
+    terminal.assert_not_called()
+    if delivery_fails:
+        kafka.commit.assert_not_called()
+    else:
+        assert processing.call_count == 2
+        assert producer.publish.call_count == 2
+        kafka.commit.assert_called_once_with(records[-1], asynchronous=False)
 
 
 def _make_msg(topic, partition, offset, tenant="t1"):

@@ -25,6 +25,13 @@ producer health gates readiness and every matched message must be acknowledged
 before the raw offset can commit; a publish failure leaves the offset uncommitted.
 The producer uses the dedicated `MATCHED_KAFKA_*` connection settings.
 
+Malformed matched alerts are logged and skipped individually. Their complete
+fan-out is validated before any messages are sent, and valid alerts in the same
+raw record continue publishing. `keep_automation_matched_alerts_rejected_total`
+counts rejected alert occurrences. The raw offset may commit after every alert
+has been published or rejected; rejected alerts intentionally do not reach the
+matched topic. Kafka delivery failures still prevent the raw offset from committing.
+
 ## Ports
 
 | Port | Server |
