@@ -143,6 +143,18 @@ def test_unhealthy_matched_producer_gates_readyz(
     assert "Readiness failed: matched producer is unhealthy" in caplog.text
 
 
+def test_disabled_matched_producer_does_not_gate_readyz(probe_server, monkeypatch):
+    from src.bl.automations import settings
+
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", False)
+    monkeypatch.setattr(producer_module, "_producer", producer_module.MatchedProducer())
+    become_consuming()
+
+    status, body = get(probe_server, "/readyz")
+
+    assert status == 200
+
+
 def test_matched_producer_does_not_affect_liveness(probe_server, monkeypatch):
     fake = MagicMock()
     fake.health.return_value = (False, "producer unavailable")

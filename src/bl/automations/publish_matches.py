@@ -79,4 +79,5 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
 
         if matches:
             automation_alerts_matched_total.inc()
-            producer.publish(build_messages(tenant_id, alert, matches))
+            if producer.enabled:
+                producer.publish(build_messages(tenant_id, alert, matches))

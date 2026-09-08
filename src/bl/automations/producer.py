@@ -54,8 +54,11 @@ class MatchedProducer:
         self._clock = clock
         self._wait = wait
         self._lock = threading.Lock()
-        self._healthy = False
-        self._client = client if client is not None else Producer(self._config())
+        self._enabled = settings.read_matched_publish_enabled()
+        self._healthy = not self._enabled
+        self._client = (
+            client if client is not None else Producer(self._config())
+        ) if self._enabled else None
 
     @staticmethod
     def _config() -> dict[str, Any]:
@@ -94,17 +97,25 @@ class MatchedProducer:
         return result
 
     @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @property
     def healthy(self) -> bool:
         """Last observed state without triggering broker I/O."""
         return self._healthy
 
     def health(self) -> tuple[bool, str]:
+        if not self._enabled:
+            return True, "matched publishing disabled"
         if not self._healthy:
             self.start()
         reason = "producer healthy" if self._healthy else "producer unavailable"
         return self._healthy, reason
 
     def start(self) -> bool:
+        if not self._enabled:
+            return False
         try:
             with self._lock:
                 metadata = self._client.list_topics(
@@ -130,7 +141,7 @@ class MatchedProducer:
             return False
 
     def publish(self, messages: Sequence[Mapping[str, Any]]) -> None:
-        if not messages:
+        if not self._enabled or not messages:
             return
         logger.debug(
             "Publishing matched-message batch (topic=%s, records=%s)",
@@ -221,6 +232,8 @@ class MatchedProducer:
         )
 
     def stop(self) -> None:
+        if not self._enabled:
+            return
         remaining = self._client.flush(
             settings.read_matched_shutdown_timeout_seconds()
         )

@@ -1,4 +1,8 @@
 import pytest
+from unittest.mock import Mock
+
+from src.bl.automations import settings
+import src.bl.automations.producer as producer_module
 
 import src.bl.automations.publish_matches as matched_publish
 from src.bl.automations.models import AutomationMatch, CooldownSpec
@@ -8,6 +12,38 @@ from src.bl.automations.producer import (
     MatchedPublishError,
 )
 from src.bl.automations.publish_matches import build_messages
+
+
+@pytest.fixture(autouse=True)
+def enable_matched_publishing(monkeypatch):
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
+
+
+def test_disabled_publishing_has_no_kafka_lifecycle(monkeypatch):
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", False)
+    factory = Mock(side_effect=AssertionError("Kafka must not be constructed"))
+    monkeypatch.setattr(producer_module, "Producer", factory)
+    producer = MatchedProducer()
+
+    assert producer.enabled is False
+    assert producer.start() is False
+    assert producer.health() == (True, "matched publishing disabled")
+    producer.publish([{"invalid": "unused while disabled"}])
+    producer.stop()
+    factory.assert_not_called()
+
+
+def test_disabled_publishing_still_probes_without_building_messages(monkeypatch):
+    producer = Mock(enabled=False)
+    matcher = Mock(return_value=(AutomationMatch("a", 300, None),))
+    monkeypatch.setattr(matched_publish, "get_matched_producer", lambda: producer)
+    monkeypatch.setattr(matched_publish, "match", matcher)
+    source_alert = object()
+
+    matched_publish.publish_matches("tenant", [source_alert])
+
+    matcher.assert_called_once_with("tenant", source_alert)
+    producer.publish.assert_not_called()
 
 
 class FakeProducer:

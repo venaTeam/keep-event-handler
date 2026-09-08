@@ -11,6 +11,20 @@ Two entrypoints:
 | `src/consumer_main.py` | the standalone Kafka consumer — this is what the container runs | `poetry run python -m src.consumer_main` |
 | `src/main.py` | a FastAPI app serving health + metrics only | runs under gunicorn |
 
+## Matched-topic publishing
+
+`AUTOMATION_MATCHED_PUBLISH_ENABLED` defaults to `false`. Set it to `true`
+to publish automation matches to `MATCHED_ALERTS_TOPIC` (default: `matched-alerts`).
+Matching also requires `AUTOMATION_INDEX_ENABLED=true` and a hydrated index.
+Restart the service after changing either flag.
+
+When publishing is disabled, the matched Kafka client is not created, producer
+startup and shutdown are skipped, and producer health does not gate `/readyz`.
+B4 matching and match metrics can still run independently. When enabled,
+producer health gates readiness and every matched message must be acknowledged
+before the raw offset can commit; a publish failure leaves the offset uncommitted.
+The producer uses the dedicated `MATCHED_KAFKA_*` connection settings.
+
 ## Ports
 
 | Port | Server |
