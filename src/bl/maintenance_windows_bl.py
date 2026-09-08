@@ -11,7 +11,6 @@ from src.core.db.db import (
     add_audit,
     get_alert_by_event_id,
     get_alerts_by_status,
-    get_all_presets_dtos,
     get_last_alert_by_fingerprint,
     get_maintenance_windows_started, 
     get_session_sync,
@@ -29,6 +28,18 @@ from src.utils.cel_utils import preprocess_cel_expression
 from src.rulesengine.rulesengine import RulesEngine
 
 tracer = trace.get_tracer(__name__)
+
+
+def _notify_recovered(tenant, incidents, notification_cache, logger):
+    """Tell the client what changed for alerts recovered from an expired window:
+    incident-change when incidents were touched, nothing else, since the UI
+    only reacts to alert and incident events."""
+    if incidents and notification_cache.should_notify(tenant, "incident-change"):
+        try:
+            incident_ids = [str(incident.id) for incident in incidents]
+            notify_sse(tenant, "incident-change", {"incident_ids": incident_ids})
+        except Exception:
+            logger.exception("Failed to tell the client to pull incidents")
 
 
 class MaintenanceWindowsBl:
@@ -324,48 +335,5 @@ class MaintenanceWindowsBl:
                                 "tenant_id": tenant,
                             },
                         )
-                    notification_cache = get_notification_cache()
-                    if incidents and notification_cache.should_notify(
-                        tenant, "incident-change"
-                    ):
-                        try:
-                            # Include incident IDs in the notification
-                            incident_ids = [str(inc.id) for inc in incidents]
-                            notify_sse(tenant, "incident-change", {"incident_ids": incident_ids})
-                        except Exception:
-                            logger.exception(
-                                "Failed to tell the client to pull incidents"
-                            )
-
-                try:
-                    presets = get_all_presets_dtos(tenant)
-                    rules_engine = RulesEngine(tenant_id=tenant)
-                    presets_do_update = []
-                    for preset_dto in presets:
-                        # filter the alerts based on the search query
-                        filtered_alerts = rules_engine.filter_alerts(
-                            [alert_dto], preset_dto.cel_query
-                        )
-                        # if not related alerts, no need to update
-                        if not filtered_alerts:
-                            continue
-                        presets_do_update.append(preset_dto)
-                    if notification_cache.should_notify(tenant, "poll-presets"):
-                        try:
-                            notify_sse(
-                                tenant,
-                                "poll-presets",
-                                {"preset_names": [p.name.lower() for p in presets_do_update]},
-                            )
-                        except Exception:
-                            logger.exception("Failed to send presets via SSE")
-                except Exception:
-                    logger.exception(
-                        "Failed to send presets via SSE",
-                        extra={
-                            "provider_type": alert_dto.provider_type,
-                            "provider_id": alert_dto.provider_id,
-                            "tenant_id": tenant,
-                        },
-                    )
+                    _notify_recovered(tenant, incidents, get_notification_cache(), logger)
         logger.info("Finished recover strategy for maintenance windows review.")

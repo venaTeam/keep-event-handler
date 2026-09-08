@@ -34,7 +34,6 @@ from src.core.db.db import (
     apply_dismiss_lifecycle,
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
-    get_all_presets_dtos,
     get_last_alert_by_fingerprint,
     get_last_alert_hashes_by_fingerprints,
     last_alert_enrichments_dict,
@@ -239,49 +238,15 @@ def _submit_notify(api_url, tenant_id, event, data):
         )
 
 
-def _submit_preset_notify(api_url, tenant_id, alerts_payload):
-    """Offload the per-preset CEL filtering loop onto the notify pool.
-
-    alerts_payload is a list of already-serialized alert dicts (an immutable
-    snapshot taken on the consumer thread) so the worker never touches live
-    AlertDto / preset objects shared with the consumer. The worker reconstructs
-    fresh AlertDto instances, runs get_all_presets_dtos + filter_alerts, and
-    submits the poll-presets notification."""
-    try:
-        _sse_pool.submit(_run_preset_filter, api_url, tenant_id, alerts_payload)
-    except Exception:
-        logger.warning(
-            "SSE preset notify submit failed",
-            extra={"event": "poll-presets", "tenant_id": tenant_id},
-        )
-
-
-def _run_preset_filter(api_url, tenant_id, alerts_payload):
-    """Pool worker: reconstruct alerts, run preset CEL filtering, notify."""
-    try:
-        # Reconstruct fresh AlertDto objects from the snapshot dicts; never
-        # share mutable state with the consumer thread.
-        alerts = [AlertDto(**alert_dict) for alert_dict in alerts_payload]
-        notification_cache = get_notification_cache()
-        presets = get_all_presets_dtos(tenant_id)
-        rules_engine = RulesEngine(tenant_id=tenant_id)
-        presets_do_update = []
-        for preset_dto in presets:
-            filtered_alerts = rules_engine.filter_alerts(alerts, preset_dto.cel_query)
-            if not filtered_alerts:
-                continue
-            presets_do_update.append(preset_dto)
-        if notification_cache.should_notify(tenant_id, "poll-presets"):
-            _submit_notify(
-                api_url,
-                tenant_id,
-                "poll-presets",
-                {"preset_names": [p.name.lower() for p in presets_do_update]},
-            )
-    except Exception:
-        logger.exception(
-            "Failed to send presets via SSE",
-            extra={"tenant_id": tenant_id},
+def _notify_client(api_url, tenant_id, alerts_payload, incidents, notification_cache):
+    """Queue the notifications the UI reacts to for a processed batch: `poll-alerts`
+    with an immutable snapshot of the alerts, and `incident-change` when incidents
+    were touched. Both go through the notify pool, off the consumer thread."""
+    _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
+    if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
+        incident_ids = [str(incident.id) for incident in incidents]
+        _submit_notify(
+            api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
         )
 
 
@@ -1310,36 +1275,15 @@ def __handle_formatted_events(
     with tracer.start_as_current_span("process_event_notify_client"):
         if not notify_client:
             return
-        # Get the notification cache
-        notification_cache = get_notification_cache()
-
-        # Tell the client to poll alerts via API (since event handler runs in a separate process)
-
-        # Tell the client to poll alerts via API (since event handler runs in a separate process)
-        # We don't use throttling here to ensure real-time updates (client will append instead of full refresh)
         api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
         logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
-
-        # Take an immutable snapshot (plain dicts) of the alerts on the consumer
-        # thread, then hand it to the background pool. The pool owns the rest of
-        # the notify work (delivery + the per-preset CEL filtering loop) so none
-        # of it runs on the consumer hot path, and the workers never touch live
-        # AlertDto / preset objects shared with the consumer.
-        alerts_payload = [alert.dict() for alert in enriched_formatted_events]
-
-        _submit_notify(
-            api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload}
+        _notify_client(
+            api_url,
+            tenant_id,
+            [alert.dict() for alert in enriched_formatted_events],
+            incidents,
+            get_notification_cache(),
         )
-
-        if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
-            incident_ids = [str(inc.id) for inc in incidents]
-            _submit_notify(
-                api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
-            )
-
-        # Offload the preset CEL filtering loop + poll-presets notify onto the
-        # pool, passing the immutable alerts snapshot.
-        _submit_preset_notify(api_url, tenant_id, alerts_payload)
     return enriched_formatted_events
 
 

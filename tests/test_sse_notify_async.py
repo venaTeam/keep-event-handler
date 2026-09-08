@@ -168,39 +168,24 @@ def test_coalescing_merges_alert_lists_no_data_loss(notify_pool):
     assert merged_count == 1
 
 
-def test_run_preset_filter_submits_filtered_preset_names(notify_pool):
-    """The off-thread preset pipeline reconstructs alerts from the dict snapshot,
-    filters presets by CEL, and submits poll-presets with the matching names."""
-    pet = notify_pool
+def test_notify_client_submits_only_poll_alerts_and_incident_change():
+    """A processed batch notifies `poll-alerts`, plus `incident-change` when incidents
+    were touched, and nothing else: no preset filtering is queued and no other
+    event is sent, because the UI only reacts to those two."""
     captured = []
-
-    preset_hit = MagicMock()
-    preset_hit.name = "Firing"
-    preset_hit.cel_query = "status == 'firing'"
-    preset_miss = MagicMock()
-    preset_miss.name = "Resolved"
-    preset_miss.cel_query = "status == 'resolved'"
-
-    rules_engine = MagicMock()
-    # Only the "Firing" preset matches the alerts.
-    rules_engine.filter_alerts.side_effect = (
-        lambda alerts, cel: alerts if cel == preset_hit.cel_query else []
-    )
-    notif_cache = MagicMock()
-    notif_cache.should_notify.return_value = True
-
-    with patch.object(pet, "AlertDto", side_effect=lambda **kw: kw), \
-        patch.object(pet, "get_all_presets_dtos", return_value=[preset_hit, preset_miss]), \
-        patch.object(pet, "RulesEngine", return_value=rules_engine), \
-        patch.object(pet, "get_notification_cache", return_value=notif_cache), \
-        patch.object(pet, "_submit_notify", side_effect=lambda *a: captured.append(a)):
-        pet._run_preset_filter(
-            "http://localhost:8080", "t1", [{"fingerprint": "fp0"}]
+    pool = MagicMock()
+    cache = MagicMock()
+    cache.should_notify.return_value = True
+    incident = MagicMock()
+    incident.id = "i1"
+    with patch.object(pet, "_submit_notify", side_effect=lambda *a: captured.append(a)), \
+        patch.object(pet, "_sse_pool", pool):
+        pet._notify_client(
+            "http://localhost:8080", "t1", [{"fingerprint": "fp0"}], [incident], cache
         )
 
-    assert len(captured) == 1
-    api_url, tenant_id, event, data = captured[0]
-    assert event == "poll-presets"
-    assert tenant_id == "t1"
-    # Only the matching preset name (lowercased) is sent.
-    assert data == {"preset_names": ["firing"]}
+    assert [(event, data) for _, _, event, data in captured] == [
+        ("poll-alerts", {"alerts": [{"fingerprint": "fp0"}]}),
+        ("incident-change", {"incident_ids": ["i1"]}),
+    ]
+    pool.submit.assert_not_called()
