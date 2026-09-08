@@ -146,7 +146,7 @@ def test_unhealthy_matched_producer_gates_readyz(
 def test_disabled_matched_producer_does_not_gate_readyz(probe_server, monkeypatch):
     from src.bl.automations import settings
 
-    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", False)
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", False)
     monkeypatch.setattr(producer_module, "_producer", producer_module.MatchedProducer())
     become_consuming()
 

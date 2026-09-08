@@ -13,14 +13,29 @@ Two entrypoints:
 
 ## Matched-topic publishing
 
-`AUTOMATION_MATCHED_PUBLISH_ENABLED` defaults to `false`. Set it to `true`
-to publish automation matches to `MATCHED_ALERTS_TOPIC` (default: `matched-alerts`).
-Matching also requires `AUTOMATION_INDEX_ENABLED=true` and a hydrated index.
-Restart the service after changing either flag.
+`AUTOMATION_MATCHING_ENABLED` defaults to `false`. Set it to `true`
+to load the automation index and publish matches to `MATCHED_ALERTS_TOPIC`
+(default: `matched-alerts`). Publishing begins once the index is hydrated.
+Restart the service after changing this flag.
+
+This replaces `AUTOMATION_INDEX_ENABLED` and `AUTOMATION_MATCHED_PUBLISH_ENABLED`;
+the old variables are no longer read. Update deployment configuration to use
+`AUTOMATION_MATCHING_ENABLED=true` when enabling the feature.
+
+Example configuration (replace the broker address with your deployment's address):
+
+```env
+AUTOMATION_MATCHING_ENABLED=true
+MATCHED_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+MATCHED_ALERTS_TOPIC=matched-alerts
+```
+
+The matched topic must already exist. Set `AUTOMATION_MATCHING_ENABLED=false`
+and restart to disable both matching and publishing.
 
 When publishing is disabled, the matched Kafka client is not created, producer
 startup and shutdown are skipped, and producer health does not gate `/readyz`.
-B4 matching and match metrics can still run independently. When enabled,
+Index hydration and the reload subscriber are also disabled. When enabled,
 producer health gates readiness and every matched message must be acknowledged
 before the raw offset can commit; a publish failure leaves the offset uncommitted.
 The producer uses the dedicated `MATCHED_KAFKA_*` connection settings.
@@ -120,7 +135,7 @@ this service performs.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUTOMATION_INDEX_ENABLED` | `false` | **Deployment gate for this whole surface.** Off means no reload worker, no `reload` subscriber, no hydrate query, and `match()` returns nothing for every alert. The automations feature spans several stories and repos, so the code ships before it is ready to run. |
+| `AUTOMATION_MATCHING_ENABLED` | `false` | Single gate for index loading, matching, matched producer startup, publishing, and producer readiness checks. Off means no reload worker, subscriber, hydrate query, or matched Kafka client; `match()` returns no matches. Restart after changing. |
 | `REDIS_URL` | *(empty)* | The `reload` pub/sub channel. See the degradation note below. |
 | `AUTOMATION_RELOAD_CHANNEL` | `reload` | Channel name, pinned by `automation-contracts.md`. |
 | `AUTOMATION_INDEX_RELOAD_SECONDS` | `30` | Unconditional full reload interval. This is the staleness bound. |
@@ -150,7 +165,7 @@ have different runbooks:
 | `keep_automation_index_config_missing{setting="redis_url"} == 1` | The index is fine; only sub-second convergence is lost. Reloads still happen every `AUTOMATION_INDEX_RELOAD_SECONDS`. |
 
 An unset `REDIS_URL` is the third, not the second — the one setting that can be
-forgotten costs latency, not correctness. Only `AUTOMATION_INDEX_ENABLED`
+forgotten costs latency, not correctness. Only `AUTOMATION_MATCHING_ENABLED`
 switches the feature off.
 
 **Qualify every automations alert with `keep_automation_index_enabled == 1`.**

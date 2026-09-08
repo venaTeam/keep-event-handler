@@ -189,7 +189,7 @@ def _start_trigger_index_safely():
         else:
             logger.info(
                 "Automations trigger index is switched off "
-                "(AUTOMATION_INDEX_ENABLED); alerts are processed as before"
+                "(AUTOMATION_MATCHING_ENABLED); alerts are processed as before"
             )
     except Exception:
         logger.exception(

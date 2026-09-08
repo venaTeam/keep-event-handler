@@ -54,7 +54,7 @@ class MatchedProducer:
         self._clock = clock
         self._wait = wait
         self._lock = threading.Lock()
-        self._enabled = settings.read_matched_publish_enabled()
+        self._enabled = settings.read_matching_enabled()
         self._healthy = not self._enabled
         self._client = (
             client if client is not None else Producer(self._config())

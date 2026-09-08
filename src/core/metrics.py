@@ -91,7 +91,7 @@ automation_index_ready = Gauge(
     f"{AUTOMATION_METRIC_PREFIX}index_ready",
     "1 once a hydrate has succeeded and an index is published",
 )
-# The deployment gate (AUTOMATION_INDEX_ENABLED), reported so that "off on
+# The deployment gate (AUTOMATION_MATCHING_ENABLED), reported so that "off on
 # purpose" and "should be running but isn't" are different observations.
 #
 # Without this, index_worker_alive == 0 is ambiguous the moment a gate exists,
@@ -100,7 +100,7 @@ automation_index_ready = Gauge(
 # automations alert should be qualified with `index_enabled == 1`.
 automation_index_enabled = Gauge(
     f"{AUTOMATION_METRIC_PREFIX}index_enabled",
-    "1 when AUTOMATION_INDEX_ENABLED is set; 0 when the feature is switched off",
+    "1 when AUTOMATION_MATCHING_ENABLED is set; 0 when the feature is switched off",
 )
 # Distinct from index_ready on purpose: two states, two runbooks. ready==0 means
 # "no usable index, matching is silently doing nothing"; config_missing means

@@ -17,11 +17,11 @@ from src.bl.automations.publish_matches import build_messages
 
 @pytest.fixture(autouse=True)
 def enable_matched_publishing(monkeypatch):
-    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", True)
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
 
 
 def test_disabled_publishing_has_no_kafka_lifecycle(monkeypatch):
-    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_ENABLED", False)
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", False)
     factory = Mock(side_effect=AssertionError("Kafka must not be constructed"))
     monkeypatch.setattr(producer_module, "Producer", factory)
     producer = MatchedProducer()

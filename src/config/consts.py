@@ -172,11 +172,8 @@ KEEP_ERROR_GUARD_MAX_ENTRIES = config(
 #
 # `automation_index_enabled` is exported so "off on purpose" stays
 # distinguishable from "failed to start" -- see src/core/metrics.py.
-AUTOMATION_INDEX_ENABLED = config(
-    "AUTOMATION_INDEX_ENABLED", default=False, cast=bool
-)
-AUTOMATION_MATCHED_PUBLISH_ENABLED = config(
-    "AUTOMATION_MATCHED_PUBLISH_ENABLED", default=False, cast=bool
+AUTOMATION_MATCHING_ENABLED = config(
+    "AUTOMATION_MATCHING_ENABLED", default=False, cast=bool
 )
 MATCHED_ALERTS_TOPIC = config("MATCHED_ALERTS_TOPIC", default="matched-alerts")
 AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS = config(
