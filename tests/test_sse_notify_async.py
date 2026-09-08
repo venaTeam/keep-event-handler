@@ -58,7 +58,7 @@ def test_coalescing_collapses_duplicate_tenant_event_notifications(notify_pool):
     release = threading.Event()
     first_in_flight = threading.Event()
 
-    def post(url, json=None, timeout=None):
+    def post(url, json=None, timeout=None, headers=None):
         # Hold the very first delivery so duplicates pile up behind it.
         if not first_in_flight.is_set():
             first_in_flight.set()
@@ -96,7 +96,7 @@ def test_distinct_keys_are_not_coalesced(notify_pool):
     pet = notify_pool
     delivered = []
 
-    def post(url, json=None, timeout=None):
+    def post(url, json=None, timeout=None, headers=None):
         delivered.append((json.get("tenant_id"), json.get("event")))
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
@@ -126,7 +126,7 @@ def test_coalescing_merges_alert_lists_no_data_loss(notify_pool):
     release = threading.Event()
     first_in_flight = threading.Event()
 
-    def post(url, json=None, timeout=None):
+    def post(url, json=None, timeout=None, headers=None):
         if not first_in_flight.is_set():
             first_in_flight.set()
             release.wait(timeout=5)
@@ -189,3 +189,12 @@ def test_notify_client_submits_only_poll_alerts_and_incident_change():
         ("incident-change", {"incident_ids": ["i1"]}),
     ]
     pool.submit.assert_not_called()
+
+
+def test_notify_sends_the_configured_token_header(monkeypatch):
+    """The gateway's notify route can require a shared token; every
+    notification must carry the configured header."""
+    monkeypatch.setattr(pet, "SSE_NOTIFY_HEADERS", {"X-Keep-Notify-Token": "s3cret"})
+    with patch.object(pet._sse_session, "post") as mock_post:
+        pet._notify_api("http://localhost:8080", "t1", "poll-alerts", {})
+    assert mock_post.call_args.kwargs["headers"] == {"X-Keep-Notify-Token": "s3cret"}
