@@ -20,6 +20,7 @@ from sqlmodel import Session, select
 # internals
 from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
 from src.bl.automations.publish_matches import publish_matches
+from src.bl.automations.producer import MatchedPublishError
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
@@ -1809,6 +1810,11 @@ def process_event(
             )
             return []
     except Exception as e:
+        # Standalone Kafka uses an empty context. Delivery failure must reach
+        # its offset gate, without becoming a terminal error alert. ARQ keeps
+        # the existing error recording and Retry behavior below.
+        if isinstance(e, MatchedPublishError) and not ctx:
+            raise
         error_type = type(e).__name__
         error_message = str(e)
         stacktrace = traceback.format_exc()
