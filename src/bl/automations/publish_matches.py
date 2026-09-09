@@ -2,7 +2,7 @@
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from src.bl.automations.models import AutomationMatch
@@ -91,8 +91,14 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
                     producer.publish(build_messages(tenant_id, alert, matches))
                 except MatchedContractError as error:
                     automation_matched_alerts_rejected_total.inc()
+                    alert_id = (
+                        alert.get("id") if isinstance(alert, Mapping)
+                        else getattr(alert, "id", None)
+                    )
+                    # Do not stringify malformed objects or log arbitrary payloads.
+                    alert_id = alert_id[:200] if isinstance(alert_id, str) else None
                     logger.warning(
                         "Rejected malformed matched alert "
-                        "(tenant_id=%s, alert_index=%s, reason=%s)",
-                        tenant_id, alert_index, error,
+                        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
+                        tenant_id, alert_index, alert_id, error,
                     )

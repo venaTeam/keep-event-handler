@@ -638,6 +638,15 @@ class KafkaEventConsumer(EventConsumer):
                 resolved = self._process_with_retries(event_dto, budget, payload)
 
             if resolved is False:
+                self.logger.warning(
+                    "Raw record left uncommitted after matched delivery failure "
+                    "(topic=%s, partition=%s, offset=%s, trace_id=%s)",
+                    msg.topic(), msg.partition(), msg.offset(), trace_id,
+                    extra={
+                        "topic": msg.topic(), "partition": msg.partition(),
+                        "offset": msg.offset(), "trace_id": trace_id,
+                    },
+                )
                 return False
 
             events_out_counter.inc()
@@ -668,8 +677,12 @@ class KafkaEventConsumer(EventConsumer):
 
     def _process_with_retries(
         self, event_dto: EventDTO, budget: "RetryBudget", payload: dict
-    ):
+    ) -> bool | None:
         """Process an event with bounded, batch-wide retry.
+
+        True means processed; False means unresolved (do not commit); None
+        means terminally handled (commit allowed). Matched delivery retries
+        happen inside the producer; exhaustion never repeats database work.
 
         A poison error is never retried. A transient error retries up to
         MAX_PROCESSING_RETRIES, with each attempt's backoff bounded by both
@@ -682,6 +695,11 @@ class KafkaEventConsumer(EventConsumer):
             try:
                 process_event_sync(event_dto)
                 return True
+            except MatchedPublishError:
+                self.logger.error(
+                    "Matched delivery exhausted; leaving raw record unresolved"
+                )
+                return False
             except Exception as e:
                 kind = classify_error(e)
                 self.logger.warning(
@@ -707,11 +725,6 @@ class KafkaEventConsumer(EventConsumer):
                     ) from e
 
                 if attempt == MAX_PROCESSING_RETRIES - 1:
-                    if isinstance(e, MatchedPublishError):
-                        self.logger.error(
-                            "Matched delivery retries exhausted; leaving raw record unresolved"
-                        )
-                        return False
                     self.logger.error(
                         "Retries exhausted (attempt cap) — recording and committing"
                     )
@@ -719,12 +732,6 @@ class KafkaEventConsumer(EventConsumer):
                     return
 
                 if budget.exhausted():
-                    if isinstance(e, MatchedPublishError):
-                        self.logger.error(
-                            "Matched delivery retry budget exhausted; "
-                            "leaving raw record unresolved"
-                        )
-                        return False
                     self.logger.error(
                         "Retry budget exhausted (poll-interval guard) — "
                         "recording and committing"

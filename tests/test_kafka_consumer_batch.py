@@ -38,6 +38,74 @@ def test_matched_rejection_advances_partition_only_after_valid_delivery(monkeypa
         kafka.commit.assert_called_once_with(records[-1], asynchronous=False)
 
 
+@pytest.mark.parametrize("queue_full", [False, True])
+def test_real_matched_poll_failure_never_commits_raw_record(monkeypatch, queue_full, caplog):
+    import src.bl.automations.publish_matches as publishing
+    from src.bl.automations import settings
+    from src.bl.automations.models import AutomationMatch
+    from src.bl.automations.producer import MatchedProducer
+
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
+    client = MagicMock()
+    client.poll.side_effect = RuntimeError("poll failed")
+    if queue_full:
+        client.produce.side_effect = BufferError()
+    producer = MatchedProducer(client=client)
+    monkeypatch.setattr(publishing, "get_matched_producer", lambda: producer)
+    monkeypatch.setattr(
+        publishing, "match", lambda *_: (AutomationMatch("a", 300, None),)
+    )
+    consumer, kafka = _consumer_with_mock_kafka()
+    valid = {"id": "good", "fingerprint": "fp", "time_created": "2026-01-01T00:00:00Z"}
+    records = [_make_msg("raw", 0, i) for i in range(2)]
+
+    def process(dto):
+        publishing.publish_matches(dto.tenant_id, [valid])
+
+    with patch("src.core.kafka_consumer.process_event_sync", side_effect=process), patch.object(consumer, "_record_terminal") as terminal:
+        consumer._process_batch(records, RetryBudget(300000, max_sleep_seconds=0))
+
+    terminal.assert_not_called()
+    kafka.commit.assert_not_called()
+    assert producer.healthy is False
+    failure = next(
+        record for record in caplog.records
+        if "Raw record left uncommitted" in record.getMessage()
+    )
+    assert (failure.topic, failure.partition, failure.offset) == ("raw", 0, 0)
+    assert failure.trace_id == "trace-0-0"
+
+
+def test_publish_retry_recovers_without_repeating_processing(monkeypatch):
+    import src.bl.automations.publish_matches as publishing
+    import src.bl.automations.producer as producer_module
+    from src.bl.automations import settings
+    from src.bl.automations.models import AutomationMatch
+    from tests.automations.test_matched_publish import FakeProducer
+
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
+    monkeypatch.setattr(producer_module, "MAX_PROCESSING_RETRIES", 3)
+    client = FakeProducer(errors=[RuntimeError("temporary"), None])
+    producer = producer_module.MatchedProducer(client=client)
+    monkeypatch.setattr(publishing, "get_matched_producer", lambda: producer)
+    matcher = MagicMock(return_value=(AutomationMatch("a", 300, None),))
+    monkeypatch.setattr(publishing, "match", matcher)
+    consumer, kafka = _consumer_with_mock_kafka()
+    record = _make_msg("raw", 0, 0)
+    valid = {"id": "good", "fingerprint": "fp", "time_created": "2026-01-01T00:00:00Z"}
+
+    def process(dto):
+        publishing.publish_matches(dto.tenant_id, [valid])
+
+    with patch("src.core.kafka_consumer.process_event_sync", side_effect=process) as processing, patch.object(consumer, "_record_terminal") as terminal:
+        consumer._process_batch([record], RetryBudget(300000, max_sleep_seconds=0))
+
+    processing.assert_called_once()
+    matcher.assert_called_once()
+    terminal.assert_not_called()
+    kafka.commit.assert_called_once_with(record, asynchronous=False)
+
+
 def _make_msg(topic, partition, offset, tenant="t1"):
     msg = MagicMock()
     msg.value.return_value = json.dumps(

@@ -11,7 +11,7 @@ from confluent_kafka import Producer
 
 from src.bl.automations import settings
 from src.config.config import config
-from src.config.consts import MATCHED_ALERTS_TOPIC
+from src.config.consts import MATCHED_ALERTS_TOPIC, MAX_PROCESSING_RETRIES
 from src.core.metrics import (
     automation_matched_producer_ready,
     automation_matched_publish_duration_seconds,
@@ -56,6 +56,14 @@ class MatchedProducer:
         self._lock = threading.Lock()
         self._enabled = settings.read_matching_enabled()
         self._healthy = not self._enabled
+        self._recovery_pending = False
+        logger.info(
+            "Matched publishing configuration "
+            "(enabled=%s, topic=%s, publish_timeout_seconds=%s, max_attempts=%s)",
+            self._enabled, MATCHED_ALERTS_TOPIC,
+            settings.read_matched_publish_timeout_seconds(),
+            max(1, MAX_PROCESSING_RETRIES),
+        )
         self._client = (
             client if client is not None else Producer(self._config())
         ) if self._enabled else None
@@ -75,6 +83,9 @@ class MatchedProducer:
             ),
             "enable.idempotence": True,
             "acks": "all",
+            "delivery.timeout.ms": int(
+                settings.read_matched_publish_timeout_seconds() * 1000
+            ),
         }
         if result["security.protocol"] in ("SASL_PLAINTEXT", "SASL_SSL"):
             result["sasl.mechanism"] = config(
@@ -113,9 +124,17 @@ class MatchedProducer:
         reason = "producer healthy" if self._healthy else "producer unavailable"
         return self._healthy, reason
 
+    def _mark_ready(self) -> None:
+        self._healthy = True
+        automation_matched_producer_ready.set(1)
+        if self._recovery_pending:
+            self._recovery_pending = False
+            logger.info("Matched producer recovered (topic=%s)", MATCHED_ALERTS_TOPIC)
+
     def start(self) -> bool:
+        """Return True when started or disabled; False only on startup failure."""
         if not self._enabled:
-            return False
+            return True
         try:
             with self._lock:
                 metadata = self._client.list_topics(
@@ -128,12 +147,12 @@ class MatchedProducer:
                     raise MatchedPublishError(
                         f"matched topic metadata unavailable: {MATCHED_ALERTS_TOPIC}"
                     )
-            self._healthy = True
-            automation_matched_producer_ready.set(1)
+            self._mark_ready()
             logger.info("Matched producer ready (topic=%s)", MATCHED_ALERTS_TOPIC)
             return True
         except Exception as error:
             self._healthy = False
+            self._recovery_pending = True
             automation_matched_producer_ready.set(0)
             logger.error(
                 "Matched producer metadata check failed: %s", type(error).__name__
@@ -144,25 +163,56 @@ class MatchedProducer:
         if not self._enabled or not messages:
             return
         # Validate the entire alert fan-out before Kafka can accept any part.
-        encoded = []
+        encoded: list[tuple[bytes, bytes]] = []
         try:
             for message in messages:
                 automation_id = message["automation_id"]
                 if not isinstance(automation_id, str) or not automation_id.strip():
                     raise ValueError("automation_id must be a non-empty string")
-                encoded.append((
-                    automation_id.encode("utf-8"),
-                    json.dumps(message, separators=(",", ":"), allow_nan=False).encode("utf-8"),
-                ))
+                value = json.dumps(
+                    message, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+                encoded.append((automation_id.encode("utf-8"), value))
         except (KeyError, TypeError, ValueError, RecursionError) as error:
             raise MatchedContractError("invalid matched-message payload") from error
+        deadline = self._clock() + settings.read_matched_publish_timeout_seconds()
+        attempts = max(1, MAX_PROCESSING_RETRIES)
+        started = self._clock()
+        try:
+            for attempt in range(attempts):
+                try:
+                    self._publish_encoded(encoded, deadline)
+                    return
+                except MatchedPublishError:
+                    remaining = deadline - self._clock()
+                    if attempt == attempts - 1 or remaining <= 0:
+                        raise
+                    logger.debug(
+                        "Retrying matched publish "
+                        "(topic=%s, next_attempt=%s, max_attempts=%s, "
+                        "records=%s, remaining_seconds=%.3f)",
+                        MATCHED_ALERTS_TOPIC, attempt + 2, attempts,
+                        len(encoded), remaining,
+                    )
+                    self._wait(min(
+                        settings.read_matched_queue_retry_seconds() * (2 ** attempt),
+                        remaining,
+                    ))
+                    if self._clock() >= deadline:
+                        raise
+        finally:
+            automation_matched_publish_duration_seconds.observe(self._clock() - started)
+
+    def _publish_encoded(
+        self, encoded: Sequence[tuple[bytes, bytes]], deadline: float
+    ) -> None:
+        """One delivery attempt; retries reuse bytes without repeating DB work."""
         logger.debug(
             "Publishing matched-message batch (topic=%s, records=%s)",
             MATCHED_ALERTS_TOPIC,
-            len(messages),
+            len(encoded),
         )
-        deadline = self._clock() + settings.read_matched_publish_timeout_seconds()
-        pending = set(range(len(messages)))
+        pending = set(range(len(encoded)))
         failures: list[object] = []
 
         def callback(index: int) -> Callable[[object, object], None]:
@@ -172,10 +222,14 @@ class MatchedProducer:
                     failures.append(error)
             return delivered
 
-        started = self._clock()
+        polling_error = None
         with self._lock:
             for index, (key, value) in enumerate(encoded):
                 while True:
+                    # A queue retry or previous enqueue may have used the budget.
+                    # Leave unsent records pending so they cannot count as acknowledged.
+                    if self._clock() >= deadline:
+                        break
                     try:
                         self._client.produce(
                             MATCHED_ALERTS_TOPIC,
@@ -189,19 +243,30 @@ class MatchedProducer:
                             failures.append("queue_full")
                             pending.discard(index)
                             break
-                        self._client.poll(0)
-                        self._wait(settings.read_matched_queue_retry_seconds())
+                        try:
+                            self._client.poll(0)
+                        except Exception as error:
+                            polling_error = error
+                            break
+                        self._wait(min(
+                            settings.read_matched_queue_retry_seconds(),
+                            max(0, deadline - self._clock()),
+                        ))
                     except Exception as error:
                         failures.append(error)
                         pending.discard(index)
                         break
+                if polling_error is not None or self._clock() >= deadline:
+                    break
 
-            while pending and self._clock() < deadline:
-                self._client.poll(min(0.05, max(0, deadline - self._clock())))
+            while pending and polling_error is None and self._clock() < deadline:
+                try:
+                    self._client.poll(min(0.05, max(0, deadline - self._clock())))
+                except Exception as error:
+                    polling_error = error
 
-        automation_matched_publish_duration_seconds.observe(self._clock() - started)
-        acknowledged = len(messages) - len(pending) - len(failures)
-        if failures or pending:
+        acknowledged = len(encoded) - len(pending) - len(failures)
+        if failures or pending or polling_error is not None:
             automation_matched_publish_total.labels(result="failed").inc(
                 len(failures) + len(pending)
             )
@@ -210,28 +275,30 @@ class MatchedProducer:
                     result="acknowledged"
                 ).inc(acknowledged)
             self._healthy = False
+            self._recovery_pending = True
             automation_matched_producer_ready.set(0)
             logger.warning(
                 "Matched-message delivery incomplete "
-                "(topic=%s, acknowledged=%s, total=%s, failed=%s, pending=%s)",
+                "(topic=%s, acknowledged=%s, total=%s, failed=%s, pending=%s, "
+                "poll_error=%s)",
                 MATCHED_ALERTS_TOPIC,
                 acknowledged,
-                len(messages),
+                len(encoded),
                 len(failures),
                 len(pending),
+                type(polling_error).__name__ if polling_error is not None else None,
             )
             raise MatchedPublishError(
-                f"matched delivery incomplete ({acknowledged}/{len(messages)} acknowledged)"
-            )
+                f"matched delivery incomplete ({acknowledged}/{len(encoded)} acknowledged)"
+            ) from polling_error
         automation_matched_publish_total.labels(result="acknowledged").inc(
-            len(messages)
+            len(encoded)
         )
-        self._healthy = True
-        automation_matched_producer_ready.set(1)
+        self._mark_ready()
         logger.debug(
             "Matched-message batch acknowledged (topic=%s, records=%s)",
             MATCHED_ALERTS_TOPIC,
-            len(messages),
+            len(encoded),
         )
 
     def stop(self) -> None:

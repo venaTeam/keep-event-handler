@@ -47,6 +47,19 @@ counts rejected alert occurrences. The raw offset may commit after every alert
 has been published or rejected; rejected alerts intentionally do not reach the
 matched topic. Kafka delivery failures still prevent the raw offset from committing.
 
+Matched delivery retries reuse the serialized messages inside the producer;
+they do not rerun database processing or matching. Attempts use the existing
+`MAX_PROCESSING_RETRIES` cap and share one
+`AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS` deadline, with bounded exponential
+backoff based on `AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS`. Exhaustion immediately
+leaves the raw record unresolved. A later Kafka redelivery can run processing
+again. Partial delivery can produce duplicates, absorbed downstream.
+
+Kafka's `delivery.timeout.ms` is also set from the publish timeout (in milliseconds)
+to bound how long the client retains an individual queued message, including
+its internal retries. Producer `start()` returns `true` for a successful start
+or a disabled no-op, and `false` only for startup failure.
+
 ## Ports
 
 | Port | Server |

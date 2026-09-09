@@ -1,6 +1,6 @@
 import json
 import pytest
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 from src.bl.automations import settings
 import src.bl.automations.producer as producer_module
@@ -18,6 +18,7 @@ from src.bl.automations.publish_matches import build_messages
 @pytest.fixture(autouse=True)
 def enable_matched_publishing(monkeypatch):
     monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
+    monkeypatch.setattr(producer_module, "MAX_PROCESSING_RETRIES", 1)
 
 
 def test_disabled_publishing_has_no_kafka_lifecycle(monkeypatch):
@@ -27,7 +28,7 @@ def test_disabled_publishing_has_no_kafka_lifecycle(monkeypatch):
     producer = MatchedProducer()
 
     assert producer.enabled is False
-    assert producer.start() is False
+    assert producer.start() is True
     assert producer.health() == (True, "matched publishing disabled")
     producer.publish([{"invalid": "unused while disabled"}])
     producer.stop()
@@ -110,6 +111,7 @@ def test_producer_uses_dedicated_kafka_configuration(monkeypatch):
     assert producer_config["sasl.username"] == "matched-user"
     assert producer_config["sasl.password"] == "matched-password"
     assert producer_config["ssl.ca.location"] == "/matched/ca.pem"
+    assert producer_config["delivery.timeout.ms"] == 5000
 
 
 def test_explicit_falsey_client_is_not_replaced():
@@ -292,6 +294,7 @@ def test_bad_alert_is_counted_and_valid_siblings_publish(monkeypatch, caplog):
     assert after == before + 1
     assert b"keep_automation_matched_alerts_rejected_total" in generate_latest()
     assert "alert_index=1" in caplog.text
+    assert "alert_id='event-789'" in caplog.text
     assert "time_created" in caplog.text
     assert "do-not-log-this" not in caplog.text
 
@@ -305,3 +308,129 @@ def test_delivery_failure_is_not_rejected_as_bad_data(monkeypatch):
     with pytest.raises(MatchedPublishError):
         matched_publish.publish_matches("tenant", [alert()])
     rejected.inc.assert_not_called()
+
+
+@pytest.mark.parametrize("queue_full", [False, True])
+def test_poll_exception_is_unresolved_and_marks_producer_unhealthy(queue_full, caplog):
+    client = Mock()
+    if queue_full:
+        client.produce.side_effect = BufferError()
+    client.poll.side_effect = ValueError("sensitive broker details")
+    producer = MatchedProducer(client=client)
+    producer._healthy = True
+
+    with pytest.raises(MatchedPublishError, match="0/2 acknowledged"):
+        producer.publish([{"automation_id": "a"}, {"automation_id": "b"}])
+
+    assert producer.healthy is False
+    assert client.produce.call_count == (1 if queue_full else 2)
+    assert "poll_error=ValueError" in caplog.text
+    assert "sensitive broker details" not in caplog.text
+
+
+def test_poll_exception_after_partial_ack_preserves_counts(monkeypatch):
+    client = FakeProducer()
+    original_poll = client.poll
+
+    def poll_then_fail(timeout):
+        original_poll(timeout)
+        raise RuntimeError("poll failed")
+
+    client.poll = poll_then_fail
+    metrics = Mock()
+    monkeypatch.setattr(producer_module, "automation_matched_publish_total", metrics)
+    producer = MatchedProducer(client=client)
+
+    with pytest.raises(MatchedPublishError, match="1/2 acknowledged"):
+        producer.publish([{"automation_id": "a"}, {"automation_id": "b"}])
+
+    assert metrics.labels.call_args_list == [
+        call(result="failed"),
+        call(result="acknowledged"),
+    ]
+    assert metrics.labels.return_value.inc.call_args_list == [call(1), call(1)]
+    assert producer.healthy is False
+
+
+def test_delivery_retry_reuses_serialization_and_recovers(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger=producer_module.__name__)
+    monkeypatch.setattr(producer_module, "MAX_PROCESSING_RETRIES", 3)
+    client = FakeProducer(errors=[RuntimeError("temporary"), None])
+    clock = [0.0]
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    dumps = Mock(wraps=json.dumps)
+    duration = Mock()
+    monkeypatch.setattr(producer_module, "automation_matched_publish_duration_seconds", duration)
+    monkeypatch.setattr(producer_module.json, "dumps", dumps)
+    producer = MatchedProducer(client=client, clock=lambda: clock[0], wait=wait)
+    producer.publish([{"automation_id": "a"}])
+
+    dumps.assert_called_once()
+    assert waits == [0.01]
+    assert producer.healthy is True
+    assert client.queued == []
+    duration.observe.assert_called_once_with(0.01)
+    assert "next_attempt=2" in caplog.text
+    assert "remaining_seconds=" in caplog.text
+    assert "Matched publishing configuration" in caplog.text
+    assert caplog.text.count("Matched producer recovered") == 1
+    producer.publish([{"automation_id": "a"}])
+    assert caplog.text.count("Matched producer recovered") == 1
+
+
+def test_delivery_retry_deadline_is_shared_and_backoff_is_bounded(monkeypatch):
+    monkeypatch.setattr(producer_module, "MAX_PROCESSING_RETRIES", 10)
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS", 0.06)
+    clock = [0.0]
+    waits = []
+    client = Mock()
+    client.produce.side_effect = RuntimeError("unavailable")
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    producer = MatchedProducer(client=client, clock=lambda: clock[0], wait=wait)
+    with pytest.raises(MatchedPublishError):
+        producer.publish([{"automation_id": "a"}])
+
+    assert client.produce.call_count == 2
+    assert waits == pytest.approx([0.06, 0.04])
+    assert clock[0] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("seconds,expected", [(5, 5000), (0, 100), (-1, 100)])
+def test_client_delivery_timeout_uses_clamped_publish_timeout(monkeypatch, seconds, expected):
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS", seconds)
+    assert MatchedProducer._config()["delivery.timeout.ms"] == expected
+
+
+@pytest.mark.parametrize("queue_full", [False, True])
+def test_expired_deadline_does_not_enqueue_more_messages(monkeypatch, queue_full):
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS", 0.1)
+    clock = [0.0]
+    client = Mock()
+
+    def produce(*args, **kwargs):
+        clock[0] = 0.1
+        if queue_full:
+            raise BufferError()
+
+    client.produce.side_effect = produce
+    producer = MatchedProducer(client=client, clock=lambda: clock[0])
+    duration = Mock()
+    monkeypatch.setattr(producer_module, "automation_matched_publish_duration_seconds", duration)
+
+    with pytest.raises(MatchedPublishError, match="0/2 acknowledged"):
+        producer.publish([{"automation_id": "a"}, {"automation_id": "b"}])
+
+    client.produce.assert_called_once()
+    client.poll.assert_not_called()
+    duration.observe.assert_called_once_with(0.1)
+    assert producer.healthy is False

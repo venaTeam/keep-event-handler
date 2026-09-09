@@ -40,6 +40,10 @@ from src.config.consts import (
 # being true. Clamped rather than rejected: a bad value must not stop the
 # matcher from running.
 _MAX_JITTER_FRACTION = 0.5
+# Safety floors for explicit zero/negative values, not the configured defaults
+# (5s publish, 10ms queue retry, 3s shutdown in config/consts.py).
+_MIN_MATCHED_TIMEOUT_SECONDS = 0.1
+_MIN_MATCHED_QUEUE_RETRY_SECONDS = 0.001
 
 
 def read_matching_enabled() -> bool:
@@ -53,15 +57,15 @@ def read_matching_enabled() -> bool:
 
 
 def read_matched_publish_timeout_seconds() -> float:
-    return max(0.1, AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS)
+    return max(_MIN_MATCHED_TIMEOUT_SECONDS, AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS)
 
 
 def read_matched_queue_retry_seconds() -> float:
-    return max(0.001, AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS)
+    return max(_MIN_MATCHED_QUEUE_RETRY_SECONDS, AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS)
 
 
 def read_matched_shutdown_timeout_seconds() -> float:
-    return max(0.1, AUTOMATION_MATCHED_SHUTDOWN_TIMEOUT_SECONDS)
+    return max(_MIN_MATCHED_TIMEOUT_SECONDS, AUTOMATION_MATCHED_SHUTDOWN_TIMEOUT_SECONDS)
 
 
 def read_reload_seconds() -> int:

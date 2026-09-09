@@ -214,8 +214,9 @@ def test_matched_publish_exhaustion_is_unresolved_not_terminal():
     with patch(
         "src.core.kafka_consumer.process_event_sync",
         side_effect=MatchedPublishError("broker unavailable"),
-    ), patch("src.core.kafka_consumer.record_terminal_error") as terminal:
+    ) as processing, patch("src.core.kafka_consumer.record_terminal_error") as terminal:
         resolved = consumer._process_with_retries(MagicMock(), budget, payload)
 
     assert resolved is False
+    processing.assert_called_once()
     terminal.assert_not_called()
