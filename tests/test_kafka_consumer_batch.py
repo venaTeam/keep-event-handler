@@ -106,6 +106,45 @@ def test_publish_retry_recovers_without_repeating_processing(monkeypatch):
     kafka.commit.assert_called_once_with(record, asynchronous=False)
 
 
+def test_unresolved_offset_blocks_later_batches_until_replayed():
+    consumer, kafka = _consumer_with_mock_kafka()
+    failed = _make_msg("raw", 0, 10)
+    later = _make_msg("raw", 0, 11)
+    other = _make_msg("raw", 1, 5)
+    budget = RetryBudget(300000, max_sleep_seconds=0)
+    with patch.object(consumer, "_process_message", side_effect=[False, True, True, True]) as processing:
+        consumer._process_batch([failed], budget)
+        consumer._process_batch([later, other], budget)
+        assert [c.args[0] for c in kafka.commit.call_args_list] == [other]
+        assert processing.call_count == 2  # failed record and independent partition
+        consumer._process_batch([failed, later], budget)
+    assert [c.args[0] for c in kafka.commit.call_args_list] == [other, later]
+    assert consumer._unresolved_offsets == {}
+    assert [(c.args[0].partition, c.args[0].offset) for c in kafka.seek.call_args_list] == [(0, 10), (0, 10)]
+
+
+def test_failed_seek_stops_consumer_without_committing():
+    consumer, kafka = _consumer_with_mock_kafka()
+    consumer._running = True
+    kafka.seek.side_effect = RuntimeError("seek failed")
+    with patch.object(consumer, "_process_message", return_value=False):
+        with pytest.raises(RuntimeError, match="seek failed"):
+            consumer._process_batch([_make_msg("raw", 0, 10)], RetryBudget(300000))
+    assert consumer._running is False
+    assert consumer._unresolved_offsets == {("raw", 0): 10}
+    kafka.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("callback", ["_on_revoke", "_on_lost"])
+def test_rebalance_clears_only_relinquished_offset_barriers(callback):
+    from confluent_kafka import TopicPartition
+    consumer, kafka = _consumer_with_mock_kafka()
+    consumer._unresolved_offsets = {("raw", 0): 10, ("raw", 1): 20}
+    getattr(consumer, callback)(kafka, [TopicPartition("raw", 0)])
+    assert consumer._unresolved_offsets == {("raw", 1): 20}
+    kafka.commit.assert_not_called()
+
+
 def _make_msg(topic, partition, offset, tenant="t1"):
     msg = MagicMock()
     msg.value.return_value = json.dumps(

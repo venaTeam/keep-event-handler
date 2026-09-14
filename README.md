@@ -55,6 +55,16 @@ backoff based on `AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS`. Exhaustion immediatel
 leaves the raw record unresolved. A later Kafka redelivery can run processing
 again. Partial delivery can produce duplicates, absorbed downstream.
 
+An unresolved raw record rewinds its partition to the failed offset. The consumer
+retains that offset across batches and blocks commits past it until processing
+succeeds. Other partitions can continue. Redelivery uses a bounded,
+shutdown-interruptible backoff; failure to rewind stops consumption. Partition
+revocation or loss clears the local tracking for those partitions without committing.
+
+Producer lock acquisition uses the remaining publish or readiness-check deadline.
+Metadata checks receive only the time left after acquiring the lock, so contention
+does not add an unbounded wait before broker I/O.
+
 Kafka's `delivery.timeout.ms` is also set from the publish timeout (in milliseconds)
 to bound how long the client retains an individual queued message, including
 its internal retries. Producer `start()` returns `true` for a successful start

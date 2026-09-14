@@ -434,3 +434,43 @@ def test_expired_deadline_does_not_enqueue_more_messages(monkeypatch, queue_full
     client.poll.assert_not_called()
     duration.observe.assert_called_once_with(0.1)
     assert producer.healthy is False
+
+
+@pytest.mark.parametrize("operation", ["publish", "start"])
+def test_contended_lock_uses_operation_deadline(monkeypatch, operation):
+    import time
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS", 0.1)
+    client = Mock()
+    producer = MatchedProducer(client=client)
+    producer._lock.acquire()
+    started = time.monotonic()
+    try:
+        if operation == "publish":
+            with pytest.raises(MatchedPublishError, match="lock deadline"):
+                producer.publish([{"automation_id": "a"}])
+        else:
+            assert producer.start() is False
+    finally:
+        producer._lock.release()
+    assert time.monotonic() - started < 1.0
+    client.produce.assert_not_called()
+    client.list_topics.assert_not_called()
+    assert producer.healthy is False
+
+
+def test_metadata_check_gets_only_budget_remaining_after_lock():
+    clock = [0.0]
+    client = Mock()
+    client.list_topics.return_value = type("Metadata", (), {
+        "topics": {producer_module.MATCHED_ALERTS_TOPIC: type("Topic", (), {"error": None})()}
+    })()
+    producer = MatchedProducer(client=client, clock=lambda: clock[0])
+    lock = Mock()
+    def acquire(timeout):
+        clock[0] += 2.0
+        return True
+    lock.acquire.side_effect = acquire
+    producer._lock = lock
+    assert producer.start() is True
+    client.list_topics.assert_called_once_with(timeout=3.0)
+    lock.release.assert_called_once()

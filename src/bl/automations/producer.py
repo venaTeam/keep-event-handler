@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, Protocol
 
 from confluent_kafka import Producer
@@ -131,14 +132,33 @@ class MatchedProducer:
             self._recovery_pending = False
             logger.info("Matched producer recovered (topic=%s)", MATCHED_ALERTS_TOPIC)
 
+    @contextmanager
+    def _lock_until(self, deadline: float):
+        remaining = max(0, deadline - self._clock())
+        if not self._lock.acquire(timeout=remaining):
+            self._healthy = False
+            self._recovery_pending = True
+            automation_matched_producer_ready.set(0)
+            raise MatchedPublishError("matched producer lock deadline exceeded")
+        try:
+            if self._clock() >= deadline:
+                self._healthy = False
+                self._recovery_pending = True
+                automation_matched_producer_ready.set(0)
+                raise MatchedPublishError("matched producer deadline exceeded")
+            yield
+        finally:
+            self._lock.release()
+
     def start(self) -> bool:
         """Return True when started or disabled; False only on startup failure."""
         if not self._enabled:
             return True
+        deadline = self._clock() + settings.read_matched_publish_timeout_seconds()
         try:
-            with self._lock:
+            with self._lock_until(deadline):
                 metadata = self._client.list_topics(
-                    timeout=settings.read_matched_publish_timeout_seconds()
+                    timeout=max(0, deadline - self._clock())
                 )
                 topics = getattr(metadata, "topics", None)
                 topic = None if topics is None else topics.get(MATCHED_ALERTS_TOPIC)
@@ -223,7 +243,7 @@ class MatchedProducer:
             return delivered
 
         polling_error = None
-        with self._lock:
+        with self._lock_until(deadline):
             for index, (key, value) in enumerate(encoded):
                 while True:
                     # A queue retry or previous enqueue may have used the budget.

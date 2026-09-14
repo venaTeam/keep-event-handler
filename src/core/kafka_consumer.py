@@ -170,6 +170,7 @@ class KafkaEventConsumer(EventConsumer):
         self.logger = logging.getLogger(__name__)
         self._running = False
         self._consumer: Optional[Consumer] = None
+        self._unresolved_offsets: dict[tuple[str, int], int] = {}
         # The entrypoint hands over its startup event, so a SIGTERM that landed
         # between the end of init_services() and this consumer installing its
         # own signal handlers is not lost. Without it that pod runs until the
@@ -395,6 +396,8 @@ class KafkaEventConsumer(EventConsumer):
         _process_batch.
         """
         self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
+        for partition in partitions:
+            self._unresolved_offsets.pop((partition.topic, partition.partition), None)
         if self._is_cooperative:
             try:
                 consumer.incremental_unassign(partitions)
@@ -414,6 +417,8 @@ class KafkaEventConsumer(EventConsumer):
         so committing here would write an offset for records that member is
         re-processing. Anything unprocessed is redelivered to whoever owns it.
         """
+        for partition in partitions:
+            self._unresolved_offsets.pop((partition.topic, partition.partition), None)
         self.logger.warning(
             f"Partitions LOST: {[p.partition for p in partitions]} — "
             "not committing; they may already be owned by another member"
@@ -498,6 +503,16 @@ class KafkaEventConsumer(EventConsumer):
 
         self.logger.info("Exited consume loop")
 
+    def _rewind_unresolved(self, key: tuple[str, int], offset: int) -> None:
+        self._unresolved_offsets[key] = offset
+        try:
+            self._consumer.seek(TopicPartition(key[0], key[1], offset))
+        except Exception:
+            # Do not consume past the gap if we cannot restore the position.
+            self._running = False
+            self.logger.exception("Cannot rewind unresolved raw record; stopping consumer")
+            raise
+
     def _process_batch(self, records, budget: "RetryBudget"):
         """Process a batch of records and commit the highest *contiguous*
         successfully-resolved offset per partition.
@@ -530,6 +545,7 @@ class KafkaEventConsumer(EventConsumer):
             partitions.setdefault(key, []).append(msg)
 
         shutting_down = False
+        unresolved = False
         for key, partition_msgs in partitions.items():
             partition_msgs.sort(key=lambda m: m.offset())
             commit_boundary = None  # last contiguous resolved message
@@ -553,9 +569,16 @@ class KafkaEventConsumer(EventConsumer):
                     shutting_down = True
                     break
 
+                blocked_offset = self._unresolved_offsets.get(key)
+                if blocked_offset is not None and msg.offset() > blocked_offset:
+                    self._rewind_unresolved(key, blocked_offset)
+                    unresolved = True
+                    break
                 should_commit = self._process_message(msg, budget)
                 if should_commit:
                     commit_boundary = msg
+                    if msg.offset() == blocked_offset:
+                        self._unresolved_offsets.pop(key, None)
                 else:
                     # First unresolved record breaks contiguity for this
                     # partition; stop and commit up to the boundary.
@@ -567,6 +590,8 @@ class KafkaEventConsumer(EventConsumer):
                             "offset": msg.offset(),
                         },
                     )
+                    self._rewind_unresolved(key, msg.offset())
+                    unresolved = True
                     break
 
             if commit_boundary is not None:
@@ -580,6 +605,9 @@ class KafkaEventConsumer(EventConsumer):
                 # Every remaining partition's records are simply not committed,
                 # so they are redelivered. At-least-once is preserved.
                 break
+
+        if unresolved and not self._shutdown_event.is_set():
+            budget.sleep_for(0)
 
     def _process_message(self, msg, budget: "RetryBudget") -> bool:
         """Process a single Kafka message.
