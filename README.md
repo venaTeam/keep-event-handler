@@ -40,6 +40,12 @@ producer health gates readiness and every matched message must be acknowledged
 before the raw offset can commit; a publish failure leaves the offset uncommitted.
 The producer uses the dedicated `MATCHED_KAFKA_*` connection settings.
 
+Matched publishing runs after alert-field updates, Elasticsearch indexing,
+incident correlation, and notification scheduling. A matched-broker outage cannot
+skip those preceding steps. Disabling client notifications does not disable
+publishing. Notification scheduling errors are logged and publishing continues;
+background notification delivery is not awaited before the raw offset commits.
+
 Malformed matched alerts are logged and skipped individually. Their complete
 fan-out is validated before any messages are sent, and valid alerts in the same
 raw record continue publishing. `keep_automation_matched_alerts_rejected_total`
