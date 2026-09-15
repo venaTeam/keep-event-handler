@@ -117,6 +117,8 @@ def test_unresolved_offset_blocks_later_batches_until_replayed():
         consumer._process_batch([later, other], budget)
         assert [c.args[0] for c in kafka.commit.call_args_list] == [other]
         assert processing.call_count == 2  # failed record and independent partition
+        with patch("src.core.kafka_consumer.time.monotonic", return_value=consumer._replay_due[("raw", 0)]):
+            consumer._resume_due_replays()
         consumer._process_batch([failed, later], budget)
     assert [c.args[0] for c in kafka.commit.call_args_list] == [other, later]
     assert consumer._unresolved_offsets == {}
@@ -143,6 +145,100 @@ def test_rebalance_clears_only_relinquished_offset_barriers(callback):
     getattr(consumer, callback)(kafka, [TopicPartition("raw", 0)])
     assert consumer._unresolved_offsets == {("raw", 1): 20}
     kafka.commit.assert_not_called()
+
+
+def test_replay_backoff_grows_caps_and_resets_without_sleeping(monkeypatch):
+    consumer, kafka = _consumer_with_mock_kafka()
+    now = [0.0]
+    monkeypatch.setattr("src.core.kafka_consumer.time.monotonic", lambda: now[0])
+    key = ("raw", 0)
+    message = _make_msg(*key, 10)
+    budget = MagicMock()
+    with patch.object(consumer, "_process_message", return_value=False) as processing:
+        for delay in [1, 2, 4, 8, 16, 30, 30]:
+            consumer._process_batch([message], budget)
+            assert consumer._replay_due[key] == now[0] + delay
+            count = processing.call_count
+            consumer._process_batch([message], budget)
+            assert processing.call_count == count
+            consumer._resume_due_replays()
+            assert key in consumer._replay_due
+            now[0] += delay
+            consumer._resume_due_replays()
+            assert key not in consumer._replay_due
+    assert kafka.pause.call_count == kafka.resume.call_count == 7
+    budget.sleep_for.assert_not_called()
+    kafka.commit.assert_not_called()
+    with patch.object(consumer, "_process_message", return_value=True):
+        consumer._process_batch([message], budget)
+    assert consumer._replay_failures == {}
+    with patch.object(consumer, "_process_message", return_value=False):
+        consumer._process_batch([_make_msg(*key, 11)], budget)
+    assert consumer._replay_due[key] == now[0] + 1
+
+
+@pytest.mark.parametrize("callback", ["_on_revoke", "_on_lost"])
+def test_rebalance_clears_replay_schedule(callback):
+    from confluent_kafka import TopicPartition
+    consumer, kafka = _consumer_with_mock_kafka()
+    consumer._unresolved_offsets = {("raw", 0): 10}
+    consumer._replay_due = {("raw", 0): 0}
+    consumer._replay_failures = {("raw", 0): 6}
+    getattr(consumer, callback)(kafka, [TopicPartition("raw", 0)])
+    consumer._resume_due_replays()
+    assert consumer._replay_due == consumer._replay_failures == {}
+    kafka.resume.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["pause", "resume"])
+def test_pause_or_resume_failure_stops_consumption(operation):
+    consumer, kafka = _consumer_with_mock_kafka()
+    consumer._running = True
+    consumer._unresolved_offsets = {("raw", 0): 10}
+    getattr(kafka, operation).side_effect = RuntimeError("failed")
+    with pytest.raises(RuntimeError):
+        if operation == "pause":
+            consumer._schedule_replay(("raw", 0))
+        else:
+            consumer._replay_due = {("raw", 0): 0}
+            consumer._resume_due_replays()
+    assert consumer._running is False
+    kafka.commit.assert_not_called()
+
+
+def test_shutdown_does_not_resume_paused_partitions():
+    consumer, kafka = _consumer_with_mock_kafka()
+    consumer._replay_due = {("raw", 0): 0}
+    consumer._shutdown_event.set()
+    consumer._resume_due_replays()
+    kafka.resume.assert_not_called()
+
+
+def test_consume_loop_keeps_polling_and_resumes_after_empty_polls(monkeypatch):
+    consumer, kafka = _consumer_with_mock_kafka()
+    consumer._running = True
+    consumer._batch_timeout = 0.5
+    now = [0.0]
+    monkeypatch.setattr("src.core.kafka_consumer.time.monotonic", lambda: now[0])
+    message = _make_msg("raw", 0, 10)
+    calls = []
+    def consume(num_messages, timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            return [message]
+        if kafka.resume.called:
+            consumer._running = False
+            return [message]
+        now[0] += timeout
+        return []
+    kafka.consume.side_effect = consume
+    with patch.object(consumer, "_process_message", side_effect=[False, True]) as processing:
+        consumer._consume_loop()
+    assert processing.call_count == 2
+    assert len(calls) == 4
+    assert consumer._replay_due == consumer._replay_failures == {}
+    kafka.resume.assert_called_once()
+    kafka.commit.assert_called_once_with(message, asynchronous=False)
 
 
 def _make_msg(topic, partition, offset, tenant="t1"):

@@ -63,9 +63,17 @@ again. Partial delivery can produce duplicates, absorbed downstream.
 
 An unresolved raw record rewinds its partition to the failed offset. The consumer
 retains that offset across batches and blocks commits past it until processing
-succeeds. Other partitions can continue. Redelivery uses a bounded,
-shutdown-interruptible backoff; failure to rewind stops consumption. Partition
+succeeds. Failed partitions pause for 1, 2, 4, 8, 16, then at most 30 seconds
+between replays. Kafka polling and processing of other partitions continue during
+the pause; successful resolution resets the delay. Failure to rewind, pause, or
+resume stops consumption. Partition
 revocation or loss clears the local tracking for those partitions without committing.
+
+Empty alert/preset notifications are skipped, including on full-duplicate replay;
+incident-change notifications still run when there are actual incidents.
+Replay can still repeat deduplication audit writes and LastAlert updates. These
+are retained because a full duplicate may be a legitimate new occurrence; the
+backoff reduces repeated work but is not durable side-effect deduplication.
 
 Producer lock acquisition uses the remaining publish or readiness-check deadline.
 Metadata checks receive only the time left after acquiring the lock, so contention

@@ -148,6 +148,7 @@ def test_processing_finishes_before_publish_failure(delivery_flow, monkeypatch, 
 @pytest.mark.parametrize("failure_point", ["get_notification_cache", "_submit_notify", "_submit_preset_notify"])
 def test_notification_failure_does_not_suppress_publish(delivery_flow, monkeypatch, caplog, failure_point):
     dto, session, save, errors, counter, producer = delivery_flow
+    save.side_effect = lambda *args: args[4]
     monkeypatch.setattr(task, failure_point, MagicMock(side_effect=RuntimeError("private details")))
     producer.publish.side_effect = None
     process_event_sync(dto)
@@ -160,10 +161,28 @@ def test_notification_failure_does_not_suppress_publish(delivery_flow, monkeypat
 def test_full_duplicate_still_publishes_after_processing(delivery_flow):
     dto, session, save, errors, counter, producer = delivery_flow
     dto.event["is_full_duplicate"] = True
-    dto.notify_client = False
+    dto.notify_client = True
     producer.publish.side_effect = None
     process_event_sync(dto)
     assert save.call_args.args[4] == []
     assert len(save.call_args.args[5]) == 1
     assert producer.publish.call_args.args[0][0]["alert"]["id"] == "upstream-id"
     errors.assert_not_called()
+    task._submit_notify.assert_not_called()
+    task._submit_preset_notify.assert_not_called()
+
+
+def test_incident_notification_survives_empty_alert_payload(delivery_flow, monkeypatch):
+    dto, session, save, errors, counter, producer = delivery_flow
+    producer.publish.side_effect = None
+    monkeypatch.setattr(task, "KEEP_CORRELATION_ENABLED", True)
+    rules = MagicMock()
+    rules.run_rules.return_value = [MagicMock(id="incident-1")]
+    monkeypatch.setattr(task, "RulesEngine", lambda **kwargs: rules)
+    process_event_sync(dto)
+    task._submit_notify.assert_called_once()
+    assert task._submit_notify.call_args.args[2:] == (
+        "incident-change", {"incident_ids": ["incident-1"]}
+    )
+    task._submit_preset_notify.assert_not_called()
+    producer.publish.assert_called_once()

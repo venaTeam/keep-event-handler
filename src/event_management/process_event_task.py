@@ -1340,7 +1340,7 @@ def __handle_formatted_events(
     if MAINTENANCE_WINDOW_ALERT_STRATEGY == "recover_previous_status":
         enriched_formatted_events.extend(ignored_events)
 
-    if notify_client:
+    if notify_client and (enriched_formatted_events or incidents):
         try:
             with tracer.start_as_current_span("process_event_notify_client"):
                 # Get the notification cache
@@ -1358,9 +1358,10 @@ def __handle_formatted_events(
                 # AlertDto / preset objects shared with the consumer.
                 alerts_payload = [alert.dict() for alert in enriched_formatted_events]
 
-                _submit_notify(
-                    api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload}
-                )
+                if alerts_payload:
+                    _submit_notify(
+                        api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload}
+                    )
 
                 if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
                     incident_ids = [str(inc.id) for inc in incidents]
@@ -1370,7 +1371,8 @@ def __handle_formatted_events(
 
                 # Offload the preset CEL filtering loop + poll-presets notify onto the
                 # pool, passing the immutable alerts snapshot.
-                _submit_preset_notify(api_url, tenant_id, alerts_payload)
+                if alerts_payload:
+                    _submit_preset_notify(api_url, tenant_id, alerts_payload)
         except Exception as error:
             logger.warning(
                 "Failed to schedule alert notifications; continuing matched publishing "
