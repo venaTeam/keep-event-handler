@@ -514,6 +514,41 @@ def test_dedup_path_keeps_permanent_dismiss_on_firing_full_duplicate(db_session)
     assert la.dismiss_mode == "permanent"
 
 
+def test_dedup_path_replay_skips_side_effects_already_committed(db_session):
+    """A matched-publish replay is the same raw offset, so its first pass already
+    wrote the audit row, last_received and lifecycle. Repeating them could clear
+    a disposable dismissal a user made while publishing was failing."""
+    from src.event_management.process_event_task import (
+        __save_to_db as _save_to_db,
+    )
+
+    fp = "fp-dedup-replay"
+    _insert_alert_and_lastalert(db_session, fp, AlertStatus.FIRING.value, ts=_T0)
+    enrich_entity(
+        SINGLE_TENANT_UUID, fp,
+        {"status": "suppressed", "dismiss_mode": "permanent",
+         "status_disposable": True},
+        action_type=ActionType.GENERIC_ENRICH, action_callee="bob",
+        action_description="t", session=db_session,
+    )
+    before = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    last_received = before.last_received
+    audits = db_session.query(AlertAudit).filter_by(fingerprint=fp).count()
+
+    _save_to_db(
+        SINGLE_TENANT_UUID, "test", db_session,
+        raw_events=[], formatted_events=[],
+        deduplicated_events=[_dedup_dto(fp, AlertStatus.FIRING.value)],
+        is_replay=True,
+    )
+
+    la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
+    assert la.status == "suppressed"
+    assert la.status_disposable is True
+    assert la.last_received == last_received
+    assert db_session.query(AlertAudit).filter_by(fingerprint=fp).count() == audits
+
+
 # --------------------------------------------------------------------------- #
 # tracking columns written by set_last_alert
 # --------------------------------------------------------------------------- #

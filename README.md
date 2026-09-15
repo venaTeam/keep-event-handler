@@ -11,6 +11,87 @@ Two entrypoints:
 | `src/consumer_main.py` | the standalone Kafka consumer — this is what the container runs | `poetry run python -m src.consumer_main` |
 | `src/main.py` | a FastAPI app serving health + metrics only | runs under gunicorn |
 
+## Matched-topic publishing
+
+`AUTOMATION_MATCHING_ENABLED` defaults to `false`. Set it to `true`
+to load the automation index and publish matches to `MATCHED_ALERTS_TOPIC`
+(default: `matched-alerts`). Publishing begins once the index is hydrated.
+Restart the service after changing this flag.
+
+This replaces `AUTOMATION_INDEX_ENABLED` and `AUTOMATION_MATCHED_PUBLISH_ENABLED`;
+the old variables are no longer read. Update deployment configuration to use
+`AUTOMATION_MATCHING_ENABLED=true` when enabling the feature.
+
+Example configuration (replace the broker address with your deployment's address):
+
+```env
+AUTOMATION_MATCHING_ENABLED=true
+MATCHED_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+MATCHED_ALERTS_TOPIC=matched-alerts
+```
+
+The matched topic must already exist. Set `AUTOMATION_MATCHING_ENABLED=false`
+and restart to disable both matching and publishing.
+
+When publishing is disabled, the matched Kafka client is not created, producer
+startup and shutdown are skipped, and producer health does not gate `/readyz`.
+Index hydration and the reload subscriber are also disabled. When enabled,
+producer health gates readiness and every matched message must be acknowledged
+before the raw offset can commit; a publish failure leaves the offset uncommitted.
+The producer uses the dedicated `MATCHED_KAFKA_*` connection settings.
+
+Matched publishing runs after alert-field updates, Elasticsearch indexing,
+incident correlation, and notification scheduling. A matched-broker outage cannot
+skip those preceding steps. Disabling client notifications does not disable
+publishing. Notification scheduling errors are logged and publishing continues;
+background notification delivery is not awaited before the raw offset commits.
+
+Malformed matched alerts are logged and skipped individually. Their complete
+fan-out is validated before any messages are sent, and valid alerts in the same
+raw record continue publishing. `keep_automation_matched_alerts_rejected_total`
+counts rejected alert occurrences. The raw offset may commit after every alert
+has been published or rejected; rejected alerts intentionally do not reach the
+matched topic. Kafka delivery failures still prevent the raw offset from committing.
+
+Matched delivery retries reuse the serialized messages inside the producer;
+they do not rerun database processing or matching. Attempts use the existing
+`MAX_PROCESSING_RETRIES` cap and share one
+`AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS` deadline, with bounded exponential
+backoff based on `AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS`. Exhaustion immediately
+leaves the raw record unresolved. A later Kafka redelivery can run processing
+again. Partial delivery can produce duplicates, absorbed downstream.
+
+An unresolved raw record rewinds its partition to the failed offset. The consumer
+retains that offset across batches and blocks commits past it until processing
+succeeds. Failed partitions pause for 1, 2, 4, 8, 16, then at most 30 seconds
+between replays. Kafka polling and processing of other partitions continue during
+the pause; successful resolution resets the delay. Failure to rewind, pause, or
+resume stops consumption. Partition
+revocation or loss clears the local tracking for those partitions without committing.
+
+Empty alert/preset notifications are skipped, including on full-duplicate replay;
+incident-change notifications still run when there are actual incidents.
+When matched publishing fails, the consumer remembers that exact raw offset and
+redelivers it as a replay. Publishing runs after processing commits, so a replay
+skips the full-duplicate side effects its first pass already wrote: the
+deduplication audit row, the `last_received` update, and the dismiss lifecycle.
+A new identical occurrence arrives at its own offset and keeps them. Transient
+database failures and shutdown never mark a replay. The marker is in memory:
+after a restart or rebalance, the new owner reprocesses the record normally,
+repeating those side effects once per redelivery.
+
+Producer lock acquisition uses the remaining publish or readiness-check deadline.
+Metadata checks receive only the time left after acquiring the lock, so contention
+does not add an unbounded wait before broker I/O.
+Local lock timeouts (including expiry immediately after acquisition) preserve
+the last known producer health and readiness gauge. They still fail publishing
+and leave the raw offset uncommitted. Actual broker failures mark it unhealthy.
+
+Kafka's `delivery.timeout.ms` is also set from the publish timeout (in milliseconds)
+to bound how long the client retains an individual queued message, including
+its internal retries. Producer `start()` returns `true` for a successful start
+or a disabled no-op, and `false` only for startup failure.
+
 ## Ports
 
 | Port | Server |
@@ -99,7 +180,7 @@ this service performs.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUTOMATION_INDEX_ENABLED` | `false` | **Deployment gate for this whole surface.** Off means no reload worker, no `reload` subscriber, no hydrate query, and `match()` returns nothing for every alert. The automations feature spans several stories and repos, so the code ships before it is ready to run. |
+| `AUTOMATION_MATCHING_ENABLED` | `false` | Single gate for index loading, matching, matched producer startup, publishing, and producer readiness checks. Off means no reload worker, subscriber, hydrate query, or matched Kafka client; `match()` returns no matches. Restart after changing. |
 | `REDIS_URL` | *(empty)* | The `reload` pub/sub channel. See the degradation note below. |
 | `AUTOMATION_RELOAD_CHANNEL` | `reload` | Channel name, pinned by `automation-contracts.md`. |
 | `AUTOMATION_INDEX_RELOAD_SECONDS` | `30` | Unconditional full reload interval. This is the staleness bound. |
@@ -129,7 +210,7 @@ have different runbooks:
 | `keep_automation_index_config_missing{setting="redis_url"} == 1` | The index is fine; only sub-second convergence is lost. Reloads still happen every `AUTOMATION_INDEX_RELOAD_SECONDS`. |
 
 An unset `REDIS_URL` is the third, not the second — the one setting that can be
-forgotten costs latency, not correctness. Only `AUTOMATION_INDEX_ENABLED`
+forgotten costs latency, not correctness. Only `AUTOMATION_MATCHING_ENABLED`
 switches the feature off.
 
 **Qualify every automations alert with `keep_automation_index_enabled == 1`.**
