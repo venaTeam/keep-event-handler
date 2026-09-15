@@ -241,6 +241,58 @@ def test_consume_loop_keeps_polling_and_resumes_after_empty_polls(monkeypatch):
     kafka.commit.assert_called_once_with(message, asynchronous=False)
 
 
+def test_publish_failure_marks_only_that_offset_as_replay():
+    from src.bl.automations.producer import MatchedPublishError
+
+    consumer, kafka = _consumer_with_mock_kafka()
+    failed, later = _make_msg("raw", 0, 10), _make_msg("raw", 0, 11)
+    budget = RetryBudget(300000, max_sleep_seconds=0)
+    seen = []
+
+    def process(dto):
+        seen.append((dto.trace_id, dto.is_replay))
+        if len(seen) == 1:
+            raise MatchedPublishError("broker unavailable")
+
+    with patch("src.core.kafka_consumer.process_event_sync", side_effect=process):
+        consumer._process_batch([failed, later], budget)
+        assert consumer._publish_pending == {("raw", 0): 10}
+        consumer._replay_due.clear()
+        consumer._process_batch([failed, later], budget)
+
+    assert seen == [
+        ("trace-0-10", False), ("trace-0-10", True), ("trace-0-11", False),
+    ]
+    assert consumer._publish_pending == {}
+    kafka.commit.assert_called_once_with(later, asynchronous=False)
+
+
+@pytest.mark.parametrize("failure", ["transient", "shutdown"])
+def test_non_publish_failures_are_not_replays(failure):
+    consumer, kafka = _consumer_with_mock_kafka()
+    message = _make_msg("raw", 0, 10)
+    budget = RetryBudget(
+        300000, max_sleep_seconds=0, shutdown_event=consumer._shutdown_event
+    )
+    if failure == "shutdown":
+        consumer._shutdown_event.set()
+    with patch("src.core.kafka_consumer.process_event_sync", side_effect=ConnectionError("db")), patch.object(consumer, "_record_terminal"), patch("src.core.kafka_consumer.MAX_PROCESSING_RETRIES", 1):
+        if failure == "shutdown":
+            assert consumer._process_message(message, budget) is False
+        else:
+            consumer._process_batch([message], budget)
+    assert consumer._publish_pending == {}
+
+
+@pytest.mark.parametrize("callback", ["_on_revoke", "_on_lost"])
+def test_rebalance_clears_replay_marker(callback):
+    from confluent_kafka import TopicPartition
+    consumer, kafka = _consumer_with_mock_kafka()
+    consumer._publish_pending = {("raw", 0): 10, ("raw", 1): 20}
+    getattr(consumer, callback)(kafka, [TopicPartition("raw", 0)])
+    assert consumer._publish_pending == {("raw", 1): 20}
+
+
 def _make_msg(topic, partition, offset, tenant="t1"):
     msg = MagicMock()
     msg.value.return_value = json.dumps(

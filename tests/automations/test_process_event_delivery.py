@@ -172,6 +172,17 @@ def test_full_duplicate_still_publishes_after_processing(delivery_flow):
     task._submit_preset_notify.assert_not_called()
 
 
+@pytest.mark.parametrize("is_replay", [False, True])
+def test_replay_flag_reaches_persistence(delivery_flow, is_replay):
+    dto, session, save, errors, counter, producer = delivery_flow
+    dto.event["is_full_duplicate"] = True
+    dto.is_replay = is_replay
+    producer.publish.side_effect = None
+    process_event_sync(dto)
+    assert save.call_args.args[8] is is_replay
+    producer.publish.assert_called_once()
+
+
 def test_incident_notification_survives_empty_alert_payload(delivery_flow, monkeypatch):
     dto, session, save, errors, counter, producer = delivery_flow
     producer.publish.side_effect = None

@@ -23,3 +23,6 @@ class EventDTO(BaseModel):
     timestamp_forced: Optional[str] = None
     notify_client: bool = True
     event_type: Optional[EventType] = EventType.ALERT
+    # Set only by the Kafka consumer, never read from the payload: this record's
+    # processing already committed and only matched publishing failed.
+    is_replay: bool = False

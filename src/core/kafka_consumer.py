@@ -173,6 +173,9 @@ class KafkaEventConsumer(EventConsumer):
         self._unresolved_offsets: dict[tuple[str, int], int] = {}
         self._replay_failures: dict[tuple[str, int], int] = {}
         self._replay_due: dict[tuple[str, int], float] = {}
+        # Offset per partition whose processing committed but whose matched
+        # publish failed. Only that exact offset is redelivered as a replay.
+        self._publish_pending: dict[tuple[str, int], int] = {}
         # The entrypoint hands over its startup event, so a SIGTERM that landed
         # between the end of init_services() and this consumer installing its
         # own signal handlers is not lost. Without it that pod runs until the
@@ -403,6 +406,7 @@ class KafkaEventConsumer(EventConsumer):
             self._unresolved_offsets.pop(key, None)
             self._replay_failures.pop(key, None)
             self._replay_due.pop(key, None)
+            self._publish_pending.pop(key, None)
         if self._is_cooperative:
             try:
                 consumer.incremental_unassign(partitions)
@@ -427,6 +431,7 @@ class KafkaEventConsumer(EventConsumer):
             self._unresolved_offsets.pop(key, None)
             self._replay_failures.pop(key, None)
             self._replay_due.pop(key, None)
+            self._publish_pending.pop(key, None)
         self.logger.warning(
             f"Partitions LOST: {[p.partition for p in partitions]} — "
             "not committing; they may already be owned by another member"
@@ -626,6 +631,8 @@ class KafkaEventConsumer(EventConsumer):
                     if msg.offset() == blocked_offset:
                         self._unresolved_offsets.pop(key, None)
                         self._replay_failures.pop(key, None)
+                    if self._publish_pending.get(key) == msg.offset():
+                        self._publish_pending.pop(key)
                 else:
                     # First unresolved record breaks contiguity for this
                     # partition; stop and commit up to the boundary.
@@ -681,6 +688,7 @@ class KafkaEventConsumer(EventConsumer):
             return True  # commit past the malformed message
 
         trace_id = payload.get("trace_id", "unknown")
+        key = (msg.topic(), msg.partition())
         self.logger.debug(f"Processing message: {trace_id}")
 
         try:
@@ -697,6 +705,7 @@ class KafkaEventConsumer(EventConsumer):
                     api_key_name=payload.get("api_key_name"),
                     provider_name=payload.get("provider_name"),
                     event_type=payload.get("event_type"),
+                    is_replay=self._publish_pending.get(key) == msg.offset(),
                 )
             except ValidationError as e:
                 self.logger.error(
@@ -711,6 +720,9 @@ class KafkaEventConsumer(EventConsumer):
                 resolved = self._process_with_retries(event_dto, budget, payload)
 
             if resolved is False:
+                # Only MatchedPublishError returns False, and publishing runs
+                # after processing commits -- so a replay can skip its side effects.
+                self._publish_pending[key] = msg.offset()
                 self.logger.warning(
                     "Raw record left uncommitted after matched delivery failure "
                     "(topic=%s, partition=%s, offset=%s, trace_id=%s)",

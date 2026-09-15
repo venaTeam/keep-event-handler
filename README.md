@@ -71,9 +71,14 @@ revocation or loss clears the local tracking for those partitions without commit
 
 Empty alert/preset notifications are skipped, including on full-duplicate replay;
 incident-change notifications still run when there are actual incidents.
-Replay can still repeat deduplication audit writes and LastAlert updates. These
-are retained because a full duplicate may be a legitimate new occurrence; the
-backoff reduces repeated work but is not durable side-effect deduplication.
+When matched publishing fails, the consumer remembers that exact raw offset and
+redelivers it as a replay. Publishing runs after processing commits, so a replay
+skips the full-duplicate side effects its first pass already wrote: the
+deduplication audit row, the `last_received` update, and the dismiss lifecycle.
+A new identical occurrence arrives at its own offset and keeps them. Transient
+database failures and shutdown never mark a replay. The marker is in memory:
+after a restart or rebalance, the new owner reprocesses the record normally,
+repeating those side effects once per redelivery.
 
 Producer lock acquisition uses the remaining publish or readiness-check deadline.
 Metadata checks receive only the time left after acquiring the lock, so contention

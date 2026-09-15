@@ -440,6 +440,7 @@ def __save_to_db(
     deduplicated_events: list[AlertDto],
     provider_id: str | None = None,
     timestamp_forced: datetime.datetime | None = None,
+    is_replay: bool = False,
 ):
     logger.info(
         "Starting __save_to_db",
@@ -466,6 +467,20 @@ def __save_to_db(
         # "dispose on new alerts" (and, for custom dedup rules that ignore
         # `status`, auto-undismiss-on-resolve) must still take effect.
         # TODO: move the audit part to the alert deduplicator
+        if is_replay and deduplicated_events:
+            # Same raw offset redelivered after matched publishing failed: its
+            # first pass already committed these side effects. A genuinely new
+            # identical occurrence arrives at its own offset and is not a replay.
+            # Re-running them would add audit rows, advance a now()-stamped
+            # last_received, and could clear a dismissal made since.
+            logger.info(
+                "Skipping duplicate side effects for matched-publish replay",
+                extra={
+                    "tenant_id": tenant_id,
+                    "deduplicated_events_count": len(deduplicated_events),
+                },
+            )
+            deduplicated_events = []
         for event in deduplicated_events:
             if KEEP_AUDIT_EVENTS_ENABLED:
                 audit = AlertAudit(
@@ -1125,6 +1140,7 @@ def __handle_formatted_events(
     notify_client: bool = True,
     timestamp_forced: datetime.datetime | None = None,
     job_id: str | None = None,
+    is_replay: bool = False,
 ):
     """
     this is super important function and does five things:
@@ -1231,6 +1247,7 @@ def __handle_formatted_events(
             deduplicated_events,
             provider_id,
             timestamp_forced,
+            is_replay,
         )
 
     # let's save all fields to the DB so that we can use them in the future such in deduplication fields suggestions
@@ -1402,6 +1419,7 @@ def process_event(
     notify_client: bool = True,
     timestamp_forced: datetime.datetime | None = None,
     provider_name: str | None = None,
+    is_replay: bool = False,
 ) -> list[Alert]:
     start_time = time.time()
     job_id = ctx.get("job_id")
@@ -1787,6 +1805,7 @@ def process_event(
                 notify_client,
                 timestamp_forced,
                 job_id,
+                is_replay,
             )
             logger.info(
                 "__handle_formatted_events completed",
