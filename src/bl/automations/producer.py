@@ -26,6 +26,10 @@ class MatchedPublishError(RuntimeError):
     """The raw record is unresolved and must not be committed."""
 
 
+class MatchedLockTimeout(MatchedPublishError):
+    """Local lock wait exhausted the deadline; broker health is unknown."""
+
+
 class MatchedContractError(ValueError):
     """An upstream alert cannot be serialized to the matched contract."""
 
@@ -136,16 +140,10 @@ class MatchedProducer:
     def _lock_until(self, deadline: float):
         remaining = max(0, deadline - self._clock())
         if not self._lock.acquire(timeout=remaining):
-            self._healthy = False
-            self._recovery_pending = True
-            automation_matched_producer_ready.set(0)
-            raise MatchedPublishError("matched producer lock deadline exceeded")
+            raise MatchedLockTimeout("matched producer lock deadline exceeded")
         try:
             if self._clock() >= deadline:
-                self._healthy = False
-                self._recovery_pending = True
-                automation_matched_producer_ready.set(0)
-                raise MatchedPublishError("matched producer deadline exceeded")
+                raise MatchedLockTimeout("matched producer deadline exceeded before broker I/O")
             yield
         finally:
             self._lock.release()
@@ -170,6 +168,9 @@ class MatchedProducer:
             self._mark_ready()
             logger.info("Matched producer ready (topic=%s)", MATCHED_ALERTS_TOPIC)
             return True
+        except MatchedLockTimeout:
+            logger.debug("Matched producer metadata check skipped: local lock deadline exceeded")
+            return False
         except Exception as error:
             self._healthy = False
             self._recovery_pending = True

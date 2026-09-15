@@ -70,6 +70,9 @@ revocation or loss clears the local tracking for those partitions without commit
 Producer lock acquisition uses the remaining publish or readiness-check deadline.
 Metadata checks receive only the time left after acquiring the lock, so contention
 does not add an unbounded wait before broker I/O.
+Local lock timeouts (including expiry immediately after acquisition) preserve
+the last known producer health and readiness gauge. They still fail publishing
+and leave the raw offset uncommitted. Actual broker failures mark it unhealthy.
 
 Kafka's `delivery.timeout.ms` is also set from the publish timeout (in milliseconds)
 to bound how long the client retains an individual queued message, including

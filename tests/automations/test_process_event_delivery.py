@@ -9,7 +9,7 @@ from arq import Retry
 import src.bl.automations.publish_matches as publishing
 import src.event_management.process_event_task as task
 from src.bl.automations.models import AutomationMatch
-from src.bl.automations.producer import MatchedPublishError
+from src.bl.automations.producer import MatchedPublishError, MatchedLockTimeout
 from src.controllers.event_controller import process_event_sync
 from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
 from src.models.event_dto import EventDTO
@@ -61,8 +61,10 @@ def test_controller_propagates_delivery_failure_and_closes_session(delivery_flow
     session.close.assert_called_once()
 
 
-def test_real_task_delivery_failure_prevents_raw_commit(delivery_flow, monkeypatch):
+@pytest.mark.parametrize("failure", [MatchedPublishError("broker unavailable"), MatchedLockTimeout("lock deadline")])
+def test_real_task_delivery_failure_prevents_raw_commit(delivery_flow, monkeypatch, failure):
     dto, session, save, errors, counter, producer = delivery_flow
+    producer.publish.side_effect = failure
     kafka = MagicMock()
     monkeypatch.setattr("src.core.kafka_consumer.Consumer", lambda *args: kafka)
     consumer = KafkaEventConsumer()

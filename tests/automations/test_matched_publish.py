@@ -437,16 +437,21 @@ def test_expired_deadline_does_not_enqueue_more_messages(monkeypatch, queue_full
 
 
 @pytest.mark.parametrize("operation", ["publish", "start"])
-def test_contended_lock_uses_operation_deadline(monkeypatch, operation):
+@pytest.mark.parametrize("healthy", [False, True])
+def test_contended_lock_uses_operation_deadline(monkeypatch, operation, healthy):
     import time
     monkeypatch.setattr(settings, "AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS", 0.1)
     client = Mock()
     producer = MatchedProducer(client=client)
+    producer._healthy = healthy
+    producer._recovery_pending = not healthy
+    gauge = Mock()
+    monkeypatch.setattr(producer_module, "automation_matched_producer_ready", gauge)
     producer._lock.acquire()
     started = time.monotonic()
     try:
         if operation == "publish":
-            with pytest.raises(MatchedPublishError, match="lock deadline"):
+            with pytest.raises(producer_module.MatchedLockTimeout, match="lock deadline"):
                 producer.publish([{"automation_id": "a"}])
         else:
             assert producer.start() is False
@@ -455,7 +460,38 @@ def test_contended_lock_uses_operation_deadline(monkeypatch, operation):
     assert time.monotonic() - started < 1.0
     client.produce.assert_not_called()
     client.list_topics.assert_not_called()
-    assert producer.healthy is False
+    assert producer.healthy is healthy
+    assert producer._recovery_pending is not healthy
+    gauge.set.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["publish", "start"])
+@pytest.mark.parametrize("healthy", [False, True])
+def test_deadline_expired_on_acquire_preserves_health(monkeypatch, operation, healthy):
+    clock = [0.0]
+    client = Mock()
+    producer = MatchedProducer(client=client, clock=lambda: clock[0])
+    producer._healthy = healthy
+    producer._recovery_pending = not healthy
+    gauge = Mock()
+    monkeypatch.setattr(producer_module, "automation_matched_producer_ready", gauge)
+    lock = Mock()
+    def acquire(timeout):
+        clock[0] += timeout
+        return True
+    lock.acquire.side_effect = acquire
+    producer._lock = lock
+    if operation == "publish":
+        with pytest.raises(producer_module.MatchedLockTimeout):
+            producer.publish([{"automation_id": "a"}])
+    else:
+        assert producer.start() is False
+    lock.release.assert_called_once()
+    client.produce.assert_not_called()
+    client.list_topics.assert_not_called()
+    assert producer.healthy is healthy
+    assert producer._recovery_pending is not healthy
+    gauge.set.assert_not_called()
 
 
 def test_metadata_check_gets_only_budget_remaining_after_lock():
