@@ -44,7 +44,7 @@ from sqlmodel import Session, col, or_, select, text
 
 
 from enum import Enum
-from src.core.db.helpers import NULL_FOR_DELETED_AT
+from src.core.db.helpers import NULL_FOR_DELETED_AT, DismissMode
 from src.core.db.db_utils import get_json_extract_field
 from src.models.db.preset import PresetDto, StaticPresetsId, Preset
 from src.models.db.alert import LastAlertToIncident, AlertDeduplicationEvent, LastAlert, Alert, AlertDeduplicationRule, IncidentEnrichment, AlertAudit, AlertField, CommentMention
@@ -353,11 +353,24 @@ def normalize_enrichments(enrichments: dict, strict: bool = True) -> dict:
     unknown keys.
 
     Translation rules (see ALERTENRICHMENT_REMOVAL_SPEC §"Dismiss"):
-      - dismissed: true  -> status='suppressed', dismiss_mode='permanent'
+      - dismissed: true  -> dismiss_mode='permanent'
           (if a dismiss_until/timestamp is also present -> dismiss_mode='dismiss_until',
            dismissed_until=<ts>)
-      - dismissed: false -> status=None, dismiss_mode=None, dismissed_until=None
+      - dismissed: false -> dismiss_mode=None, dismissed_until=None
       - dismiss_mode/dismissed_until forwarded directly.
+
+    DISMISS NO LONGER WRITES `status`. It used to set status='suppressed', which
+    made suppression a stored fact — and since nothing sweeps the table, a
+    `dismiss_until` alert stayed suppressed forever once its deadline passed.
+    Suppression is now derived from dismiss_mode/dismissed_until on read
+    (`LastAlert.get_effective_status`), so `status` is left holding the override
+    the alert reverts to when the dismissal lapses. An explicit `status` in the
+    same payload is still honoured — it is a status change that happens to travel
+    with a dismissal, not part of the dismissal.
+
+    Kept identical to keep-api-gateway's copy: both services write these columns
+    in the same database, so a divergence here means the two disagree about which
+    alerts are suppressed.
 
     Unknown keys (e.g. arbitrary extraction/mapping fields, which have no
     destination in the strict schema):
@@ -373,36 +386,26 @@ def normalize_enrichments(enrichments: dict, strict: bool = True) -> dict:
         if ts is None:
             ts = normalized.pop("dismiss_until", None)
         if dismissed:
-            normalized.setdefault("status", "suppressed")
             if ts:
-                normalized["dismiss_mode"] = "dismiss_until"
+                normalized["dismiss_mode"] = DismissMode.DISMISS_UNTIL.value
                 normalized["dismissed_until"] = ts
             else:
-                normalized.setdefault("dismiss_mode", "permanent")
+                normalized.setdefault("dismiss_mode", DismissMode.PERMANENT.value)
         else:
-            # Undismiss: clear dismiss state; revert status to provider value
-            # UNLESS the caller supplied an explicit status (matches the
-            # equivalent fix in api-gateway + workflows for change-status flows).
-            normalized.setdefault("status", None)
+            # Undismiss: clear the dismiss state. The status override is left
+            # alone — clearing the dismissal is what un-suppresses the alert.
             normalized["dismiss_mode"] = None
             normalized["dismissed_until"] = None
     elif "dismiss_until" in normalized:
         # dismiss_until without dismissed flag -> treat as dismiss_until mode
         ts = normalized.pop("dismiss_until")
         if ts:
-            normalized.setdefault("status", "suppressed")
-            normalized["dismiss_mode"] = "dismiss_until"
+            normalized["dismiss_mode"] = DismissMode.DISMISS_UNTIL.value
             normalized["dismissed_until"] = ts
-    elif "dismiss_mode" in normalized:
-        # Direct dismiss_mode write (new UI / non-legacy callers). Couple the
-        # status to the dismiss state so a dismiss suppresses the alert and an
-        # un-dismiss reverts it, matching the legacy `dismissed` translation
-        # above. An explicit caller-supplied status always wins (setdefault).
-        if normalized.get("dismiss_mode"):
-            normalized.setdefault("status", "suppressed")
-        else:
-            normalized.setdefault("status", None)
-            normalized.setdefault("dismissed_until", None)
+    elif "dismiss_mode" in normalized and not normalized.get("dismiss_mode"):
+        # Clearing dismiss_mode directly also clears the deadline, so a stale
+        # timestamp can't outlive the dismissal it belonged to.
+        normalized.setdefault("dismissed_until", None)
 
     unknown = set(normalized) - LASTALERT_ENRICHMENT_COLUMNS
     if unknown:
@@ -427,7 +430,6 @@ def last_alert_enrichments_dict(last_alert: "LastAlert") -> dict:
     """
     data: dict = {}
     for col_name in (
-        "status",
         "assignee",
         "note",
         "dismiss_mode",
@@ -438,6 +440,12 @@ def last_alert_enrichments_dict(last_alert: "LastAlert") -> dict:
         val = getattr(last_alert, col_name, None)
         if val is not None:
             data[col_name] = val
+    # Derived, not copied: a live dismissal reads as suppressed, and once it
+    # lapses the stored override (or the provider value, when there is none)
+    # takes over again.
+    effective_status = last_alert.get_effective_status()
+    if effective_status is not None:
+        data["status"] = effective_status
     if last_alert.dismissed_until is not None:
         ts = last_alert.dismissed_until
         if isinstance(ts, datetime):
@@ -2035,11 +2043,17 @@ def get_incident_for_grouping_rule(
 
         # if the last alert in the incident is older than the timeframe, create a new incident
         is_incident_expired = False
-        if incident and incident.status in [
-            IncidentStatus.RESOLVED.value,
-            IncidentStatus.MERGED.value,
-            IncidentStatus.DELETED.value,
-        ]:
+        # Derived from the enum rather than a hand-listed copy of it, which is how
+        # this drifted when `deleted` was removed as a status.
+        #
+        # Reads the stored `status`, deliberately not the effective one: a
+        # suppressed incident's stored status is still firing/acknowledged, so it
+        # stays eligible for grouping and new alerts correlate into it — and then
+        # inherit its dismissal. Treating it as expired would spawn a fresh
+        # incident for every alert arriving while the original was dismissed.
+        if incident and incident.status in IncidentStatus.get_closed(
+            return_values=True
+        ):
             is_incident_expired = True
         elif incident and incident.alerts_count > 0:
             enrich_incidents_with_alerts(tenant_id, [incident], session)
@@ -2053,6 +2067,116 @@ def get_incident_for_grouping_rule(
 
     return incident, is_incident_expired
 
+
+
+def inherit_incident_status(
+    tenant_id: str,
+    incident: Incident,
+    fingerprints,
+    session: Session,
+    actor: str = "keep",
+) -> List[str]:
+    """Apply a suppressed/acknowledged incident's state to alerts just linked to it.
+
+    Without this, dismissing an incident only quietens the alerts it held at that
+    moment — the next alert a correlation rule pulls in would light it up again,
+    defeating the point of dismissing it. A time-boxed dismissal is inherited
+    deadline and all, so the new alert comes back on the same clock as the
+    incident.
+
+    Only suppressed and acknowledged are inherited; a firing or resolved incident
+    has nothing to impose on an alert that just arrived. Resolved alerts are never
+    touched — an alert that has stopped firing has finished its own lifecycle, and
+    dragging it back out would misreport reality.
+
+    Suppression is written as dismiss state, NOT as status='suppressed': alerts
+    derive suppression from dismiss_mode/dismissed_until, so copying the
+    incident's deadline is what lets the alert expire with it. Writing a status
+    would strand it suppressed.
+
+    Synchronous on purpose. This sits under the rules engine, which is sync all
+    the way down, so it writes the typed columns directly instead of going
+    through the async enrichment BL. Mirrors
+    `IncidentBl.inherit_incident_status` in keep-api-gateway.
+    """
+    effective = incident.get_effective_status()
+    if effective not in (
+        IncidentStatus.SUPPRESSED.value,
+        IncidentStatus.ACKNOWLEDGED.value,
+    ):
+        return []
+
+    fingerprints = list(fingerprints)
+    if not fingerprints:
+        return []
+
+    if effective == IncidentStatus.SUPPRESSED.value:
+        enrichments = {
+            "dismiss_mode": incident.dismiss_mode,
+            "dismissed_until": incident.dismissed_until,
+        }
+        description = (
+            f"Alert suppressed by incident {incident.id}"
+            + (
+                f" until {incident.dismissed_until.isoformat()}"
+                if incident.dismissed_until is not None
+                else " permanently"
+            )
+        )
+    else:
+        # Acknowledged ends any dismissal the alert was under: it is visible
+        # again by definition.
+        enrichments = {
+            "status": IncidentStatus.ACKNOWLEDGED.value,
+            "dismiss_mode": None,
+            "dismissed_until": None,
+        }
+        description = f"Alert acknowledged by incident {incident.id}"
+        if incident.assignee:
+            enrichments["assignee"] = incident.assignee
+
+    rows = session.exec(
+        select(LastAlert, Alert.status)
+        .join(Alert, LastAlert.alert_id == Alert.id)
+        .where(
+            LastAlert.tenant_id == tenant_id,
+            col(LastAlert.fingerprint).in_(fingerprints),
+        )
+    ).all()
+
+    affected: List[str] = []
+    for last_alert, provider_status in rows:
+        # Effective status, not the raw column: a user-resolved alert and a
+        # provider-resolved one both have to be left alone.
+        if last_alert.get_effective_status(provider_status) == "resolved":
+            continue
+        _apply_enrichments_to_last_alert(last_alert, enrichments)
+        session.add(last_alert)
+        session.add(
+            AlertAudit(
+                tenant_id=tenant_id,
+                fingerprint=last_alert.fingerprint,
+                user_id=actor,
+                action=ActionType.MANUAL_STATUS_CHANGE.value,
+                description=description,
+            )
+        )
+        affected.append(last_alert.fingerprint)
+
+    if affected:
+        session.commit()
+        logger.info(
+            "Propagated incident status to newly linked alerts",
+            extra={
+                "tenant_id": tenant_id,
+                "incident_id": str(incident.id),
+                "incident_status": effective,
+                "alerts": len(affected),
+                "skipped_resolved": len(rows) - len(affected),
+            },
+        )
+
+    return affected
 
 
 @retry_on_db_error
@@ -2240,6 +2364,13 @@ def add_alerts_to_incident(
                         raise
             session.add(incident)
             session.refresh(incident)
+
+            # A suppressed/acknowledged incident imposes its state on alerts
+            # joining it — including the ones a correlation rule just pulled in,
+            # which is the only path that reaches them over here.
+            inherit_incident_status(
+                tenant_id, incident, new_fingerprints, session
+            )
 
             return incident
 

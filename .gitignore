@@ -73,3 +73,4 @@ counter_*.db
 gauge_*.db
 histogram_*.db
 summary_*.db
+run_consumer.sh
