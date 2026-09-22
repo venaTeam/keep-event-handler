@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from requests.exceptions import HTTPError
 from sqlalchemy.exc import OperationalError
 
+from src.bl.automations.errors import AutomationStampError
 from src.bl.automations.producer import MatchedPublishError
 from src.config.config import config
 from src.config.consts import (
@@ -720,8 +721,8 @@ class KafkaEventConsumer(EventConsumer):
                 resolved = self._process_with_retries(event_dto, budget, payload)
 
             if resolved is False:
-                # Only MatchedPublishError returns False, and publishing runs
-                # after processing commits -- so a replay can skip its side effects.
+                # Coverage/publish failures happen after event persistence.
+                # Replay skips those side effects but retries coverage and delivery.
                 self._publish_pending[key] = msg.offset()
                 self.logger.warning(
                     "Raw record left uncommitted after matched delivery failure "
@@ -780,9 +781,9 @@ class KafkaEventConsumer(EventConsumer):
             try:
                 process_event_sync(event_dto)
                 return True
-            except MatchedPublishError:
+            except (MatchedPublishError, AutomationStampError):
                 self.logger.error(
-                    "Matched delivery exhausted; leaving raw record unresolved"
+                    "Automation coverage or delivery failed; leaving raw record unresolved"
                 )
                 return False
             except Exception as e:

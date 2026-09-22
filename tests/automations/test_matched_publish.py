@@ -1,6 +1,6 @@
 import json
 import pytest
-from unittest.mock import Mock, call
+from unittest.mock import MagicMock, Mock, call
 
 from src.bl.automations import settings
 import src.bl.automations.producer as producer_module
@@ -19,6 +19,8 @@ from src.bl.automations.publish_matches import build_messages
 def enable_matched_publishing(monkeypatch):
     monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
     monkeypatch.setattr(producer_module, "MAX_PROCESSING_RETRIES", 1)
+    # These tests isolate Kafka; real database stamping is covered separately.
+    monkeypatch.setattr(matched_publish, "EnrichmentsBl", MagicMock())
 
 
 def test_disabled_publishing_has_no_kafka_lifecycle(monkeypatch):
@@ -35,16 +37,17 @@ def test_disabled_publishing_has_no_kafka_lifecycle(monkeypatch):
     factory.assert_not_called()
 
 
-def test_disabled_publishing_still_probes_without_building_messages(monkeypatch):
+def test_disabled_publishing_still_probes_and_stamps(monkeypatch):
     producer = Mock(enabled=False)
     matcher = Mock(return_value=(AutomationMatch("a", 300, None),))
     monkeypatch.setattr(matched_publish, "get_matched_producer", lambda: producer)
     monkeypatch.setattr(matched_publish, "match", matcher)
-    source_alert = object()
+    source_alert = alert()
 
     matched_publish.publish_matches("tenant", [source_alert])
 
     matcher.assert_called_once_with("tenant", source_alert)
+    matched_publish.EnrichmentsBl.return_value.__enter__.return_value.stamp_automation_match.assert_called_once_with("fp", 300)
     producer.publish.assert_not_called()
 
 

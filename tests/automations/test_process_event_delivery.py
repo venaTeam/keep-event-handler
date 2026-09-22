@@ -9,6 +9,7 @@ from arq import Retry
 import src.bl.automations.publish_matches as publishing
 import src.event_management.process_event_task as task
 from src.bl.automations.models import AutomationMatch
+from src.bl.automations.errors import AutomationStampError
 from src.bl.automations.producer import MatchedPublishError, MatchedLockTimeout
 from src.controllers.event_controller import process_event_sync
 from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
@@ -22,6 +23,7 @@ def delivery_flow(monkeypatch):
     enrichments = MagicMock()
     enrichments.run_extraction_rules.side_effect = lambda event, **kwargs: event
     monkeypatch.setattr(task, "EnrichmentsBl", lambda *args: enrichments)
+    monkeypatch.setattr(publishing, "EnrichmentsBl", MagicMock())
     monkeypatch.setattr(task, "KEEP_MAINTENANCE_WINDOWS_ENABLED", False)
     monkeypatch.setattr(task, "KEEP_ALERT_FIELDS_ENABLED", False)
     monkeypatch.setattr(task, "KEEP_CORRELATION_ENABLED", False)
@@ -79,6 +81,33 @@ def test_real_task_delivery_failure_prevents_raw_commit(delivery_flow, monkeypat
     consumer._process_batch([message], RetryBudget(300000, max_sleep_seconds=0))
     producer.publish.assert_called_once()
     save.assert_called_once()
+    kafka.commit.assert_not_called()
+    terminal.assert_not_called()
+    errors.assert_not_called()
+    counter.inc.assert_not_called()
+    session.close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("database unavailable"), LookupError("missing current row")])
+def test_real_stamp_failure_prevents_raw_commit(delivery_flow, monkeypatch, failure):
+    dto, session, save, errors, counter, producer = delivery_flow
+    stamp = publishing.EnrichmentsBl.return_value.__enter__.return_value.stamp_automation_match
+    stamp.side_effect = failure
+    kafka = MagicMock()
+    monkeypatch.setattr("src.core.kafka_consumer.Consumer", lambda *args: kafka)
+    consumer = KafkaEventConsumer()
+    consumer._consumer = kafka
+    terminal = MagicMock()
+    monkeypatch.setattr(consumer, "_record_terminal", terminal)
+    message = MagicMock()
+    message.value.return_value = json.dumps(dto.dict()).encode()
+    message.topic.return_value = "raw"
+    message.partition.return_value = 0
+    message.offset.return_value = 10
+    consumer._process_batch([message], RetryBudget(300000, max_sleep_seconds=0))
+    stamp.assert_called_once_with("fp", 300)
+    save.assert_called_once()
+    producer.publish.assert_not_called()
     kafka.commit.assert_not_called()
     terminal.assert_not_called()
     errors.assert_not_called()

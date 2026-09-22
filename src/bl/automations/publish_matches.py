@@ -5,9 +5,12 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from src.bl.automations.errors import AutomationStampError
+from src.bl.automations.grace import resolve_grace_seconds
 from src.bl.automations.models import AutomationMatch
 from src.bl.automations.producer import MatchedContractError, get_matched_producer
 from src.bl.automations.reloader import match
+from src.bl.enrichments_bl import EnrichmentsBl
 from src.core.metrics import (
     automation_alerts_matched_total,
     automation_alerts_probed_total,
@@ -86,19 +89,40 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
 
         if matches:
             automation_alerts_matched_total.inc()
+            try:
+                messages = build_messages(tenant_id, alert, matches)
+            except MatchedContractError as error:
+                _reject_alert(tenant_id, alert_index, alert, error)
+                continue
+
+            # Keep persistence errors outside malformed-message handling. Both
+            # the task and raw consumer retain this record for replay.
+            try:
+                with EnrichmentsBl(tenant_id) as enrichments:
+                    enrichments.stamp_automation_match(
+                        messages[0]["alert"]["fingerprint"],
+                        resolve_grace_seconds(matches),
+                    )
+            except Exception as error:
+                raise AutomationStampError("Automation coverage stamp failed") from error
+
             if producer.enabled:
                 try:
-                    producer.publish(build_messages(tenant_id, alert, matches))
+                    producer.publish(messages)
                 except MatchedContractError as error:
-                    automation_matched_alerts_rejected_total.inc()
-                    alert_id = (
-                        alert.get("id") if isinstance(alert, Mapping)
-                        else getattr(alert, "id", None)
-                    )
-                    # Do not stringify malformed objects or log arbitrary payloads.
-                    alert_id = alert_id[:200] if isinstance(alert_id, str) else None
-                    logger.warning(
-                        "Rejected malformed matched alert "
-                        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
-                        tenant_id, alert_index, alert_id, error,
-                    )
+                    _reject_alert(tenant_id, alert_index, alert, error)
+
+
+def _reject_alert(tenant_id, alert_index, alert, error):
+    automation_matched_alerts_rejected_total.inc()
+    alert_id = (
+        alert.get("id") if isinstance(alert, Mapping)
+        else getattr(alert, "id", None)
+    )
+    # Do not stringify malformed objects or log arbitrary payloads.
+    alert_id = alert_id[:200] if isinstance(alert_id, str) else None
+    logger.warning(
+        "Rejected malformed matched alert "
+        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
+        tenant_id, alert_index, alert_id, error,
+    )

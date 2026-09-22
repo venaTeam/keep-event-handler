@@ -162,6 +162,10 @@ def _last_alert_to_dto_payload(last_alert) -> dict:
     """Build the DTO payload contribution (user enrichment + relocated tracking
     fields) from a LastAlert row's typed columns."""
     payload: dict = {}
+    for field in ("automation_matched", "grace_seconds"):
+        value = getattr(last_alert, field, None)
+        if value is not None:
+            payload[field] = value
     # user enrichment state
     if last_alert.status is not None:
         payload["status"] = last_alert.status
