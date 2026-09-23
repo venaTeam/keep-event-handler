@@ -11,6 +11,114 @@ Two entrypoints:
 | `src/consumer_main.py` | the standalone Kafka consumer — this is what the container runs | `poetry run python -m src.consumer_main` |
 | `src/main.py` | a FastAPI app serving health + metrics only | runs under gunicorn |
 
+## Matched-topic publishing
+
+`AUTOMATION_MATCHING_ENABLED` defaults to `false`. Set it to `true`
+to load the automation index and publish matches to `MATCHED_ALERTS_TOPIC`
+(default: `matched-alerts`). Publishing begins once the index is hydrated.
+Restart the service after changing this flag.
+
+This replaces `AUTOMATION_INDEX_ENABLED` and `AUTOMATION_MATCHED_PUBLISH_ENABLED`;
+the old variables are no longer read. Update deployment configuration to use
+`AUTOMATION_MATCHING_ENABLED=true` when enabling the feature.
+
+Example configuration (replace the broker address with your deployment's address):
+
+```env
+AUTOMATION_MATCHING_ENABLED=true
+MATCHED_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+MATCHED_ALERTS_TOPIC=matched-alerts
+```
+
+The matched topic must already exist. Set `AUTOMATION_MATCHING_ENABLED=false`
+and restart to disable both matching and publishing.
+
+When publishing is disabled, the matched Kafka client is not created, producer
+startup and shutdown are skipped, and producer health does not gate `/readyz`.
+Index hydration and the reload subscriber are also disabled. When enabled,
+producer health gates readiness and every matched message must be acknowledged
+by the matched topic or matched DLQ before the raw offset can commit.
+The producer uses the dedicated `MATCHED_KAFKA_*` connection settings.
+
+Matched publishing runs after alert-field updates, Elasticsearch indexing,
+incident correlation, and notification scheduling. A matched-broker outage cannot
+skip those preceding steps. Disabling client notifications does not disable
+publishing. Notification scheduling errors are logged and publishing continues;
+background notification delivery is not awaited before the raw offset commits.
+
+Malformed matched alerts are logged and parked in the matched DLQ individually. Their complete
+fan-out is validated before any messages are sent, and valid alerts in the same
+raw record continue publishing. `keep_automation_matched_alerts_rejected_total`
+counts rejected alert occurrences. The raw offset may commit after every alert
+has been published or acknowledged by DLQ; rejected alerts intentionally do not reach the
+matched topic. If main delivery and required DLQ storage both fail, the offset stays uncommitted.
+
+Matched delivery retries reuse the serialized messages inside the producer;
+they do not rerun database processing or matching. Attempts use the existing
+`MAX_PROCESSING_RETRIES` cap and share one
+`AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS` deadline, with bounded exponential
+backoff based on `AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS`. Exhaustion falls back
+to the DLQ with another bounded publish budget; both budgets are capped by the
+remaining raw batch retry budget. Confirmed siblings are not resent within the call.
+A later Kafka redelivery can run processing again. Partial delivery can produce duplicates.
+
+An unresolved raw record rewinds its partition to the failed offset. The consumer
+retains that offset across batches and blocks commits past it until processing
+succeeds. Failed partitions pause for 1, 2, 4, 8, 16, then at most 30 seconds
+between replays. Kafka polling and processing of other partitions continue during
+the pause; successful resolution resets the delay. Failure to rewind, pause, or
+resume stops consumption. Partition
+revocation or loss clears the local tracking for those partitions without committing.
+
+Empty alert/preset notifications are skipped, including on full-duplicate replay;
+incident-change notifications still run when there are actual incidents.
+Replay can still repeat deduplication audit writes and LastAlert updates. These
+are retained because a full duplicate may be a legitimate new occurrence; the
+backoff reduces repeated work but is not durable side-effect deduplication.
+
+Producer lock acquisition uses the remaining publish or readiness-check deadline.
+Metadata checks receive only the time left after acquiring the lock, so contention
+does not add an unbounded wait before broker I/O.
+Local lock timeouts (including expiry immediately after acquisition) preserve
+the last known producer health and readiness gauge. They still fail publishing
+and attempt the independent DLQ producer. Actual broker failures mark it unhealthy.
+
+### Matched DLQ operations
+
+Provision `MATCHED_KAFKA_DLQ_TOPIC` (default `matched-alerts-dlq`) before enabling
+matching. `MATCHED_KAFKA_DLQ_BOOTSTRAP_SERVERS`, `SECURITY_PROTOCOL`,
+`SASL_MECHANISM`, `SASL_USERNAME`, `SASL_PASSWORD`, `SSL_CAFILE`, `SSL_CERTFILE`,
+and `SSL_KEYFILE` (all with the `MATCHED_KAFKA_DLQ_` prefix) inherit matched
+connection settings when omitted. Grant describe/write access and configure
+retention and size limits for the original payload plus headers. Sharing the
+main cluster does not protect against a cluster-wide outage.
+
+Delivery failures retain the original bytes/key with versioned diagnostic headers.
+Contract failures use a versioned, bounded `contract_rejection` envelope marked
+`replayable=false`; diagnostics may omit unsupported or oversized data. Repair
+these manually before publishing. No automatic redrive worker is included.
+Recovery publishes matched messages directly, not raw alerts, to avoid repeating
+DB, incident, and SSE processing; respect grace expiry and downstream idempotency.
+
+Readiness includes separate matched/DLQ status and sanitized errors. Metadata
+success cannot clear a delivery failure; an acknowledged delivery restores that
+component. DLQ success does not restore failed main-topic readiness. Consumers
+continue polling while NotReady. Repeated unchanged readiness warnings are limited
+to once per minute. Monitor `keep_automation_matched_dlq_total` and
+`keep_automation_matched_dlq_ready` alongside main delivery metrics.
+
+Known cross-service contract issue: the sibling automation consumer currently
+reads `alert.history_id`, whereas B5 emits `alert.id`. These are not safely
+interchangeable: alert `id` can be generated/provider-supplied and persistence
+sets `event_id`. This change preserves the existing wire format. Resolve the
+persisted identity contract across services before relying on downstream
+idempotency during production redrive. No database migration is part of this change.
+
+Kafka's `delivery.timeout.ms` is also set from the publish timeout (in milliseconds)
+to bound how long the client retains an individual queued message, including
+its internal retries. Producer `start()` returns `true` for a successful start
+or a disabled no-op, and `false` only for startup failure.
+
 ## Ports
 
 | Port | Server |
@@ -99,7 +207,7 @@ this service performs.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUTOMATION_INDEX_ENABLED` | `false` | **Deployment gate for this whole surface.** Off means no reload worker, no `reload` subscriber, no hydrate query, and `match()` returns nothing for every alert. The automations feature spans several stories and repos, so the code ships before it is ready to run. |
+| `AUTOMATION_MATCHING_ENABLED` | `false` | Single gate for index loading, matching, matched producer startup, publishing, and producer readiness checks. Off means no reload worker, subscriber, hydrate query, or matched Kafka client; `match()` returns no matches. Restart after changing. |
 | `REDIS_URL` | *(empty)* | The `reload` pub/sub channel. See the degradation note below. |
 | `AUTOMATION_RELOAD_CHANNEL` | `reload` | Channel name, pinned by `automation-contracts.md`. |
 | `AUTOMATION_INDEX_RELOAD_SECONDS` | `30` | Unconditional full reload interval. This is the staleness bound. |
@@ -129,7 +237,7 @@ have different runbooks:
 | `keep_automation_index_config_missing{setting="redis_url"} == 1` | The index is fine; only sub-second convergence is lost. Reloads still happen every `AUTOMATION_INDEX_RELOAD_SECONDS`. |
 
 An unset `REDIS_URL` is the third, not the second — the one setting that can be
-forgotten costs latency, not correctness. Only `AUTOMATION_INDEX_ENABLED`
+forgotten costs latency, not correctness. Only `AUTOMATION_MATCHING_ENABLED`
 switches the feature off.
 
 **Qualify every automations alert with `keep_automation_index_enabled == 1`.**

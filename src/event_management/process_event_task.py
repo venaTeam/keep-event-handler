@@ -19,6 +19,8 @@ from sqlmodel import Session, select
 
 # internals
 from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
+from src.bl.automations.publish_matches import publish_matches
+from src.bl.automations.producer import MatchedPublishError
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
@@ -1163,6 +1165,10 @@ def __handle_formatted_events(
                 event, deduplication_rules, last_alerts_fingerprint_to_hash
             )
 
+        # Persistence dedup may remove a raw redelivery. B5 must still see it,
+        # preserving the stable upstream alert id in the matched message.
+        automation_events = list(formatted_events)
+
         # filter out the deduplicated events
         deduplicated_events = list(
             filter(lambda event: event.is_full_duplicate, formatted_events)
@@ -1307,39 +1313,50 @@ def __handle_formatted_events(
     if MAINTENANCE_WINDOW_ALERT_STRATEGY == "recover_previous_status":
         enriched_formatted_events.extend(ignored_events)
 
-    with tracer.start_as_current_span("process_event_notify_client"):
-        if not notify_client:
-            return
-        # Get the notification cache
-        notification_cache = get_notification_cache()
+    if notify_client and (enriched_formatted_events or incidents):
+        try:
+            with tracer.start_as_current_span("process_event_notify_client"):
+                # Get the notification cache
+                notification_cache = get_notification_cache()
 
-        # Tell the client to poll alerts via API (since event handler runs in a separate process)
+                # Tell the client to poll alerts via API (since event handler runs in a separate process)
+                # We don't use throttling here to ensure real-time updates (client will append instead of full refresh)
+                api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
+                logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
 
-        # Tell the client to poll alerts via API (since event handler runs in a separate process)
-        # We don't use throttling here to ensure real-time updates (client will append instead of full refresh)
-        api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
-        logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
+                # Take an immutable snapshot (plain dicts) of the alerts on the consumer
+                # thread, then hand it to the background pool. The pool owns the rest of
+                # the notify work (delivery + the per-preset CEL filtering loop) so none
+                # of it runs on the consumer hot path, and the workers never touch live
+                # AlertDto / preset objects shared with the consumer.
+                alerts_payload = [alert.dict() for alert in enriched_formatted_events]
 
-        # Take an immutable snapshot (plain dicts) of the alerts on the consumer
-        # thread, then hand it to the background pool. The pool owns the rest of
-        # the notify work (delivery + the per-preset CEL filtering loop) so none
-        # of it runs on the consumer hot path, and the workers never touch live
-        # AlertDto / preset objects shared with the consumer.
-        alerts_payload = [alert.dict() for alert in enriched_formatted_events]
+                if alerts_payload:
+                    _submit_notify(
+                        api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload}
+                    )
 
-        _submit_notify(
-            api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload}
-        )
+                if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
+                    incident_ids = [str(inc.id) for inc in incidents]
+                    _submit_notify(
+                        api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
+                    )
 
-        if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
-            incident_ids = [str(inc.id) for inc in incidents]
-            _submit_notify(
-                api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
+                # Offload the preset CEL filtering loop + poll-presets notify onto the
+                # pool, passing the immutable alerts snapshot.
+                if alerts_payload:
+                    _submit_preset_notify(api_url, tenant_id, alerts_payload)
+        except Exception as error:
+            logger.warning(
+                "Failed to schedule alert notifications; continuing matched publishing "
+                "(tenant_id=%s, error_type=%s)",
+                tenant_id, type(error).__name__,
             )
 
-        # Offload the preset CEL filtering loop + poll-presets notify onto the
-        # pool, passing the immutable alerts snapshot.
-        _submit_preset_notify(api_url, tenant_id, alerts_payload)
+    # Finish indexing, correlation, and notification scheduling before waiting
+    # on matched Kafka. Include persistence duplicates for raw redelivery.
+    # Delivery failures still propagate to the raw-offset gate.
+    publish_matches(tenant_id, automation_events)
     return enriched_formatted_events
 
 
@@ -1773,6 +1790,11 @@ def process_event(
             )
             return []
     except Exception as e:
+        # Standalone Kafka uses an empty context. Delivery failure must reach
+        # its offset gate, without becoming a terminal error alert. ARQ keeps
+        # the existing error recording and Retry behavior below.
+        if isinstance(e, MatchedPublishError) and not ctx:
+            raise
         error_type = type(e).__name__
         error_message = str(e)
         stacktrace = traceback.format_exc()
