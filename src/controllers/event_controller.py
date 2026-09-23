@@ -170,7 +170,6 @@ def _process_alert_event(event_dto: EventDTO):
         notify_client=event_dto.notify_client,
         timestamp_forced=event_dto.timestamp_forced,
         provider_name=event_dto.provider_name,
-        is_replay=event_dto.is_replay,
     )
 
     logger.info(

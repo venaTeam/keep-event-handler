@@ -237,3 +237,16 @@ automation_matched_producer_ready = Gauge(
     f"{AUTOMATION_METRIC_PREFIX}matched_producer_ready",
     "1 when matched publishing is enabled and the producer is healthy",
 )
+
+automation_matched_dlq_total = Counter(
+    f"{AUTOMATION_METRIC_PREFIX}matched_dlq_total",
+    "Matched DLQ records by acknowledgement result and record kind",
+    labelnames=["result", "kind"],
+)
+automation_matched_dlq_ready = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}matched_dlq_ready", "Last observed matched DLQ health",
+)
+automation_unresolved_partitions = Gauge(
+    f"{AUTOMATION_METRIC_PREFIX}unresolved_partitions",
+    "Raw partitions blocked by unresolved matched delivery",
+)

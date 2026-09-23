@@ -139,8 +139,11 @@ def test_unhealthy_matched_producer_gates_readyz(
     status, body = get(probe_server, "/readyz")
 
     assert status == 503
-    assert body["reason"] == "producer unavailable"
-    assert "Readiness failed: matched producer is unhealthy" in caplog.text
+    assert 'producer unavailable' in body['reason']
+    assert 'consumer:' in body['reason']
+    assert 'Readiness state: ready=False' in caplog.text
+    get(probe_server, '/readyz')
+    assert caplog.text.count('Readiness state: ready=False') == 1
 
 
 def test_disabled_matched_producer_does_not_gate_readyz(probe_server, monkeypatch):

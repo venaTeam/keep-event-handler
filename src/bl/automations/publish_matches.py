@@ -102,3 +102,4 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
                         "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
                         tenant_id, alert_index, alert_id, error,
                     )
+                    producer.reject(tenant_id, alert, matches, error)

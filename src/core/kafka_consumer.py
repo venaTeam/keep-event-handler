@@ -31,6 +31,7 @@ from src.core.metrics import (
     events_error_counter,
     processing_time_summary,
     consume_batch_size,
+    automation_unresolved_partitions,
 )
 from src.controllers.event_controller import process_event_sync
 from src.event_management.process_event_task import record_terminal_error
@@ -171,11 +172,9 @@ class KafkaEventConsumer(EventConsumer):
         self._running = False
         self._consumer: Optional[Consumer] = None
         self._unresolved_offsets: dict[tuple[str, int], int] = {}
+        automation_unresolved_partitions.set(0)
         self._replay_failures: dict[tuple[str, int], int] = {}
         self._replay_due: dict[tuple[str, int], float] = {}
-        # Offset per partition whose processing committed but whose matched
-        # publish failed. Only that exact offset is redelivered as a replay.
-        self._publish_pending: dict[tuple[str, int], int] = {}
         # The entrypoint hands over its startup event, so a SIGTERM that landed
         # between the end of init_services() and this consumer installing its
         # own signal handlers is not lost. Without it that pod runs until the
@@ -404,9 +403,9 @@ class KafkaEventConsumer(EventConsumer):
         for partition in partitions:
             key = (partition.topic, partition.partition)
             self._unresolved_offsets.pop(key, None)
+            automation_unresolved_partitions.set(len(self._unresolved_offsets))
             self._replay_failures.pop(key, None)
             self._replay_due.pop(key, None)
-            self._publish_pending.pop(key, None)
         if self._is_cooperative:
             try:
                 consumer.incremental_unassign(partitions)
@@ -429,9 +428,9 @@ class KafkaEventConsumer(EventConsumer):
         for partition in partitions:
             key = (partition.topic, partition.partition)
             self._unresolved_offsets.pop(key, None)
+            automation_unresolved_partitions.set(len(self._unresolved_offsets))
             self._replay_failures.pop(key, None)
             self._replay_due.pop(key, None)
-            self._publish_pending.pop(key, None)
         self.logger.warning(
             f"Partitions LOST: {[p.partition for p in partitions]} — "
             "not committing; they may already be owned by another member"
@@ -522,6 +521,7 @@ class KafkaEventConsumer(EventConsumer):
 
     def _rewind_unresolved(self, key: tuple[str, int], offset: int) -> None:
         self._unresolved_offsets[key] = offset
+        automation_unresolved_partitions.set(len(self._unresolved_offsets))
         try:
             self._consumer.seek(TopicPartition(key[0], key[1], offset))
         except Exception:
@@ -630,9 +630,8 @@ class KafkaEventConsumer(EventConsumer):
                     commit_boundary = msg
                     if msg.offset() == blocked_offset:
                         self._unresolved_offsets.pop(key, None)
+                        automation_unresolved_partitions.set(len(self._unresolved_offsets))
                         self._replay_failures.pop(key, None)
-                    if self._publish_pending.get(key) == msg.offset():
-                        self._publish_pending.pop(key)
                 else:
                     # First unresolved record breaks contiguity for this
                     # partition; stop and commit up to the boundary.
@@ -654,6 +653,8 @@ class KafkaEventConsumer(EventConsumer):
                 # The `message=` form commits that offset directly and never
                 # touches the offset store (see enable.auto.offset.store).
                 self._consumer.commit(commit_boundary, asynchronous=False)
+                self.logger.debug('Raw Kafka offset committed: topic=%s partition=%s next_offset=%s',
+                                  key[0], key[1], commit_boundary.offset() + 1)
 
             if shutting_down:
                 # Every remaining partition's records are simply not committed,
@@ -688,7 +689,6 @@ class KafkaEventConsumer(EventConsumer):
             return True  # commit past the malformed message
 
         trace_id = payload.get("trace_id", "unknown")
-        key = (msg.topic(), msg.partition())
         self.logger.debug(f"Processing message: {trace_id}")
 
         try:
@@ -705,7 +705,6 @@ class KafkaEventConsumer(EventConsumer):
                     api_key_name=payload.get("api_key_name"),
                     provider_name=payload.get("provider_name"),
                     event_type=payload.get("event_type"),
-                    is_replay=self._publish_pending.get(key) == msg.offset(),
                 )
             except ValidationError as e:
                 self.logger.error(
@@ -717,12 +716,16 @@ class KafkaEventConsumer(EventConsumer):
 
             # Process with bounded, batch-wide retries and timing.
             with processing_time_summary.time():
-                resolved = self._process_with_retries(event_dto, budget, payload)
+                from src.bl.automations.producer import delivery_context
+                token = delivery_context.set({'source_topic': msg.topic(),
+                    'source_partition': msg.partition(), 'source_offset': msg.offset(),
+                    'trace_id': trace_id})
+                try:
+                    resolved = self._process_with_retries(event_dto, budget, payload)
+                finally:
+                    delivery_context.reset(token)
 
             if resolved is False:
-                # Only MatchedPublishError returns False, and publishing runs
-                # after processing commits -- so a replay can skip its side effects.
-                self._publish_pending[key] = msg.offset()
                 self.logger.warning(
                     "Raw record left uncommitted after matched delivery failure "
                     "(topic=%s, partition=%s, offset=%s, trace_id=%s)",
@@ -778,7 +781,12 @@ class KafkaEventConsumer(EventConsumer):
         """
         for attempt in range(MAX_PROCESSING_RETRIES):
             try:
-                process_event_sync(event_dto)
+                from src.bl.automations.producer import delivery_budget
+                token = delivery_budget.set(budget)
+                try:
+                    process_event_sync(event_dto)
+                finally:
+                    delivery_budget.reset(token)
                 return True
             except MatchedPublishError:
                 self.logger.error(

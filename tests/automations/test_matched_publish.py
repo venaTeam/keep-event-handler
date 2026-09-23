@@ -19,6 +19,8 @@ from src.bl.automations.publish_matches import build_messages
 def enable_matched_publishing(monkeypatch):
     monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
     monkeypatch.setattr(producer_module, "MAX_PROCESSING_RETRIES", 1)
+    # Existing failure tests exercise the unresolved path: both destinations down.
+    monkeypatch.setattr(producer_module, 'Producer', lambda *_: RaisingProducer())
 
 
 def test_disabled_publishing_has_no_kafka_lifecycle(monkeypatch):
@@ -53,7 +55,7 @@ class FakeProducer:
         self.queued = []
         self.errors = list(errors or [])
 
-    def produce(self, topic, key, value, on_delivery):
+    def produce(self, topic, key, value, on_delivery, headers=None):
         self.queued.append((topic, key, value, on_delivery))
 
     def poll(self, timeout):
@@ -69,7 +71,7 @@ class FakeProducer:
 
 
 class RaisingProducer(FakeProducer):
-    def produce(self, topic, key, value, on_delivery):
+    def produce(self, topic, key, value, on_delivery, headers=None):
         raise RuntimeError("local producer failure")
 
 
@@ -199,7 +201,7 @@ def test_fanout_is_enqueued_then_acknowledged():
     producer.publish(messages)
 
     assert fake.queued == []
-    assert producer.health()[0] is True
+    assert producer.healthy is True
 
 
 def test_partial_delivery_raises_and_marks_unhealthy(caplog):
@@ -279,7 +281,7 @@ def test_bad_alert_is_counted_and_valid_siblings_publish(monkeypatch, caplog):
         original_produce(topic, key, value, on_delivery)
 
     fake.produce = capture
-    producer = MatchedProducer(client=fake)
+    producer = MatchedProducer(client=fake, dlq_client=FakeProducer())
     monkeypatch.setattr(matched_publish, "get_matched_producer", lambda: producer)
     monkeypatch.setattr(matched_publish, "match", lambda *_: (AutomationMatch("a", 300, None),))
     metric = matched_publish.automation_matched_alerts_rejected_total
@@ -451,7 +453,7 @@ def test_contended_lock_uses_operation_deadline(monkeypatch, operation, healthy)
     started = time.monotonic()
     try:
         if operation == "publish":
-            with pytest.raises(producer_module.MatchedLockTimeout, match="lock deadline"):
+            with pytest.raises(producer_module.MatchedPublishError, match="lock deadline"):
                 producer.publish([{"automation_id": "a"}])
         else:
             assert producer.start() is False
@@ -482,7 +484,7 @@ def test_deadline_expired_on_acquire_preserves_health(monkeypatch, operation, he
     lock.acquire.side_effect = acquire
     producer._lock = lock
     if operation == "publish":
-        with pytest.raises(producer_module.MatchedLockTimeout):
+        with pytest.raises(producer_module.MatchedPublishError):
             producer.publish([{"automation_id": "a"}])
     else:
         assert producer.start() is False
