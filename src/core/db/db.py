@@ -46,7 +46,6 @@ from sqlmodel import Session, col, or_, select, text
 from enum import Enum
 from src.core.db.helpers import NULL_FOR_DELETED_AT
 from src.core.db.db_utils import get_json_extract_field
-from src.models.db.preset import PresetDto, StaticPresetsId, Preset
 from src.models.db.alert import LastAlertToIncident, AlertDeduplicationEvent, LastAlert, Alert, AlertDeduplicationRule, IncidentEnrichment, AlertAudit, AlertField, CommentMention
 from src.models.db.provider import Provider, ProviderExecutionLog
 from src.models.db.rule import Rule
@@ -68,25 +67,6 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.sql.functions import count
 
 
-STATIC_PRESETS = {
-    "feed": PresetDto(
-        id=StaticPresetsId.FEED_PRESET_ID.value,
-        name="feed",
-        options=[
-            {"label": "CEL", "value": ""},
-            {
-                "label": "SQL",
-                "value": {"sql": "", "params": {}},
-            },
-        ],
-        created_by=None,
-        is_private=False,
-        is_noisy=False,
-        should_do_noise_now=False,
-        static=True,
-        tags=[],
-    )
-}
 from src.core.db.db_utils import (
     create_db_engine,
     get_json_extract_field,
@@ -796,22 +776,6 @@ def get_alerts_by_fingerprint(
         alerts = session.exec(query).all()
 
         return alerts
-
-def get_db_presets(tenant_id: str) -> List[Preset]:
-    with Session(engine) as session:
-        presets = (
-            session.exec(select(Preset).where(Preset.tenant_id == tenant_id))
-            .unique()
-            .all()
-        )
-    return presets
-
-
-def get_all_presets_dtos(tenant_id: str) -> List[PresetDto]:
-    presets = get_db_presets(tenant_id)
-    static_presets_dtos = list(STATIC_PRESETS.values())
-    return [PresetDto(**preset.to_dict()) for preset in presets] + static_presets_dtos
-
 
 def enrich_alerts_with_incidents(
     tenant_id: str, alerts: List[Alert], session: Optional[Session] = None
