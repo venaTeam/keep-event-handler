@@ -2,6 +2,8 @@
 import json
 import math
 
+from src.bl.automations.enums import DlqRecordType
+
 
 def rejection_payload(tenant_id, alert, matches, error):
     remaining = [1000]
@@ -29,7 +31,7 @@ def rejection_payload(tenant_id, alert, matches, error):
         return '<unsupported>'
     # Pydantic's raw field dictionary avoids recursive .dict() on malformed data.
     snapshot = alert if type(alert) is dict else getattr(alert, '__dict__', None)
-    envelope = {'version': 1, 'kind': 'contract_rejection', 'replayable': False,
+    envelope = {'version': 1, 'kind': DlqRecordType.CONTRACT_REJECTION.value, 'replayable': False,
                 'tenant_id': tenant_id, 'reason': str(error)[:256],
                 'automation_ids': [safe(m.automation_id) for m in matches],
                 'diagnostic_snapshot': safe(snapshot)}

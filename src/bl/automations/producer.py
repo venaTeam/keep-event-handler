@@ -12,6 +12,13 @@ from typing import Any, Protocol
 from confluent_kafka import Producer, KafkaError, KafkaException
 
 from src.bl.automations import settings
+from src.bl.automations.enums import (
+    DEFAULT_DLQ_TOPIC,
+    DeliveryResult,
+    DlqHeader,
+    DlqRecordType,
+    PublishOutcome,
+)
 from src.config.config import config
 from src.config.consts import MATCHED_ALERTS_TOPIC, MAX_PROCESSING_RETRIES
 from src.core.metrics import (
@@ -105,7 +112,7 @@ class MatchedProducer:
         self._dlq_delivery_failed = False
         self._last_result = None
         self._last_failure_at = None
-        self._dlq_topic = config('MATCHED_KAFKA_DLQ_TOPIC', default='matched-alerts-dlq')
+        self._dlq_topic = config("MATCHED_KAFKA_DLQ_TOPIC", default=DEFAULT_DLQ_TOPIC)
         logger.info(
             "Matched publishing configuration "
             "(enabled=%s, topic=%s, publish_timeout_seconds=%s, max_attempts=%s)",
@@ -255,8 +262,8 @@ class MatchedProducer:
             for attempt in range(attempts):
                 try:
                     self._publish_encoded(encoded, deadline)
-                    self._last_result = 'matched'
-                    return 'matched'
+                    self._last_result = PublishOutcome.MATCHED
+                    return PublishOutcome.MATCHED
                 except MatchedPublishError as error:
                     if error.unresolved is not None:
                         encoded = error.unresolved
@@ -346,12 +353,12 @@ class MatchedProducer:
 
         acknowledged = len(encoded) - len(pending) - len(failures)
         if failures or pending or polling_error is not None:
-            automation_matched_publish_total.labels(result="failed").inc(
+            automation_matched_publish_total.labels(result=DeliveryResult.FAILED.value).inc(
                 len(failures) + len(pending)
             )
             if acknowledged:
                 automation_matched_publish_total.labels(
-                    result="acknowledged"
+                    result=DeliveryResult.ACKNOWLEDGED.value
                 ).inc(acknowledged)
             self._healthy = False
             self._delivery_failed = True
@@ -376,7 +383,7 @@ class MatchedProducer:
             error.unresolved = [record for i, record in enumerate(encoded) if i not in acknowledged_indices]
             error.permanent = any(permanent_error(failure) for failure in failures)
             raise error from polling_error
-        automation_matched_publish_total.labels(result="acknowledged").inc(
+        automation_matched_publish_total.labels(result=DeliveryResult.ACKNOWLEDGED.value).inc(
             len(encoded)
         )
         self._mark_ready()
@@ -424,7 +431,12 @@ class MatchedProducer:
             automation_matched_dlq_ready.set(int(self._dlq_healthy))
             self._dlq_lock.release()
 
-    def _send_dlq(self, encoded, cause, record_type='delivery'):
+    def _send_dlq(
+        self,
+        encoded,
+        cause,
+        record_type: DlqRecordType = DlqRecordType.DELIVERY,
+    ):
         deadline = bounded_deadline(self._clock)
         if not self._dlq_lock.acquire(timeout=max(0, deadline - self._clock())):
             raise MatchedPublishError('matched DLQ lock timeout; raw offset unresolved') from cause
@@ -438,10 +450,13 @@ class MatchedProducer:
                     if error is not None:
                         failed[index] = error_detail(error)
                 return delivered
-            headers = [('matched-dlq-version', b'1'), ('record-type', record_type.encode()),
-                       ('original-topic', MATCHED_ALERTS_TOPIC.encode()),
-                       ('error-class', type(cause).__name__.encode()),
-                       ('error-detail', json.dumps(self._last_error).encode())]
+            headers = [
+                (DlqHeader.VERSION.value, b"1"),
+                (DlqHeader.RECORD_TYPE.value, record_type.value.encode()),
+                (DlqHeader.ORIGINAL_TOPIC.value, MATCHED_ALERTS_TOPIC.encode()),
+                (DlqHeader.ERROR_CLASS.value, type(cause).__name__.encode()),
+                (DlqHeader.ERROR_DETAIL.value, json.dumps(self._last_error).encode()),
+            ]
             headers.extend((name, str(value)[:256].encode())
                            for name, value in delivery_context.get().items())
             for i, (key, value) in enumerate(encoded):
@@ -463,19 +478,25 @@ class MatchedProducer:
             self._dlq_healthy = True
             self._dlq_delivery_failed = False
             self._dlq_error = None
-            self._last_result = 'dlq'
-            automation_matched_dlq_total.labels(result='acknowledged', kind=record_type).inc(len(encoded))
+            self._last_result = PublishOutcome.DLQ
+            automation_matched_dlq_total.labels(
+                result=DeliveryResult.ACKNOWLEDGED.value,
+                kind=record_type.value,
+            ).inc(len(encoded))
             logger.warning('Matched messages parked in DLQ: topic=%s records=%s kind=%s; '
                            'this fan-out resolved, automation execution pending recovery',
-                           self._dlq_topic, len(encoded), record_type,
+                           self._dlq_topic, len(encoded), record_type.value,
                            extra=delivery_context.get())
-            return 'dlq'
+            return PublishOutcome.DLQ
         except Exception as error:
             self._dlq_healthy = False
             self._dlq_delivery_failed = True
             self._dlq_error = getattr(error, 'detail', error_detail(error))
-            self._last_result = 'unresolved'
-            automation_matched_dlq_total.labels(result='failed', kind=record_type).inc(len(encoded))
+            self._last_result = PublishOutcome.UNRESOLVED
+            automation_matched_dlq_total.labels(
+                result=DeliveryResult.FAILED.value,
+                kind=record_type.value,
+            ).inc(len(encoded))
             logger.error('Matched DLQ failed: topic=%s error=%s; raw offset unresolved',
                          self._dlq_topic, type(error).__name__, extra=delivery_context.get())
             raise MatchedPublishError(str(cause) + '; DLQ delivery failed; raw offset unresolved') from error
@@ -491,7 +512,9 @@ class MatchedProducer:
                 raise ValueError('rejection identity exceeds diagnostic limit')
         except Exception as encoding_error:
             raise MatchedPublishError('Cannot encode contract rejection; raw offset unresolved') from encoding_error
-        return self._send_dlq([(tenant_id.encode(), value)], error, 'contract_rejection')
+        return self._send_dlq(
+            [(tenant_id.encode(), value)], error, DlqRecordType.CONTRACT_REJECTION
+        )
 
 
 _producer = MatchedProducer()
