@@ -26,9 +26,10 @@ class PresetTagLink(SQLModel, table=True):
 
 
 class Tag(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("tenant_id", "name"),)
     id: str = Field(default_factory=generate_uuid, primary_key=True)
     tenant_id: str = Field(foreign_key="tenant.id")
-    name: str = Field(unique=True, nullable=False)
+    name: str = Field(nullable=False)
     presets: List["Preset"] = Relationship(
         back_populates="tags", link_model=PresetTagLink
     )
@@ -47,7 +48,7 @@ class Preset(SQLModel, table=True):
     is_private: Optional[bool] = Field(default=False)
     is_noisy: Optional[bool] = Field(default=False)
     counter_shows_firing_only: Optional[bool] = Field(default=False)
-    name: str = Field(unique=True)
+    name: str
     options: list = Field(sa_column=Column(JSON))  # [{"label": "", "value": ""}]
     tags: List[Tag] = Relationship(
         back_populates="presets",
