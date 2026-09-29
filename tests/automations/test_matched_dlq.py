@@ -60,6 +60,17 @@ def test_both_fail_leave_unresolved():
     assert producer.health_details()['last_result'] == 'unresolved'
 
 
+def test_transient_dlq_failure_retries_before_leaving_offset_unresolved(monkeypatch):
+    monkeypatch.setattr(module, "MAX_PROCESSING_RETRIES", 2)
+    main = Client([RuntimeError(), RuntimeError()])
+    dlq = Client([RuntimeError(), None])
+    producer = MatchedProducer(client=main, dlq_client=dlq)
+
+    assert producer.publish([{'automation_id': 'a'}]) == 'dlq'
+    assert len(dlq.sent) == 2
+    assert producer.health_details()['last_result'] == 'dlq'
+
+
 def test_main_lock_contention_can_fall_back(monkeypatch):
     monkeypatch.setattr(settings, 'AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS', 0.1)
     main, dlq = Client(), Client()

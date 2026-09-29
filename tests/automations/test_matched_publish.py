@@ -403,8 +403,10 @@ def test_delivery_retry_deadline_is_shared_and_backoff_is_bounded(monkeypatch):
         producer.publish([{"automation_id": "a"}])
 
     assert client.produce.call_count == 2
-    assert waits == pytest.approx([0.06, 0.04])
-    assert clock[0] == pytest.approx(0.1)
+    # The matched and DLQ destinations each receive the bounded producer
+    # budget; the raw consumer's RetryBudget still caps the combined path.
+    assert waits == pytest.approx([0.06, 0.04, 0.06, 0.04])
+    assert clock[0] == pytest.approx(0.2)
 
 
 @pytest.mark.parametrize("seconds,expected", [(5, 5000), (0, 100), (-1, 100)])

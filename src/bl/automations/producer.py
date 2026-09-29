@@ -438,18 +438,67 @@ class MatchedProducer:
         record_type: DlqRecordType = DlqRecordType.DELIVERY,
     ):
         deadline = bounded_deadline(self._clock)
+        attempts = max(1, MAX_PROCESSING_RETRIES)
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return self._send_dlq_once(encoded, cause, record_type, deadline)
+            except MatchedPublishError as error:
+                last_error = error
+                remaining = deadline - self._clock()
+                if attempt == attempts - 1 or remaining <= 0:
+                    break
+                self._wait(min(
+                    settings.read_matched_queue_retry_seconds() * (2 ** attempt),
+                    remaining,
+                ))
+            except Exception as error:
+                last_error = MatchedPublishError("matched DLQ attempt failed")
+                last_error.detail = error_detail(error)
+                remaining = deadline - self._clock()
+                if attempt == attempts - 1 or remaining <= 0:
+                    break
+                self._wait(min(
+                    settings.read_matched_queue_retry_seconds() * (2 ** attempt),
+                    remaining,
+                ))
+
+        self._dlq_healthy = False
+        self._dlq_delivery_failed = True
+        self._dlq_error = getattr(last_error, "detail", error_detail(last_error))
+        self._last_result = PublishOutcome.UNRESOLVED
+        automation_matched_dlq_total.labels(
+            result=DeliveryResult.FAILED.value,
+            kind=record_type.value,
+        ).inc(len(encoded))
+        automation_matched_dlq_ready.set(0)
+        logger.error(
+            "Matched DLQ failed after bounded retries: topic=%s error=%s; raw offset unresolved",
+            self._dlq_topic,
+            type(last_error).__name__ if last_error else "unknown",
+            extra=delivery_context.get(),
+        )
+        raise MatchedPublishError(
+            f"{str(cause)[:256]}; DLQ delivery failed; raw offset unresolved"
+        ) from last_error
+
+    def _send_dlq_once(self, encoded, cause, record_type, deadline):
         if not self._dlq_lock.acquire(timeout=max(0, deadline - self._clock())):
-            raise MatchedPublishError('matched DLQ lock timeout; raw offset unresolved') from cause
+            raise MatchedPublishError(
+                "matched DLQ lock timeout; raw offset unresolved"
+            ) from cause
         try:
             client = self._get_dlq()
             pending = set(range(len(encoded)))
             failed = {}
+
             def callback(index):
-                def delivered(error, message):
+                def delivered(error, _message):
                     pending.discard(index)
                     if error is not None:
                         failed[index] = error_detail(error)
                 return delivered
+
             headers = [
                 (DlqHeader.VERSION.value, b"1"),
                 (DlqHeader.RECORD_TYPE.value, record_type.value.encode()),
@@ -457,51 +506,55 @@ class MatchedProducer:
                 (DlqHeader.ERROR_CLASS.value, type(cause).__name__.encode()),
                 (DlqHeader.ERROR_DETAIL.value, json.dumps(self._last_error).encode()),
             ]
-            headers.extend((name, str(value)[:256].encode())
-                           for name, value in delivery_context.get().items())
+            headers.extend(
+                (name, str(value)[:256].encode())
+                for name, value in delivery_context.get().items()
+            )
             for i, (key, value) in enumerate(encoded):
                 while self._clock() < deadline:
                     try:
-                        client.produce(self._dlq_topic, key=key, value=value,
-                                       headers=headers, on_delivery=callback(i))
+                        client.produce(
+                            self._dlq_topic,
+                            key=key,
+                            value=value,
+                            headers=headers,
+                            on_delivery=callback(i),
+                        )
                         break
                     except BufferError:
                         client.poll(0)
-                        self._wait(min(settings.read_matched_queue_retry_seconds(),
-                                       max(0, deadline - self._clock())))
+                        self._wait(min(
+                            settings.read_matched_queue_retry_seconds(),
+                            max(0, deadline - self._clock()),
+                        ))
             while pending and self._clock() < deadline:
                 client.poll(min(0.05, max(0, deadline - self._clock())))
             if pending or failed:
-                error = MatchedPublishError('DLQ acknowledgement missing')
-                error.detail = next(iter(failed.values()), {'reason': 'acknowledgement_timeout'})
+                error = MatchedPublishError("DLQ acknowledgement missing")
+                error.detail = next(
+                    iter(failed.values()), {"reason": "acknowledgement_timeout"}
+                )
                 raise error
+
             self._dlq_healthy = True
             self._dlq_delivery_failed = False
             self._dlq_error = None
             self._last_result = PublishOutcome.DLQ
+            automation_matched_dlq_ready.set(1)
             automation_matched_dlq_total.labels(
                 result=DeliveryResult.ACKNOWLEDGED.value,
                 kind=record_type.value,
             ).inc(len(encoded))
-            logger.warning('Matched messages parked in DLQ: topic=%s records=%s kind=%s; '
-                           'this fan-out resolved, automation execution pending recovery',
-                           self._dlq_topic, len(encoded), record_type.value,
-                           extra=delivery_context.get())
+            logger.warning(
+                "Matched messages parked in DLQ: topic=%s records=%s kind=%s; "
+                "this fan-out resolved, automation execution pending recovery",
+                self._dlq_topic,
+                len(encoded),
+                record_type.value,
+                extra=delivery_context.get(),
+            )
             return PublishOutcome.DLQ
-        except Exception as error:
-            self._dlq_healthy = False
-            self._dlq_delivery_failed = True
-            self._dlq_error = getattr(error, 'detail', error_detail(error))
-            self._last_result = PublishOutcome.UNRESOLVED
-            automation_matched_dlq_total.labels(
-                result=DeliveryResult.FAILED.value,
-                kind=record_type.value,
-            ).inc(len(encoded))
-            logger.error('Matched DLQ failed: topic=%s error=%s; raw offset unresolved',
-                         self._dlq_topic, type(error).__name__, extra=delivery_context.get())
-            raise MatchedPublishError(str(cause) + '; DLQ delivery failed; raw offset unresolved') from error
         finally:
-            automation_matched_dlq_ready.set(int(self._dlq_healthy))
             self._dlq_lock.release()
 
     def reject(self, tenant_id, alert, matches, error):
