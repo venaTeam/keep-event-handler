@@ -3,6 +3,7 @@ Kafka consumer for the event handler service using confluent-kafka.
 Runs a synchronous consumer loop - designed to run standalone without gunicorn.
 """
 import abc
+from datetime import datetime, timezone
 import json
 import logging
 import signal
@@ -39,6 +40,18 @@ from src.models.event_dto import EventDTO
 
 
 logger = logging.getLogger(__name__)
+
+
+def _received_at(payload: dict, message) -> str | None:
+    """Prefer gateway receipt time; old records can use their stable Kafka time."""
+    if payload.get("received_at") is not None:
+        return payload["received_at"]
+    timestamp = message.timestamp() if hasattr(message, "timestamp") else None
+    if isinstance(timestamp, tuple) and len(timestamp) == 2:
+        kind, milliseconds = timestamp
+        if kind and isinstance(milliseconds, (int, float)) and milliseconds >= 0:
+            return datetime.fromtimestamp(milliseconds / 1000, timezone.utc).isoformat()
+    return None
 
 
 class ShutdownRequested(Exception):
@@ -696,6 +709,7 @@ class KafkaEventConsumer(EventConsumer):
             # poison.
             try:
                 event_dto = EventDTO(
+                    received_at=_received_at(payload, msg),
                     tenant_id=payload.get("tenant_id"),
                     trace_id=trace_id,
                     event=payload.get("event"),

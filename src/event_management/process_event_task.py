@@ -1402,8 +1402,10 @@ def process_event(
     notify_client: bool = True,
     timestamp_forced: datetime.datetime | None = None,
     provider_name: str | None = None,
+    received_at: str | None = None,
 ) -> list[Alert]:
     start_time = time.time()
+    received_at = received_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
     job_id = ctx.get("job_id")
 
     extra_dict = {
@@ -1748,6 +1750,12 @@ def process_event(
                 )
                 event = [event]
                 raw_event = [raw_event]
+
+            # Provider parsing is complete. Preserve supplied firing times,
+            # including invalid values for existing validation to handle.
+            for alert in event:
+                if alert.time_created is None:
+                    alert.time_created = received_at
 
             with tracer.start_as_current_span("process_event_internal_preparation"):
                 logger.debug(

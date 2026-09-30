@@ -15,6 +15,58 @@ from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
 from src.models.event_dto import EventDTO
 
 
+@pytest.mark.parametrize("supplied", [None, "missing", "2025-12-01T12:00:00+02:00"])
+def test_firing_time_preserved_or_filled_before_save_and_publish(delivery_flow, supplied):
+    dto, session, save, errors, counter, producer = delivery_flow
+    dto.received_at = "2026-01-01T10:00:00+00:00"
+    dto.event["started_at"] = "2025-01-01T00:00:00Z"
+    if supplied == "missing":
+        dto.event.pop("time_created")
+    else:
+        dto.event["time_created"] = supplied
+    expected = dto.received_at if supplied in (None, "missing") else supplied
+    producer.publish.side_effect = None
+    for _ in range(2):  # Reconstruct the alert on redelivery.
+        process_event_sync(dto)
+        assert save.call_args.args[4][0].time_created == expected
+        snapshot = producer.publish.call_args.args[0][0]["alert"]
+        assert snapshot["time_created"] == expected
+        assert snapshot["started_at"] == dto.event["started_at"]
+    errors.assert_not_called()
+
+
+def test_legacy_record_uses_kafka_timestamp():
+    from src.core.kafka_consumer import _received_at
+    message = MagicMock()
+    message.timestamp.return_value = (1, 1767225600000)
+    assert _received_at({}, message) == "2026-01-01T00:00:00+00:00"
+    assert _received_at({"received_at": "gateway-time"}, message) == "gateway-time"
+
+
+def test_blank_firing_time_is_not_silently_replaced(delivery_flow):
+    dto, session, save, errors, counter, producer = delivery_flow
+    dto.event["time_created"] = ""
+    dto.received_at = "2026-01-01T10:00:00+00:00"
+    process_event_sync(dto)
+    assert save.call_args.args[4][0].time_created == ""
+    producer.publish.assert_not_called()
+    producer.reject.assert_called_once()
+
+
+def test_gateway_receipt_time_survives_kafka_redelivery(delivery_flow, monkeypatch):
+    dto, session, save, errors, counter, producer = delivery_flow
+    dto.event.pop("time_created")
+    dto.received_at = "2026-01-01T10:00:00+00:00"
+    producer.publish.side_effect = None
+    monkeypatch.setattr("src.core.kafka_consumer.Consumer", MagicMock())
+    consumer = KafkaEventConsumer()
+    message = MagicMock()
+    message.value.return_value = json.dumps(dto.dict()).encode()
+    for _ in range(2):
+        assert consumer._process_message(message, RetryBudget(300000, max_sleep_seconds=0)) is True
+        assert producer.publish.call_args.args[0][0]["alert"]["time_created"] == dto.received_at
+
+
 @pytest.fixture
 def delivery_flow(monkeypatch):
     session = MagicMock()
