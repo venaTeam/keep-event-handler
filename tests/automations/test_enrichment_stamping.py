@@ -260,9 +260,9 @@ def test_real_processing_persists_coverage_and_replays(delivery_flow, db_session
     assert row is not None
     assert (row.automation_matched, row.grace_seconds) == (True, 300)
     assert len(db_session.exec(select(Alert)).all()) == 1
-    # Replay is duplicate-driven under B5 (no is_replay flag): the redelivered
-    # firing dedupes to a full duplicate, so no new Alert row is inserted and
-    # coverage is retained by the idempotent stamp.
+    # Replay is duplicate-driven: the redelivered firing dedupes to a full
+    # duplicate, so no new Alert row is inserted and the idempotent stamp
+    # retains coverage.
     dto.event["is_full_duplicate"] = True
     producer.publish.side_effect = None
     process_event_sync(dto)

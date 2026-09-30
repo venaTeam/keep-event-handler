@@ -10,9 +10,9 @@ from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
 
 @pytest.fixture(autouse=True)
 def _isolate_coverage_stamp(monkeypatch):
-    # B6 stamps fingerprint coverage inside publish_matches. These batch tests
-    # mock the producer and process_event_sync but not the DB, so keep the
-    # stamp off a real database; delivery/commit behavior is what they assert.
+    # publish_matches stamps fingerprint coverage to the DB. These tests mock the
+    # producer and process_event_sync but not the DB and assert only
+    # delivery/commit behavior, so keep the stamp off a real database.
     import src.bl.automations.publish_matches as publishing
     monkeypatch.setattr(publishing, "EnrichmentsBl", MagicMock())
 

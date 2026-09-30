@@ -19,9 +19,9 @@ from src.bl.automations.publish_matches import build_messages
 def enable_matched_publishing(monkeypatch):
     monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
     monkeypatch.setattr(producer_module, "MAX_PROCESSING_RETRIES", 1)
-    # B5 failure tests exercise the unresolved path: both destinations down.
+    # Failure tests exercise the unresolved path: both destinations down.
     monkeypatch.setattr(producer_module, 'Producer', lambda *_: RaisingProducer())
-    # B6 isolates Kafka from the DB; real database stamping is covered separately.
+    # Isolate Kafka from the DB; real database stamping is covered separately.
     monkeypatch.setattr(matched_publish, "EnrichmentsBl", MagicMock())
 
 

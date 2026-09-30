@@ -38,8 +38,8 @@ class Client:
 def enabled(monkeypatch):
     monkeypatch.setattr(settings, 'AUTOMATION_MATCHING_ENABLED', True)
     monkeypatch.setattr(module, 'MAX_PROCESSING_RETRIES', 1)
-    # B6 stamps fingerprint coverage in the shared publish_matches path; these
-    # DLQ tests isolate Kafka, so keep the stamp off the real database.
+    # publish_matches stamps fingerprint coverage to the DB; these tests isolate
+    # Kafka, so keep the stamp off a real database.
     monkeypatch.setattr(orchestration, 'EnrichmentsBl', MagicMock())
 
 

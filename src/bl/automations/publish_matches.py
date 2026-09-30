@@ -90,15 +90,15 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
         if matches:
             automation_alerts_matched_total.inc()
 
-            # B6 stamps fingerprint coverage before publication and independently
-            # of whether matched publishing is enabled, so the validated snapshot
-            # is built here rather than inside the producer branch below.
+            # Build and validate the snapshot up front: coverage is stamped for
+            # every match, including when matched publishing is disabled, and the
+            # stamp needs the validated fingerprint.
             try:
                 messages = build_messages(tenant_id, alert, matches)
             except MatchedContractError as error:
-                # B5 rejection path: only the enabled producer owns a DLQ client
-                # and parks the malformed fan-out; disabled means nothing to
-                # publish or resolve, exactly as B5 behaved.
+                # A malformed alert cannot be published; only an enabled producer
+                # owns a DLQ to park the fan-out in, so a disabled producer has
+                # nothing to reject or resolve.
                 if producer.enabled:
                     automation_matched_alerts_rejected_total.inc()
                     alert_id = (
@@ -115,9 +115,9 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
                     producer.reject(tenant_id, alert, matches, error)
                 continue
 
-            # B6 addition: persist coverage before publication. A stamp failure
-            # must not be reported as a malformed-message rejection -- raise so the
-            # raw record is retained and replayed by the consumer.
+            # Persist coverage before publication. A stamp failure is not a
+            # malformed-message rejection: raise so the raw record stays
+            # uncommitted and is replayed by the consumer.
             try:
                 with EnrichmentsBl(tenant_id) as enrichments:
                     enrichments.stamp_automation_match(
