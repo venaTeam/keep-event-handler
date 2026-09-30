@@ -15,6 +15,7 @@ class EventDTO(BaseModel):
     tenant_id: str
     event: Dict[str, Any]
     trace_id: Optional[str] = None
+    received_at: Optional[str] = None
     provider_type: Optional[str] = None
     provider_id: Optional[str] = None
     fingerprint: Optional[str | List[str]] = None
@@ -23,6 +24,3 @@ class EventDTO(BaseModel):
     timestamp_forced: Optional[str] = None
     notify_client: bool = True
     event_type: Optional[EventType] = EventType.ALERT
-    # Set only by the Kafka consumer, never read from the payload: this record's
-    # processing already committed and only matched publishing failed.
-    is_replay: bool = False

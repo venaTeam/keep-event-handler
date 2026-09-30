@@ -82,6 +82,8 @@ def create_health_server(port: int):
                    draining, so a slow schema wait is never killed.
     """
     class HealthHandler(BaseHTTPRequestHandler):
+        _last_readiness_log = 0.0
+        _last_readiness_state = None
         def _respond(self, ok: bool, reason: str, probe: str):
             body = json.dumps(
                 {
@@ -104,14 +106,20 @@ def create_health_server(port: int):
                 try:
                     producer_ok, producer_reason = get_matched_producer().health()
                     if not producer_ok:
-                        logger.warning(
-                            "Readiness failed: matched producer is unhealthy (%s)",
-                            producer_reason,
-                        )
-                        ok, reason = False, producer_reason
+                        reason = f"consumer: {reason}; matched publishing: {producer_reason}"
+                        ok = False
                 except Exception:
                     logger.exception("Matched producer readiness check failed")
                     ok, reason = False, "matched producer health check failed"
+                import time
+                state = (ok, reason)
+                now = time.monotonic()
+                cls = type(self)
+                if state != cls._last_readiness_state or (not ok and now - cls._last_readiness_log >= 60):
+                    logger.log(logging.INFO if ok else logging.WARNING,
+                               'Readiness state: ready=%s reason=%s', ok, reason)
+                    cls._last_readiness_state = state
+                    cls._last_readiness_log = now
                 self._respond(ok, reason, "readiness")
             elif path in LIVENESS_PATHS:
                 ok, reason = consumer_health.is_live()

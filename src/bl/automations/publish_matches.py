@@ -89,14 +89,35 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
 
         if matches:
             automation_alerts_matched_total.inc()
+
+            # B6 stamps fingerprint coverage before publication and independently
+            # of whether matched publishing is enabled, so the validated snapshot
+            # is built here rather than inside the producer branch below.
             try:
                 messages = build_messages(tenant_id, alert, matches)
             except MatchedContractError as error:
-                _reject_alert(tenant_id, alert_index, alert, error)
+                # B5 rejection path: only the enabled producer owns a DLQ client
+                # and parks the malformed fan-out; disabled means nothing to
+                # publish or resolve, exactly as B5 behaved.
+                if producer.enabled:
+                    automation_matched_alerts_rejected_total.inc()
+                    alert_id = (
+                        alert.get("id") if isinstance(alert, Mapping)
+                        else getattr(alert, "id", None)
+                    )
+                    # Do not stringify malformed objects or log arbitrary payloads.
+                    alert_id = alert_id[:200] if isinstance(alert_id, str) else None
+                    logger.warning(
+                        "Rejected malformed matched alert "
+                        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
+                        tenant_id, alert_index, alert_id, error,
+                    )
+                    producer.reject(tenant_id, alert, matches, error)
                 continue
 
-            # Keep persistence errors outside malformed-message handling. Both
-            # the task and raw consumer retain this record for replay.
+            # B6 addition: persist coverage before publication. A stamp failure
+            # must not be reported as a malformed-message rejection -- raise so the
+            # raw record is retained and replayed by the consumer.
             try:
                 with EnrichmentsBl(tenant_id) as enrichments:
                     enrichments.stamp_automation_match(
@@ -110,19 +131,16 @@ def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
                 try:
                     producer.publish(messages)
                 except MatchedContractError as error:
-                    _reject_alert(tenant_id, alert_index, alert, error)
-
-
-def _reject_alert(tenant_id, alert_index, alert, error):
-    automation_matched_alerts_rejected_total.inc()
-    alert_id = (
-        alert.get("id") if isinstance(alert, Mapping)
-        else getattr(alert, "id", None)
-    )
-    # Do not stringify malformed objects or log arbitrary payloads.
-    alert_id = alert_id[:200] if isinstance(alert_id, str) else None
-    logger.warning(
-        "Rejected malformed matched alert "
-        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
-        tenant_id, alert_index, alert_id, error,
-    )
+                    automation_matched_alerts_rejected_total.inc()
+                    alert_id = (
+                        alert.get("id") if isinstance(alert, Mapping)
+                        else getattr(alert, "id", None)
+                    )
+                    # Do not stringify malformed objects or log arbitrary payloads.
+                    alert_id = alert_id[:200] if isinstance(alert_id, str) else None
+                    logger.warning(
+                        "Rejected malformed matched alert "
+                        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
+                        tenant_id, alert_index, alert_id, error,
+                    )
+                    producer.reject(tenant_id, alert, matches, error)

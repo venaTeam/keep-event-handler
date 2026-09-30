@@ -19,7 +19,9 @@ from src.bl.automations.publish_matches import build_messages
 def enable_matched_publishing(monkeypatch):
     monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
     monkeypatch.setattr(producer_module, "MAX_PROCESSING_RETRIES", 1)
-    # These tests isolate Kafka; real database stamping is covered separately.
+    # B5 failure tests exercise the unresolved path: both destinations down.
+    monkeypatch.setattr(producer_module, 'Producer', lambda *_: RaisingProducer())
+    # B6 isolates Kafka from the DB; real database stamping is covered separately.
     monkeypatch.setattr(matched_publish, "EnrichmentsBl", MagicMock())
 
 
@@ -56,7 +58,7 @@ class FakeProducer:
         self.queued = []
         self.errors = list(errors or [])
 
-    def produce(self, topic, key, value, on_delivery):
+    def produce(self, topic, key, value, on_delivery, headers=None):
         self.queued.append((topic, key, value, on_delivery))
 
     def poll(self, timeout):
@@ -72,7 +74,7 @@ class FakeProducer:
 
 
 class RaisingProducer(FakeProducer):
-    def produce(self, topic, key, value, on_delivery):
+    def produce(self, topic, key, value, on_delivery, headers=None):
         raise RuntimeError("local producer failure")
 
 
@@ -202,7 +204,7 @@ def test_fanout_is_enqueued_then_acknowledged():
     producer.publish(messages)
 
     assert fake.queued == []
-    assert producer.health()[0] is True
+    assert producer.healthy is True
 
 
 def test_partial_delivery_raises_and_marks_unhealthy(caplog):
@@ -282,7 +284,7 @@ def test_bad_alert_is_counted_and_valid_siblings_publish(monkeypatch, caplog):
         original_produce(topic, key, value, on_delivery)
 
     fake.produce = capture
-    producer = MatchedProducer(client=fake)
+    producer = MatchedProducer(client=fake, dlq_client=FakeProducer())
     monkeypatch.setattr(matched_publish, "get_matched_producer", lambda: producer)
     monkeypatch.setattr(matched_publish, "match", lambda *_: (AutomationMatch("a", 300, None),))
     metric = matched_publish.automation_matched_alerts_rejected_total
@@ -404,8 +406,10 @@ def test_delivery_retry_deadline_is_shared_and_backoff_is_bounded(monkeypatch):
         producer.publish([{"automation_id": "a"}])
 
     assert client.produce.call_count == 2
-    assert waits == pytest.approx([0.06, 0.04])
-    assert clock[0] == pytest.approx(0.1)
+    # The matched and DLQ destinations each receive the bounded producer
+    # budget; the raw consumer's RetryBudget still caps the combined path.
+    assert waits == pytest.approx([0.06, 0.04, 0.06, 0.04])
+    assert clock[0] == pytest.approx(0.2)
 
 
 @pytest.mark.parametrize("seconds,expected", [(5, 5000), (0, 100), (-1, 100)])
@@ -454,7 +458,7 @@ def test_contended_lock_uses_operation_deadline(monkeypatch, operation, healthy)
     started = time.monotonic()
     try:
         if operation == "publish":
-            with pytest.raises(producer_module.MatchedLockTimeout, match="lock deadline"):
+            with pytest.raises(producer_module.MatchedPublishError, match="lock deadline"):
                 producer.publish([{"automation_id": "a"}])
         else:
             assert producer.start() is False
@@ -485,7 +489,7 @@ def test_deadline_expired_on_acquire_preserves_health(monkeypatch, operation, he
     lock.acquire.side_effect = acquire
     producer._lock = lock
     if operation == "publish":
-        with pytest.raises(producer_module.MatchedLockTimeout):
+        with pytest.raises(producer_module.MatchedPublishError):
             producer.publish([{"automation_id": "a"}])
     else:
         assert producer.start() is False
