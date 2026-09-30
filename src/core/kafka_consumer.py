@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from requests.exceptions import HTTPError
 from sqlalchemy.exc import OperationalError
 
+from src.bl.automations.errors import AutomationStampError
 from src.bl.automations.producer import MatchedPublishError
 from src.config.config import config
 from src.config.consts import (
@@ -802,9 +803,9 @@ class KafkaEventConsumer(EventConsumer):
                 finally:
                     delivery_budget.reset(token)
                 return True
-            except MatchedPublishError:
+            except (MatchedPublishError, AutomationStampError):
                 self.logger.error(
-                    "Matched delivery exhausted; leaving raw record unresolved"
+                    "Automation coverage or delivery failed; leaving raw record unresolved"
                 )
                 return False
             except Exception as e:

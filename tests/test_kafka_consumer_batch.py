@@ -8,6 +8,15 @@ from unittest.mock import MagicMock, patch
 from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
 
 
+@pytest.fixture(autouse=True)
+def _isolate_coverage_stamp(monkeypatch):
+    # publish_matches stamps fingerprint coverage to the DB. These tests mock the
+    # producer and process_event_sync but not the DB and assert only
+    # delivery/commit behavior, so keep the stamp off a real database.
+    import src.bl.automations.publish_matches as publishing
+    monkeypatch.setattr(publishing, "EnrichmentsBl", MagicMock())
+
+
 @pytest.mark.parametrize("delivery_fails", [False, True])
 def test_matched_rejection_advances_partition_only_after_valid_delivery(monkeypatch, delivery_fails):
     import src.bl.automations.publish_matches as publishing

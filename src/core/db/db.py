@@ -433,6 +433,8 @@ def last_alert_enrichments_dict(last_alert: "LastAlert") -> dict:
         "ticket_type",
         "ticket_url",
         "ticket_provider_id",
+        "automation_matched",
+        "grace_seconds",
     ):
         val = getattr(last_alert, col_name, None)
         if val is not None:
@@ -578,6 +580,7 @@ def _enrich_entity(
     audit_enabled=True,
     strict=True,
     entity_type: str = "alert",
+    require_existing=False,
 ):
     """
     Enrich an entity.
@@ -615,6 +618,8 @@ def _enrich_entity(
     )
 
     if last_alert is None:
+        if require_existing:
+            raise LookupError("Required current alert row does not exist")
         # D1: enrich-before-first-alert -> no column write, still audit.
         logger.warning(
             "enrichment.no_lastalert",
@@ -681,6 +686,7 @@ def enrich_entity(
     audit_enabled=True,
     strict=True,
     entity_type: str = "alert",
+    require_existing=False,
 ):
     with existed_or_new_session(session) as session:
         return _enrich_entity(
@@ -695,6 +701,7 @@ def enrich_entity(
             audit_enabled=audit_enabled,
             strict=strict,
             entity_type=entity_type,
+            require_existing=require_existing,
         )
 
 # get_enrichment_with_session reads IncidentEnrichment because it serves the

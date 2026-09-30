@@ -1,13 +1,16 @@
-"""Pure message construction plus the small B5 hot-path orchestration."""
+"""Pure message construction plus the small hot-path orchestration for matched publishing."""
 
 import json
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from src.bl.automations.errors import AutomationStampError
+from src.bl.automations.grace import resolve_grace_seconds
 from src.bl.automations.models import AutomationMatch
 from src.bl.automations.producer import MatchedContractError, get_matched_producer
 from src.bl.automations.reloader import match
+from src.bl.enrichments_bl import EnrichmentsBl
 from src.core.metrics import (
     automation_alerts_matched_total,
     automation_alerts_probed_total,
@@ -71,35 +74,70 @@ def build_messages(
     return result
 
 
+def _reject_malformed_alert(
+    producer, tenant_id, alert_index, alert, matches, error
+) -> None:
+    """Count, log, and DLQ a malformed matched alert.
+
+    Only an enabled producer owns a DLQ, so when publishing is disabled there is
+    no fan-out to park or resolve and nothing is recorded.
+    """
+    if not producer.enabled:
+        return
+    automation_matched_alerts_rejected_total.inc()
+    alert_id = (
+        alert.get("id") if isinstance(alert, Mapping)
+        else getattr(alert, "id", None)
+    )
+    # Do not stringify malformed objects or log arbitrary payloads.
+    alert_id = alert_id[:200] if isinstance(alert_id, str) else None
+    logger.warning(
+        "Rejected malformed matched alert "
+        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
+        tenant_id, alert_index, alert_id, error,
+    )
+    producer.reject(tenant_id, alert, matches, error)
+
+
 def publish_matches(tenant_id: str, alerts: Sequence[Any]) -> None:
     producer = get_matched_producer()
     for alert_index, alert in enumerate(alerts):
         automation_alerts_probed_total.inc()
         matches = tuple(match(tenant_id, alert))
-        matched_m = len(matches)
-        automation_matched_m.observe(matched_m)
+        automation_matched_m.observe(len(matches))
         logger.debug(
             "Automation matching completed (tenant_id=%s, matched_m=%s)",
             tenant_id,
-            matched_m,
+            len(matches),
         )
 
-        if matches:
-            automation_alerts_matched_total.inc()
-            if producer.enabled:
-                try:
-                    producer.publish(build_messages(tenant_id, alert, matches))
-                except MatchedContractError as error:
-                    automation_matched_alerts_rejected_total.inc()
-                    alert_id = (
-                        alert.get("id") if isinstance(alert, Mapping)
-                        else getattr(alert, "id", None)
-                    )
-                    # Do not stringify malformed objects or log arbitrary payloads.
-                    alert_id = alert_id[:200] if isinstance(alert_id, str) else None
-                    logger.warning(
-                        "Rejected malformed matched alert "
-                        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
-                        tenant_id, alert_index, alert_id, error,
-                    )
-                    producer.reject(tenant_id, alert, matches, error)
+        if not matches:
+            continue
+        automation_alerts_matched_total.inc()
+
+        # Build and validate the snapshot up front: coverage is stamped for every
+        # match, including when matched publishing is disabled, and the stamp
+        # needs the validated fingerprint.
+        try:
+            messages = build_messages(tenant_id, alert, matches)
+        except MatchedContractError as error:
+            _reject_malformed_alert(producer, tenant_id, alert_index, alert, matches, error)
+            continue
+
+        # Persist coverage before publication. A stamp failure is not a
+        # malformed-message rejection: raise so the raw record stays uncommitted
+        # and is replayed by the consumer.
+        try:
+            with EnrichmentsBl(tenant_id) as enrichments:
+                enrichments.stamp_automation_match(
+                    messages[0]["alert"]["fingerprint"],
+                    resolve_grace_seconds(matches),
+                )
+        except Exception as error:
+            raise AutomationStampError("Automation coverage stamp failed") from error
+
+        if producer.enabled:
+            try:
+                producer.publish(messages)
+            except MatchedContractError as error:
+                _reject_malformed_alert(producer, tenant_id, alert_index, alert, matches, error)
