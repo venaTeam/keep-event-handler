@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from confluent_kafka import KafkaError
@@ -37,6 +38,9 @@ class Client:
 def enabled(monkeypatch):
     monkeypatch.setattr(settings, 'AUTOMATION_MATCHING_ENABLED', True)
     monkeypatch.setattr(module, 'MAX_PROCESSING_RETRIES', 1)
+    # B6 stamps fingerprint coverage in the shared publish_matches path; these
+    # DLQ tests isolate Kafka, so keep the stamp off the real database.
+    monkeypatch.setattr(orchestration, 'EnrichmentsBl', MagicMock())
 
 
 def test_partial_delivery_falls_back_with_original_bytes_and_key():
