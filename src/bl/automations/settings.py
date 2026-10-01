@@ -19,7 +19,10 @@ import re
 
 from src.config.consts import (
     AUTOMATION_INDEX_BOOT_RETRY_SECONDS,
-    AUTOMATION_INDEX_ENABLED,
+    AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS,
+    AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS,
+    AUTOMATION_MATCHED_SHUTDOWN_TIMEOUT_SECONDS,
+    AUTOMATION_MATCHING_ENABLED,
     AUTOMATION_INDEX_MAX_ROWS,
     AUTOMATION_INDEX_MAX_TOTAL_BYTES,
     AUTOMATION_INDEX_MAX_VALUE_BYTES,
@@ -37,16 +40,32 @@ from src.config.consts import (
 # being true. Clamped rather than rejected: a bad value must not stop the
 # matcher from running.
 _MAX_JITTER_FRACTION = 0.5
+# Safety floors for explicit zero/negative values, not the configured defaults
+# (5s publish, 10ms queue retry, 3s shutdown in config/consts.py).
+_MIN_MATCHED_TIMEOUT_SECONDS = 0.1
+_MIN_MATCHED_QUEUE_RETRY_SECONDS = 0.001
 
 
-def read_index_enabled() -> bool:
+def read_matching_enabled() -> bool:
     """The deployment gate for the whole automations surface here.
 
     No clamping: `config()` already maps "true"/"1"/"yes" to True and anything
     else -- including "false", "0" and "" -- to False, so the unset and
     misspelled cases both land on OFF, which is the safe side of this switch.
     """
-    return bool(AUTOMATION_INDEX_ENABLED)
+    return bool(AUTOMATION_MATCHING_ENABLED)
+
+
+def read_matched_publish_timeout_seconds() -> float:
+    return max(_MIN_MATCHED_TIMEOUT_SECONDS, AUTOMATION_MATCHED_PUBLISH_TIMEOUT_SECONDS)
+
+
+def read_matched_queue_retry_seconds() -> float:
+    return max(_MIN_MATCHED_QUEUE_RETRY_SECONDS, AUTOMATION_MATCHED_QUEUE_RETRY_SECONDS)
+
+
+def read_matched_shutdown_timeout_seconds() -> float:
+    return max(_MIN_MATCHED_TIMEOUT_SECONDS, AUTOMATION_MATCHED_SHUTDOWN_TIMEOUT_SECONDS)
 
 
 def read_reload_seconds() -> int:
