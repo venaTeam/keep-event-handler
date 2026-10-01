@@ -7,7 +7,7 @@ tenant routing moved downstream to keep-event-handler (VENA-5596 Epic 5).
 
 import logging
 
-from src.core.db import get_operator_by_name
+from src.core.db.db import get_operator_by_name
 
 logger = logging.getLogger(__name__)
 
