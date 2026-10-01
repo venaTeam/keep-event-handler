@@ -518,23 +518,30 @@ def test_dedup_path_keeps_permanent_dismiss_on_firing_full_duplicate(db_session)
 # tracking columns written by set_last_alert
 # --------------------------------------------------------------------------- #
 def test_tracking_columns_written(db_session):
+    """Caller-owned tracking columns (last_received/started_at) are written as
+    given. The cross-occurrence columns are derived by set_last_alert itself, so
+    caller-supplied values for them are ignored — see test_firing_tracking.py.
+    """
     now = datetime.now(tz=timezone.utc)
     _insert_alert_and_lastalert(
         db_session, "fp-track", AlertStatus.FIRING.value,
         tracking={
             "last_received": now,
+            "started_at": "2026-01-01T00:00:00Z",
+            # derived columns — set_last_alert owns these
             "firing_counter": 3,
             "unresolved_counter": 2,
-            "started_at": "2026-01-01T00:00:00Z",
             "firing_start_time": "2026-01-01T00:00:00Z",
             "firing_start_time_since_last_resolved": "2026-01-01T00:00:00Z",
         },
     )
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, "fp-track", session=db_session)
-    assert la.firing_counter == 3
-    assert la.unresolved_counter == 2
     assert la.started_at == "2026-01-01T00:00:00Z"
     assert la.last_received is not None
+    # first occurrence of the fingerprint -> derived, not the caller's 3/2
+    assert la.firing_counter == 1
+    assert la.unresolved_counter == 1
+    assert la.firing_start_time != "2026-01-01T00:00:00Z"
 
 
 def test_tracking_dict_cannot_clobber_user_enrichment_columns(db_session):
@@ -560,7 +567,6 @@ def test_tracking_dict_cannot_clobber_user_enrichment_columns(db_session):
         session=db_session,
         tracking={
             "last_received": datetime.now(tz=timezone.utc),
-            "firing_counter": 7,
             # Hostile keys: must be ignored.
             "status": "resolved",
             "assignee": "evil",
@@ -575,8 +581,11 @@ def test_tracking_dict_cannot_clobber_user_enrichment_columns(db_session):
     assert la.assignee == "alice"
     assert la.note == "user note"
     assert la.dismiss_mode is None
-    # legitimate tracking columns updated
-    assert la.firing_counter == 7
+    # legitimate tracking columns still updated, from the derivation: the
+    # previous status was acknowledged, so the firing counter restarts at 1
+    # while the unresolved streak continues.
+    assert la.firing_counter == 1
+    assert la.unresolved_counter == 2
 
 
 # --------------------------------------------------------------------------- #

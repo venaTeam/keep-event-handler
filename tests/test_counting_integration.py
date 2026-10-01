@@ -27,7 +27,6 @@ def get_alert_by_fingerprint(client, fingerprint):
     [
         {
             "AUTH_TYPE": "NOAUTH",
-            "KEEP_CALCULATE_START_FIRING_TIME_ENABLED": "true",
         },
     ],
     indirect=True,
@@ -88,7 +87,6 @@ def test_firing_counter_increment_on_same_alert(db_session, client, test_app):
     [
         {
             "AUTH_TYPE": "NOAUTH",
-            "KEEP_CALCULATE_START_FIRING_TIME_ENABLED": "true",
         },
     ],
     indirect=True,
@@ -161,7 +159,6 @@ def test_firing_counter_reset_on_acknowledge(db_session, client, test_app):
     [
         {
             "AUTH_TYPE": "NOAUTH",
-            "KEEP_CALCULATE_START_FIRING_TIME_ENABLED": "true",
         },
     ],
     indirect=True,
@@ -233,7 +230,6 @@ def test_firing_counter_with_different_status(db_session, client, test_app):
     [
         {
             "AUTH_TYPE": "NOAUTH",
-            "KEEP_CALCULATE_START_FIRING_TIME_ENABLED": "true",
         },
     ],
     indirect=True,
@@ -287,7 +283,6 @@ def test_unresolved_counter_increment_on_same_alert(db_session, client, test_app
     [
         {
             "AUTH_TYPE": "NOAUTH",
-            "KEEP_CALCULATE_START_FIRING_TIME_ENABLED": "true",
         },
     ],
     indirect=True,
@@ -362,7 +357,6 @@ def test_unresolved_counter_reset_on_resolved(db_session, client, test_app):
     [
         {
             "AUTH_TYPE": "NOAUTH",
-            "KEEP_CALCULATE_START_FIRING_TIME_ENABLED": "true",
         },
     ],
     indirect=True,

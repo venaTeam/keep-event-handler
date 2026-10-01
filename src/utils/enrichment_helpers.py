@@ -9,7 +9,7 @@ from src.models.alert import (
     AlertStatus,
     AlertWithIncidentLinkMetadataDto,
 )
-from src.models.db.alert import Alert, LastAlertToIncident
+from src.models.db.alert import Alert, LastAlert, LastAlertToIncident
 
 tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
@@ -36,126 +36,68 @@ def javascript_iso_format(last_received) -> str:
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def calculated_start_firing_time(
-    alert: AlertDto, previous_alert: AlertDto | list[AlertDto]
-) -> str:
-    """
-    Calculate the start firing time of an alert based on the previous alert.
+def derive_tracking_fields(
+    alert_status: str,
+    last_received: str,
+    previous: Optional[LastAlert],
+) -> dict:
+    """Derive the cross-occurrence tracking fields for a new occurrence.
 
-    Args:
-        alert (AlertDto): The alert to calculate the start firing time for.
-        previous_alert (AlertDto): The previous alert.
+    ``previous`` is the LastAlert row as it stands *before* this occurrence is
+    applied to it (None for a fingerprint's first occurrence). Every input lives
+    on that row, so recording an occurrence never has to read the partitioned
+    ``alert`` history.
 
-    Returns:
-        str: The calculated start firing time.
+    A previous row with a NULL ``status`` either predates the typed-column model
+    or was written while the tracking calculation was disabled. NULL means the
+    fingerprint was never resolved, acknowledged or dismissed, so it reads as
+    firing; a missing start-time falls back to this occurrence's
+    ``last_received`` rather than staying NULL forever.
     """
-    # if the alert is not firing, there is no start firing time
-    if alert.status != AlertStatus.FIRING.value:
-        return None
-    # if this is the first alert, the start firing time is the same as the last received time
-    if not previous_alert:
-        return alert.last_received
-    elif isinstance(previous_alert, list):
-        previous_alert = previous_alert[0]
-    # else, if the previous alert was firing, the start firing time is the same as the previous alert
-    if previous_alert.status == AlertStatus.FIRING.value:
-        return previous_alert.firing_start_time
-    # else, if the previous alert was resolved, the start firing time is the same as the last received time
+    firing = AlertStatus.FIRING.value
+    resolved = AlertStatus.RESOLVED.value
+    acknowledged = AlertStatus.ACKNOWLEDGED.value
+
+    previous_status = None if previous is None else (previous.status or firing)
+
+    if alert_status != firing:
+        firing_start_time = None
+    elif previous is None or previous_status != firing:
+        firing_start_time = last_received
     else:
-        return alert.last_received
+        firing_start_time = previous.firing_start_time or last_received
 
-
-def calculate_firing_time_since_last_resolved(
-    alert: AlertDto, previous_alert: AlertDto | list[AlertDto]
-) -> int:
-    """
-    Calculate the firing counter of an alert based on the previous alert.
-    """
-    # if the alert is resolved, there is no firing time.
-    if alert.status == AlertStatus.RESOLVED.value:
-        return None
+    if alert_status == resolved:
+        since_last_resolved = None
+    elif previous is None:
+        since_last_resolved = last_received if alert_status == firing else None
+    elif previous_status == resolved and alert_status == firing:
+        since_last_resolved = last_received
     else:
-        # if there is previous alert, we need to check if it has firing time
-        if previous_alert:
-            if isinstance(previous_alert, list):
-                previous_alert = previous_alert[0]
-            if (
-                previous_alert.status == AlertStatus.RESOLVED.value
-                and alert.status == AlertStatus.FIRING.value
-            ):
-                return alert.last_received
-            # if the previous alert has firing time since last resolved, we need to return it
-            if previous_alert.firing_start_time_since_last_resolved:
-                return previous_alert.firing_start_time_since_last_resolved
-        else:
-            # if there is no previous alert, we need to check if the alert is firing
-            if alert.status == AlertStatus.FIRING.value:
-                return alert.last_received
-            else:
-                return None
+        since_last_resolved = previous.firing_start_time_since_last_resolved
+        if since_last_resolved is None and alert_status == firing:
+            since_last_resolved = last_received
 
+    if alert_status == acknowledged:
+        firing_counter = 0
+    elif previous is None or previous_status == acknowledged:
+        firing_counter = 1
+    else:
+        firing_counter = (previous.firing_counter or 0) + 1
 
-def calculated_firing_counter(
-    alert: AlertDto, previous_alert: AlertDto | list[AlertDto]
-) -> int:
-    """
-    Calculate the firing counter of an alert based on the previous alert.
+    if alert_status == resolved:
+        unresolved_counter = 0
+    elif previous is None or previous_status == resolved:
+        unresolved_counter = 1
+    else:
+        unresolved_counter = (previous.unresolved_counter or 0) + 1
 
-    Args:
-        alert (AlertDto): The alert to calculate the firing counter for.
-        previous_alert (AlertDto): The previous alert.
-
-    Returns:
-        int: The calculated firing counter.
-    """
-    # if its an acknowledged alert, the firing counter is 0
-
-    if alert.status == AlertStatus.ACKNOWLEDGED.value:
-        return 0
-
-    # if this is the first alert, the firing counter is 1
-    if not previous_alert:
-        return 1
-    elif isinstance(previous_alert, list):
-        previous_alert = previous_alert[0]
-
-    if previous_alert.status == AlertStatus.ACKNOWLEDGED.value:
-        return 1
-
-    # else, increment counter if the previous alert was firing
-    # NOTE: firing_counter -> 0 only if acknowledged
-    return previous_alert.firing_counter + 1
-
-
-def calculated_unresolved_counter(
-    alert: AlertDto, previous_alert: AlertDto | list[AlertDto]
-) -> int:
-    """
-    Calculate the unresolved counter of an alert based on the previous alert.
-
-    Args:
-        alert (AlertDto): The alert to calculate the unresolved counter for.
-        previous_alert (AlertDto): The previous alert.
-
-    Returns:
-        int: The calculated unresolved counter.
-    """
-    # if it's a resolved alert, the unresolved counter is 0
-    if alert.status == AlertStatus.RESOLVED.value:
-        return 0
-
-    # if this is the first alert, the unresolved counter is 1
-    if not previous_alert:
-        return 1
-    elif isinstance(previous_alert, list):
-        previous_alert = previous_alert[0]
-
-    if previous_alert.status == AlertStatus.RESOLVED.value:
-        return 1
-
-    # else, increment counter if the previous alert was firing
-    # NOTE: unresolved_counter -> 0 only if resolved
-    return previous_alert.unresolved_counter + 1
+    return {
+        "firing_start_time": firing_start_time,
+        "firing_start_time_since_last_resolved": since_last_resolved,
+        "firing_counter": firing_counter,
+        "unresolved_counter": unresolved_counter,
+    }
 
 
 def _last_alert_to_dto_payload(last_alert) -> dict:
