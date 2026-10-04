@@ -80,7 +80,6 @@ def delivery_flow(monkeypatch):
     monkeypatch.setattr(task, "ElasticClient", MagicMock())
     monkeypatch.setattr(task, "get_notification_cache", MagicMock())
     monkeypatch.setattr(task, "_submit_notify", MagicMock())
-    monkeypatch.setattr(task, "_submit_preset_notify", MagicMock())
     dedup = MagicMock()
     dedup.apply_deduplication.side_effect = lambda event, *args: event
     monkeypatch.setattr(task, "AlertDeduplicator", lambda *args: dedup)
@@ -183,7 +182,6 @@ def test_processing_finishes_before_publish_failure(delivery_flow, monkeypatch, 
     monkeypatch.setattr(task, "KEEP_CORRELATION_ENABLED", True)
     monkeypatch.setattr(task, "RulesEngine", lambda **kwargs: rules)
     monkeypatch.setattr(task, "_submit_notify", lambda *args: order.append("notify"))
-    monkeypatch.setattr(task, "_submit_preset_notify", lambda *args: order.append("presets"))
     def fail(messages):
         order.append("publish")
         raise MatchedPublishError("broker unavailable")
@@ -191,13 +189,13 @@ def test_processing_finishes_before_publish_failure(delivery_flow, monkeypatch, 
     with pytest.raises(MatchedPublishError):
         process_event_sync(dto)
     assert order == ["save", "fields", "elastic", "rules"] + (
-        ["notify", "presets"] if notify else []
+        ["notify"] if notify else []
     ) + ["publish"]
     errors.assert_not_called()
     session.close.assert_called_once()
 
 
-@pytest.mark.parametrize("failure_point", ["get_notification_cache", "_submit_notify", "_submit_preset_notify"])
+@pytest.mark.parametrize("failure_point", ["get_notification_cache", "_submit_notify"])
 def test_notification_failure_does_not_suppress_publish(delivery_flow, monkeypatch, caplog, failure_point):
     dto, session, save, errors, counter, producer = delivery_flow
     save.side_effect = lambda *args: args[4]
@@ -221,7 +219,6 @@ def test_full_duplicate_still_publishes_after_processing(delivery_flow):
     assert producer.publish.call_args.args[0][0]["alert"]["id"] == "upstream-id"
     errors.assert_not_called()
     task._submit_notify.assert_not_called()
-    task._submit_preset_notify.assert_not_called()
 
 
 def test_incident_notification_survives_empty_alert_payload(delivery_flow, monkeypatch):
@@ -236,5 +233,35 @@ def test_incident_notification_survives_empty_alert_payload(delivery_flow, monke
     assert task._submit_notify.call_args.args[2:] == (
         "incident-change", {"incident_ids": ["incident-1"]}
     )
-    task._submit_preset_notify.assert_not_called()
     producer.publish.assert_called_once()
+
+
+@pytest.mark.parametrize("notify", [False, True])
+def test_processed_batch_queues_only_alert_and_incident_notifications(
+    delivery_flow, monkeypatch, notify
+):
+    dto, session, save, errors, counter, producer = delivery_flow
+    dto.notify_client = notify
+    save.side_effect = lambda *args: args[4]
+    producer.publish.side_effect = None
+    monkeypatch.setattr(task, "KEEP_CORRELATION_ENABLED", True)
+    rules = MagicMock()
+    rules.run_rules.return_value = [MagicMock(id="incident-1")]
+    monkeypatch.setattr(task, "RulesEngine", lambda **kwargs: rules)
+    pool = MagicMock()
+    monkeypatch.setattr(task, "_sse_pool", pool)
+
+    process_event_sync(dto)
+
+    calls = task._submit_notify.call_args_list
+    assert [call.args[2] for call in calls] == (
+        ["poll-alerts", "incident-change"] if notify else []
+    )
+    if notify:
+        assert calls[0].args[1] == dto.tenant_id
+        assert calls[0].args[3]["alerts"][0]["fingerprint"] == "fp"
+        assert calls[1].args[3] == {"incident_ids": ["incident-1"]}
+    # Delivery is mocked above; no additional background work may be queued.
+    pool.submit.assert_not_called()
+    producer.publish.assert_called_once()
+    errors.assert_not_called()

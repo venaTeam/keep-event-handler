@@ -87,9 +87,7 @@ from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 
 # Background pool that delivers SSE notifications off the Kafka consumer thread.
-# It also performs the remaining consumer-thread notify work — alert
-# serialization and the per-preset CEL filtering loop — so none of it runs on
-# the consumer hot path.
+# Alert snapshots are prepared on the consumer thread before submission.
 # SSE_NOTIFY_WORKERS=1 (default) keeps notifications strictly FIFO-ordered; raising
 # it speeds up delivery when the gateway is slow, at the cost of strict ordering
 # (safe here: the UI dedups poll-alerts by fingerprint; other events are idempotent).
@@ -246,44 +244,13 @@ def _notify_client(api_url, tenant_id, alerts_payload, incidents, notification_c
     """Queue the notifications the UI reacts to for a processed batch: `poll-alerts`
     with an immutable snapshot of the alerts, and `incident-change` when incidents
     were touched. Both go through the notify pool, off the consumer thread."""
-    _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
+    if alerts_payload:
+        _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
     if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
         incident_ids = [str(incident.id) for incident in incidents]
         _submit_notify(
             api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
         )
-
-
-def _submit_preset_notify(api_url, tenant_id, alerts_payload):
-    """Run preset filtering off the consumer thread using immutable snapshots."""
-    try:
-        _sse_pool.submit(_run_preset_filter, api_url, tenant_id, alerts_payload)
-    except Exception:
-        logger.warning(
-            "SSE preset notify submit failed",
-            extra={"event": "poll-presets", "tenant_id": tenant_id},
-        )
-
-
-def _run_preset_filter(api_url, tenant_id, alerts_payload):
-    try:
-        alerts = [AlertDto(**alert_dict) for alert_dict in alerts_payload]
-        notification_cache = get_notification_cache()
-        presets = get_all_presets_dtos(tenant_id)
-        rules_engine = RulesEngine(tenant_id=tenant_id)
-        matching_presets = []
-        for preset_dto in presets:
-            if rules_engine.filter_alerts(alerts, preset_dto.cel_query):
-                matching_presets.append(preset_dto)
-        if notification_cache.should_notify(tenant_id, "poll-presets"):
-            _submit_notify(
-                api_url,
-                tenant_id,
-                "poll-presets",
-                {"preset_names": [preset.name.lower() for preset in matching_presets]},
-            )
-    except Exception:
-        logger.exception("Failed to send presets via SSE", extra={"tenant_id": tenant_id})
 
 
 def shutdown_sse_pool(wait: bool = True):
@@ -1315,36 +1282,15 @@ def __handle_formatted_events(
     if notify_client and (enriched_formatted_events or incidents):
         try:
             with tracer.start_as_current_span("process_event_notify_client"):
-                # Get the notification cache
-                notification_cache = get_notification_cache()
-
-                # Tell the client to poll alerts via API (since event handler runs in a separate process)
-                # We don't use throttling here to ensure real-time updates (client will append instead of full refresh)
                 api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
                 logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
-
-                # Take an immutable snapshot (plain dicts) of the alerts on the consumer
-                # thread, then hand it to the background pool. The pool owns the rest of
-                # the notify work (delivery + the per-preset CEL filtering loop) so none
-                # of it runs on the consumer hot path, and the workers never touch live
-                # AlertDto / preset objects shared with the consumer.
-                alerts_payload = [alert.dict() for alert in enriched_formatted_events]
-
-                if alerts_payload:
-                    _submit_notify(
-                        api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload}
-                    )
-
-                if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
-                    incident_ids = [str(inc.id) for inc in incidents]
-                    _submit_notify(
-                        api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
-                    )
-
-                # Offload the preset CEL filtering loop + poll-presets notify onto the
-                # pool, passing the immutable alerts snapshot.
-                if alerts_payload:
-                    _submit_preset_notify(api_url, tenant_id, alerts_payload)
+                _notify_client(
+                    api_url,
+                    tenant_id,
+                    [alert.dict() for alert in enriched_formatted_events],
+                    incidents,
+                    get_notification_cache(),
+                )
         except Exception as error:
             logger.warning(
                 "Failed to schedule alert notifications; continuing matched publishing "
