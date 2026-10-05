@@ -44,6 +44,10 @@ def is_dismiss_active(
     Suppression is DERIVED from these two columns rather than stored as a status,
     so a time-boxed dismissal lapses on its own clock — nothing sweeps the tables,
     which means no reader may trust a stored status to tell it this.
+
+    keep-api-gateway and keep-workflows also carry a SQL twin of this predicate
+    (`suppressed_if_dismiss_active_sql`) for their CEL field mappings. This
+    service compiles no CEL against these columns, so it has none.
     """
     if dismiss_mode == DismissMode.PERMANENT.value:
         return True
@@ -60,23 +64,6 @@ def is_dismiss_active(
 
     return False
 
-
-def suppressed_if_dismiss_active_sql(table: str) -> str:
-    """SQL twin of `is_dismiss_active`: yields 'suppressed' while a dismissal is
-    in force and NULL otherwise, so it can head a COALESCE chain and fall through
-    when it is not.
-
-    CURRENT_TIMESTAMP rather than NOW() because this string is emitted verbatim
-    into whichever dialect is configured, and SQLite has no NOW().
-    """
-    return (
-        "CASE"
-        f" WHEN {table}.dismiss_mode = '{DismissMode.PERMANENT.value}'"
-        " THEN 'suppressed'"
-        f" WHEN {table}.dismiss_mode = '{DismissMode.DISMISS_UNTIL.value}'"
-        f" AND {table}.dismissed_until > CURRENT_TIMESTAMP THEN 'suppressed'"
-        " ELSE NULL END"
-    )
 
 # managed (mysql)
 if RUNNING_IN_CLOUD_RUN or DB_CONNECTION_STRING == "impersonate":

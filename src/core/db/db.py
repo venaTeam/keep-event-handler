@@ -2431,27 +2431,102 @@ def create_incident_from_dto(
 def delete_incident_by_id(
     tenant_id: str, incident_id: UUID, session: Optional[Session] = None
 ) -> bool:
+    """Delete an incident for real. Returns False when it did not exist.
+
+    This used to flip `status` to a `deleted` value that no query filtered on,
+    so "deleted" incidents kept showing up everywhere. Rows now go away.
+
+    What goes: the incident row, its alert links, its enrichment row, its audit
+    trail and the comment @mentions on that trail.
+
+    What stays: the alerts themselves and their LastAlert rows — they outlive the
+    incident that grouped them — along with their own audit history, which is
+    keyed on the alert fingerprint rather than the incident id.
+
+    EVERY DEPENDENT IS REMOVED EXPLICITLY, not left to ON DELETE. The FKs do
+    declare CASCADE/SET NULL, but SQLite (a supported backend) ships with
+    `PRAGMA foreign_keys` OFF, so referential actions never fire there and the
+    same delete would strand links and enrichment rows. Doing it by hand makes
+    the outcome identical on every dialect; the FK actions stay as a backstop.
+
+    Two of these have no FK to fall back on at all: `alertaudit` rows for an
+    incident are keyed by its UUID in the `fingerprint` column, and
+    `commentmention` lost its FK to `alertaudit` deliberately. Without the
+    explicit deletes below, both would survive as rows nothing can reach, since
+    every read path finds them through a live incident id.
+
+    Kept in step with keep-api-gateway's `delete_incident_by_id`: both services
+    share this database and must agree on what deleting an incident means.
+
+    Note this also discards the record of who did what to the incident. Deleting
+    an incident is not itself audited, so there is no "who deleted it" entry that
+    this would contradict.
+    """
     if isinstance(incident_id, str):
         incident_id = __convert_to_uuid(incident_id)
     with existed_or_new_session(session) as session:
-        incident = session.exec(
-            select(Incident).filter(
-                Incident.tenant_id == tenant_id,
-                Incident.id == incident_id,
+        audit_fingerprint = str(incident_id)
+        audit_ids = select(AlertAudit.id).where(
+            AlertAudit.tenant_id == tenant_id,
+            AlertAudit.fingerprint == audit_fingerprint,
+        )
+        # Mentions before the audit rows they point at, so the subquery can still
+        # find them. The subquery cannot be evaluated against in-session objects,
+        # so skip session synchronization.
+        session.execute(
+            delete(CommentMention)
+            .where(
+                CommentMention.tenant_id == tenant_id,
+                CommentMention.comment_id.in_(audit_ids),
             )
-        ).first()
-
+            .execution_options(synchronize_session=False)
+        )
+        session.execute(
+            delete(AlertAudit).where(
+                AlertAudit.tenant_id == tenant_id,
+                AlertAudit.fingerprint == audit_fingerprint,
+            )
+        )
+        session.execute(
+            delete(LastAlertToIncident).where(
+                LastAlertToIncident.tenant_id == tenant_id,
+                LastAlertToIncident.incident_id == incident_id,
+            )
+        )
+        # The legacy `alerttoincident` table has no model in this service; its FK
+        # is ON DELETE CASCADE, and nothing here writes to it.
+        session.execute(
+            delete(IncidentEnrichment).where(
+                IncidentEnrichment.tenant_id == tenant_id,
+                IncidentEnrichment.incident_id == incident_id,
+            )
+        )
+        # Sibling incidents point at this one; clear those references so they
+        # don't dangle (the FKs say SET NULL, which SQLite would skip).
         session.execute(
             update(Incident)
             .where(
                 Incident.tenant_id == tenant_id,
-                Incident.id == incident.id,
+                Incident.merged_into_incident_id == incident_id,
             )
-            .values({"status": IncidentStatus.DELETED.value})
+            .values(merged_into_incident_id=None)
         )
-
+        session.execute(
+            update(Incident)
+            .where(
+                Incident.tenant_id == tenant_id,
+                Incident.same_incident_in_the_past_id == incident_id,
+            )
+            .values(same_incident_in_the_past_id=None)
+        )
+        result = session.execute(
+            delete(Incident).where(
+                Incident.tenant_id == tenant_id,
+                Incident.id == incident_id,
+            )
+        )
         session.commit()
-        return True
+        return result.rowcount > 0
 
 def get_all_alerts_by_fingerprints(
     tenant_id: str, fingerprints: List[str], session: Optional[Session] = None
