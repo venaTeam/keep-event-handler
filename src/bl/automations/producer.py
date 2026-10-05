@@ -416,20 +416,71 @@ class MatchedProducer:
         if not self._dlq_lock.acquire(blocking=False):
             return
         try:
-            metadata = self._get_dlq().list_topics(timeout=settings.read_matched_publish_timeout_seconds())
+            client = self._get_dlq()
+            metadata = client.list_topics(timeout=settings.read_matched_publish_timeout_seconds())
             topic = getattr(metadata, 'topics', {}).get(self._dlq_topic)
             if topic is None or getattr(topic, 'error', None):
                 raise MatchedPublishError('DLQ metadata unavailable')
-            # Metadata cannot clear an earlier delivery failure.
-            if not self._dlq_delivery_failed:
+            if self._dlq_delivery_failed:
+                self._probe_dlq_write(client)
+            else:
                 self._dlq_healthy = True
                 self._dlq_error = None
         except Exception as error:
             self._dlq_healthy = False
-            self._dlq_error = type(error).__name__ + ': DLQ metadata unavailable'
+            self._dlq_error = getattr(error, "detail", None) or (
+                type(error).__name__ + ': DLQ health check failed'
+            )
         finally:
             automation_matched_dlq_ready.set(int(self._dlq_healthy))
             self._dlq_lock.release()
+
+    def _probe_dlq_write(self, client) -> None:
+        """Verify DLQ write permission and acknowledgement after a failure.
+
+        Metadata only proves that the topic can be described. A small marked
+        record is required to prove that the producer can write and receive an
+        acknowledgement, which is the condition readiness promises.
+        """
+        deadline = bounded_deadline(self._clock)
+        acknowledged = False
+        failure = None
+
+        def delivered(error, _message):
+            nonlocal acknowledged, failure
+            if error is None:
+                acknowledged = True
+            else:
+                failure = error_detail(error)
+
+        try:
+            client.produce(
+                self._dlq_topic,
+                key=b"__matched_dlq_healthcheck__",
+                value=b"",
+                headers=[
+                    (DlqHeader.VERSION.value, b"1"),
+                    (DlqHeader.RECORD_TYPE.value, b"health_check"),
+                ],
+                on_delivery=delivered,
+            )
+            while not acknowledged and failure is None and self._clock() < deadline:
+                client.poll(min(0.05, max(0, deadline - self._clock())))
+            if not acknowledged:
+                error = MatchedPublishError("DLQ health-check acknowledgement missing")
+                error.detail = failure or {"reason": "acknowledgement_timeout"}
+                raise error
+        except Exception as error:
+            self._dlq_healthy = False
+            self._dlq_delivery_failed = True
+            self._dlq_error = getattr(error, "detail", None) or error_detail(error)
+            raise
+
+        self._dlq_healthy = True
+        self._dlq_delivery_failed = False
+        self._dlq_error = None
+        automation_matched_dlq_ready.set(1)
+        logger.info("Matched DLQ write health recovered (topic=%s)", self._dlq_topic)
 
     def _send_dlq(
         self,

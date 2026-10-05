@@ -107,6 +107,12 @@ continue polling while NotReady. Repeated unchanged readiness warnings are limit
 to once per minute. Monitor `keep_automation_matched_dlq_total` and
 `keep_automation_matched_dlq_ready` alongside main delivery metrics.
 
+After a DLQ delivery failure, readiness recovery performs an acknowledged,
+non-replayable `health_check` write to the DLQ. This verifies write permission
+and delivery acknowledgement; describing the topic alone is insufficient. DLQ
+consumers and redrive tooling must ignore records carrying the
+`record-type=health_check` header.
+
 Known cross-service contract issue: the sibling automation consumer currently
 reads `alert.history_id`, whereas B5 emits `alert.id`. These are not safely
 interchangeable: alert `id` can be generated/provider-supplied and persistence
