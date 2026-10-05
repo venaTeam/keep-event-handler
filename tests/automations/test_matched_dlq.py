@@ -60,21 +60,20 @@ def test_both_fail_leave_unresolved():
     assert producer.health_details()['last_result'] == 'unresolved'
 
 
-def test_dlq_write_probe_recovers_readiness_after_both_destinations_recover():
+def test_kafka_health_check_clears_stale_dlq_readiness_after_recovery():
     main = Client([RuntimeError()])
-    dlq = Client([RuntimeError(), None])
+    dlq = Client([RuntimeError()])
     producer = MatchedProducer(client=main, dlq_client=dlq)
 
     with pytest.raises(MatchedPublishError):
         producer.publish([{'automation_id': 'a'}])
     assert producer.health_details()['dlq']['healthy'] is False
 
-    # Main-topic delivery can recover independently, but readiness remains
-    # unhealthy until the acknowledged DLQ probe clears the old failure.
+    # Main-topic delivery can recover independently. Kafka metadata health
+    # clears the stale DLQ readiness state without writing a synthetic record.
     assert producer.publish([{'automation_id': 'a'}]) == 'matched'
     assert producer.health()[0] is True
-    assert len(dlq.sent) == 2
-    assert dict(dlq.sent[-1][1]['headers'])['record-type'] == b'health_check'
+    assert len(dlq.sent) == 1
     assert producer.health_details()['dlq']['healthy'] is True
 
 
