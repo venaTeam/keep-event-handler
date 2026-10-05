@@ -179,7 +179,7 @@ CONFIG = {
     "loggers": {
         "": {
             "handlers": ["default"],
-            "level": "DEBUG",
+            "level": LOG_LEVEL,
             "propagate": False,
         },
         "uvicorn.access": {
