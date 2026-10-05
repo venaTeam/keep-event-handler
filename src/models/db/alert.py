@@ -7,7 +7,11 @@ from datetime import datetime
 from pydantic import PrivateAttr
 from typing import List, TYPE_CHECKING
 from src.models.db.tenant import Tenant
-from src.core.db.helpers import NULL_FOR_DELETED_AT, DATETIME_COLUMN_TYPE
+from src.core.db.helpers import (
+    NULL_FOR_DELETED_AT,
+    DATETIME_COLUMN_TYPE,
+    is_dismiss_active,
+)
 
 if TYPE_CHECKING:
     from src.models.db.incident import Incident
@@ -350,6 +354,28 @@ class LastAlert(SQLModel, table=True):
         ),
         {},
     )
+
+    def is_dismiss_active(self, now: datetime | None = None) -> bool:
+        """Whether this alert's dismissal is in force right now.
+
+        `suppressed` is NOT stored in `status` for a dismissal — `status` holds
+        the user's status override, which is what the alert reverts to when a
+        time-boxed dismissal lapses. Nothing rewrites the row at that moment, so
+        every reader has to derive suppression rather than trust the column.
+        """
+        return is_dismiss_active(self.dismiss_mode, self.dismissed_until, now)
+
+    def get_effective_status(
+        self, provider_status: str | None = None, now: datetime | None = None
+    ) -> str | None:
+        """The status to show: `suppressed` while a dismissal is live, else the
+        user's override, else the provider's own status."""
+        if self.is_dismiss_active(now):
+            return "suppressed"
+        if self.status is not None:
+            return self.status
+        return provider_status
+
 
 class IncidentEnrichment(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)

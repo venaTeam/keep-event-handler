@@ -104,9 +104,13 @@ def _last_alert_to_dto_payload(last_alert) -> dict:
     """Build the DTO payload contribution (user enrichment + relocated tracking
     fields) from a LastAlert row's typed columns."""
     payload: dict = {}
-    # user enrichment state
-    if last_alert.status is not None:
-        payload["status"] = last_alert.status
+    # user enrichment state. Status is DERIVED: a live dismissal reads as
+    # suppressed, and when a time-boxed one lapses the stored override takes over
+    # again (or nothing, leaving the provider's own status in place — hence the
+    # omission rather than a None).
+    effective_status = last_alert.get_effective_status()
+    if effective_status is not None:
+        payload["status"] = effective_status
     if last_alert.assignee is not None:
         payload["assignee"] = last_alert.assignee
     if last_alert.note is not None:

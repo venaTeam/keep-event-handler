@@ -211,7 +211,11 @@ def process_event_sync(event_dto: EventDTO):
     if event_dto.event_type in FUNC_MAP:
         return FUNC_MAP[event_dto.event_type](event_dto)
     else:
-        raise logger.warning(f"Unknown event type: {event_dto.event_type}, ignoring event")
+        # `raise logger.warning(...)` raised TypeError (None is not an exception),
+        # turning an event we meant to ignore into a consumer crash — and, with no
+        # offset commit, a poison pill the consumer re-read forever.
+        logger.warning(f"Unknown event type: {event_dto.event_type}, ignoring event")
+        return
 
 
 async def process_event_wrapper(
