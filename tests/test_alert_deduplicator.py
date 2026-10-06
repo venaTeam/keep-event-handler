@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
 from src.models.alert import AlertDto
 
@@ -16,9 +18,10 @@ def _alert(time_created):
     )
 
 
-def test_time_created_does_not_change_dedup_hash_for_custom_rule():
+@pytest.mark.parametrize("ignore_fields", [[], ["time_created"]])
+def test_custom_rule_controls_whether_time_created_changes_dedup_hash(ignore_fields):
     deduplicator = AlertDeduplicator("tenant")
-    rule = SimpleNamespace(ignore_fields=[], id="rule-id")
+    rule = SimpleNamespace(ignore_fields=ignore_fields, id="rule-id")
 
     first = deduplicator._apply_deduplication_rule(
         _alert("2026-01-01T00:00:00Z"), rule, {"other-fingerprint": "other-hash"}
@@ -29,8 +32,12 @@ def test_time_created_does_not_change_dedup_hash_for_custom_rule():
         {"stable-fingerprint": first.alert_hash},
     )
 
-    assert first.alert_hash == second.alert_hash
-    assert second.is_full_duplicate is True
+    if "time_created" in ignore_fields:
+        assert first.alert_hash == second.alert_hash
+        assert second.is_full_duplicate is True
+    else:
+        assert first.alert_hash != second.alert_hash
+        assert second.is_partial_duplicate is True
 
 
 def test_default_rule_documents_time_created_as_ignored():

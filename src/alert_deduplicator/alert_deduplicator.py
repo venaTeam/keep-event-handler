@@ -28,10 +28,6 @@ from src.providers.providers_factory import ProvidersFactory
 
 DEFAULT_RULE_UUID = "00000000-0000-0000-0000-000000000000"
 
-# Delivery/occurrence bookkeeping is not alert identity. Providers may revise
-# these values while keeping the same alert fingerprint.
-_SYSTEM_DEDUP_IGNORED_FIELDS = {"last_received", "time_created"}
-
 
 class AlertDeduplicator:
     DEDUPLICATION_DISTRIBUTION_ENABLED = KEEP_DEDUPLICATION_DISTRIBUTION_ENABLED
@@ -58,10 +54,8 @@ class AlertDeduplicator:
         """
         # we don't want to remove fields from the original alert
         alert_copy = copy.deepcopy(alert)
-        # Remove configured fields plus system bookkeeping fields. The latter
-        # apply even when a custom rule is active.
-        ignored_fields = set(rule.ignore_fields or ()) | _SYSTEM_DEDUP_IGNORED_FIELDS
-        for field in ignored_fields:
+        # remove the fields that should be ignored
+        for field in rule.ignore_fields:
             alert_copy = self._remove_field(field, alert_copy)
 
         # calculate the hash
