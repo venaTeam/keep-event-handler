@@ -160,6 +160,7 @@ def _process_alert_event(event_dto: EventDTO):
     # Call process_event directly (it's synchronous)
     resp = process_event(
         ctx={},  # No ARQ context in standalone mode
+        received_at=event_dto.received_at,
         tenant_id=event_dto.tenant_id,
         provider_type=event_dto.provider_type,
         provider_id=event_dto.provider_id,
@@ -238,4 +239,3 @@ async def process_event_wrapper(
         return _process_incident_event(event_dto)
     else:
         return _process_alert_event(event_dto)
-
