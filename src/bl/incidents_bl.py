@@ -16,7 +16,6 @@ from src.core.db.db import (
     add_alerts_to_incident,
     add_audit,
     create_incident_from_dto,
-    delete_incident_by_id,
     enrich_alerts_with_incidents,
     get_all_alerts_by_fingerprints,
     get_incident_by_id,
@@ -219,33 +218,6 @@ class IncidentBl:
             self.tenant_id, incident_id, alert_fingerprints
         )
         self.__postprocess_alerts_change(incident, alert_fingerprints)
-
-    def delete_incident(self, incident_id: UUID) -> None:
-        self.logger.info(
-            "Fetching incident",
-            extra={
-                "incident_id": incident_id,
-                "tenant_id": self.tenant_id,
-            },
-        )
-
-        incident = get_incident_by_id(tenant_id=self.tenant_id, incident_id=incident_id)
-        if not incident:
-            raise HTTPException(status_code=404, detail="Incident not found")
-
-        incident_dto = IncidentDto.from_db_incident(incident)
-
-        deleted = delete_incident_by_id(
-            tenant_id=self.tenant_id, incident_id=incident_id
-        )
-        if not deleted:
-            raise HTTPException(status_code=404, detail="Incident not found")
-
-        self.update_client_on_incident_change()
-
-    def bulk_delete_incidents(self, incident_ids: List[UUID]) -> None:
-        for incident_id in incident_ids:
-            self.delete_incident(incident_id)
 
     def update_incident(
         self,

@@ -123,6 +123,10 @@ SSE_NOTIFY_MAX_PENDING = config("SSE_NOTIFY_MAX_PENDING", default=1000, cast=int
 SSE_NOTIFY_COALESCE_ENABLED = config(
     "SSE_NOTIFY_COALESCE_ENABLED", default=True, cast=bool
 )
+SSE_NOTIFY_TOKEN = config("SSE_NOTIFY_TOKEN", default=None)
+SSE_NOTIFY_HEADERS = (
+    {"X-Keep-Notify-Token": SSE_NOTIFY_TOKEN} if SSE_NOTIFY_TOKEN else {}
+)
 
 # Batch consume. BATCH_SIZE=1 reproduces today's single-message loop exactly.
 KAFKA_CONSUMER_BATCH_SIZE = config("KAFKA_CONSUMER_BATCH_SIZE", default=1, cast=int)
