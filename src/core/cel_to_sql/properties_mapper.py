@@ -81,6 +81,62 @@ class PropertiesMappingException(Exception):
 
 
 
+ENUM_CANONICALIZATION_OPERATORS = frozenset(
+    [
+        ComparisonNodeOperator.EQ,
+        ComparisonNodeOperator.NE,
+        ComparisonNodeOperator.IN,
+        ComparisonNodeOperator.GT,
+        ComparisonNodeOperator.GE,
+        ComparisonNodeOperator.LT,
+        ComparisonNodeOperator.LE,
+    ]
+)
+
+
+def canonicalize_enum_value(value, enum_values: list):
+    """
+    Resolves a queried literal to its canonical enum member, case-insensitively.
+
+    Values that are not strings, and strings that match no enum member, are
+    returned unchanged so that free-text comparisons and unknown values keep
+    their existing behavior.
+    """
+    if not isinstance(value, str):
+        return value
+
+    for enum_value in enum_values:
+        if isinstance(enum_value, str) and enum_value.lower() == value.lower():
+            return enum_value
+
+    return value
+
+
+def canonicalize_enum_operand(second_operand, enum_values: list):
+    """
+    Applies canonicalize_enum_value to a comparison's right-hand side.
+
+    Handles both a single ConstantNode and the list of ConstantNode produced by
+    an "in" expression. Any other operand shape is returned unchanged.
+    """
+    if isinstance(second_operand, ConstantNode):
+        return ConstantNode(
+            value=canonicalize_enum_value(second_operand.value, enum_values)
+        )
+
+    if isinstance(second_operand, list):
+        return [
+            (
+                ConstantNode(value=canonicalize_enum_value(item.value, enum_values))
+                if isinstance(item, ConstantNode)
+                else item
+            )
+            for item in second_operand
+        ]
+
+    return second_operand
+
+
 class PropertiesMapper:
     """
     A class to map properties in an abstract syntax tree (AST) based on provided metadata.
@@ -248,8 +304,14 @@ class PropertiesMapper:
         """
         Modifies a comparison node based on the provided property metadata mapping.
 
-        This method adjusts the comparison node if the property being compared has
-        enumerated values. Specifically, it handles cases where the comparison
+        If the property being compared declares enumerated values, the queried
+        literal is first resolved to its canonical enum member case-insensitively,
+        so that a value read off the (capitalized) facets panel selects the same
+        rows as the lowercase value stored in the database. Literals that match no
+        enum member are left untouched.
+
+        This method then adjusts the comparison node if the property being compared
+        has enumerated values. Specifically, it handles cases where the comparison
         operator is one of the following: GE (greater than or equal to), GT (greater
         than), LE (less than or equal to), or LT (less than). If the second operand
         of the comparison node is not in the enumerated values, it modifies the
@@ -266,6 +328,18 @@ class PropertiesMapper:
             ComparisonNode: The modified comparison node, or the original comparison
             node if no modifications are necessary.
         """
+        if (
+            mapping.enum_values
+            and comparison_node.operator in ENUM_CANONICALIZATION_OPERATORS
+        ):
+            comparison_node = ComparisonNode(
+                first_operand=comparison_node.first_operand,
+                operator=comparison_node.operator,
+                second_operand=canonicalize_enum_operand(
+                    comparison_node.second_operand, mapping.enum_values
+                ),
+            )
+
         if not isinstance(comparison_node.second_operand, ConstantNode):
             return comparison_node
 

@@ -648,3 +648,22 @@ def test_recover_strategy_does_not_close_caller_session():
             logging.getLogger(__name__), session=tracking_session
         )
     tracking_session.close.assert_not_called()
+
+
+def test_recovered_alerts_notify_only_about_incidents():
+    """Recovering alerts from an expired window tells the client about incident
+    changes and nothing else: presets are not evaluated per alert and no
+    poll-presets event is sent, since no client reacts to it."""
+    sent = []
+    cache = MagicMock()
+    cache.should_notify.return_value = True
+    incident = MagicMock()
+    incident.id = "i1"
+    with patch(
+        "src.bl.maintenance_windows_bl.notify_sse",
+        side_effect=lambda tenant, event, data: sent.append((event, data)),
+    ):
+        src.bl.maintenance_windows_bl._notify_recovered("t1", [incident], cache, MagicMock())
+        src.bl.maintenance_windows_bl._notify_recovered("t1", [], cache, MagicMock())
+
+    assert sent == [("incident-change", {"incident_ids": ["i1"]})]

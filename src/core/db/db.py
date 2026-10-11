@@ -46,13 +46,13 @@ from sqlmodel import Session, col, or_, select, text
 from enum import Enum
 from src.core.db.helpers import NULL_FOR_DELETED_AT, DismissMode
 from src.core.db.db_utils import get_json_extract_field
-from src.models.db.preset import PresetDto, StaticPresetsId, Preset
 from src.models.db.alert import LastAlertToIncident, AlertDeduplicationEvent, LastAlert, Alert, AlertDeduplicationRule, IncidentEnrichment, AlertAudit, AlertField, CommentMention
 from src.models.db.provider import Provider, ProviderExecutionLog
 from src.models.db.rule import Rule
 from src.models.db.incident import Incident, IncidentType, IncidentStatus, IncidentSeverity
 from src.models.incident import IncidentDtoIn, IncidentDto
 from src.models.db.tenant import TenantApiKey, Tenant
+from src.models.db.operator import Operator
 from src.models.alert import AlertStatus, DeduplicationRuleDto, DeduplicationRuleRequestDto
 from src.utils.enrichment_helpers import derive_tracking_fields, javascript_iso_format
 from src.models.db.maintenance_window import MaintenanceWindowRule
@@ -68,25 +68,6 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.sql.functions import count
 
 
-STATIC_PRESETS = {
-    "feed": PresetDto(
-        id=StaticPresetsId.FEED_PRESET_ID.value,
-        name="feed",
-        options=[
-            {"label": "CEL", "value": ""},
-            {
-                "label": "SQL",
-                "value": {"sql": "", "params": {}},
-            },
-        ],
-        created_by=None,
-        is_private=False,
-        is_noisy=False,
-        should_do_noise_now=False,
-        static=True,
-        tags=[],
-    )
-}
 from src.core.db.db_utils import (
     create_db_engine,
     get_json_extract_field,
@@ -325,6 +306,17 @@ def get_session_sync() -> Session:
     """
     return Session(engine)
 
+
+def get_operator_by_name(operator_name: str) -> Operator | None:
+    """Return the operator whose `name` matches the alert's operator routing key.
+
+    None means the operator is unknown -- callers should fall back to the
+    general tenant (VENA-5596 Epic 5)
+    """
+    with Session(engine) as session:
+        return session.exec(
+            select(Operator).where(Operator.name == operator_name)
+        ).first()
 
 # === Typed user-enrichment columns on LastAlert ===
 # Derived from the LastAlert model (single source of truth) — columns tagged
@@ -804,22 +796,6 @@ def get_alerts_by_fingerprint(
         alerts = session.exec(query).all()
 
         return alerts
-
-def get_db_presets(tenant_id: str) -> List[Preset]:
-    with Session(engine) as session:
-        presets = (
-            session.exec(select(Preset).where(Preset.tenant_id == tenant_id))
-            .unique()
-            .all()
-        )
-    return presets
-
-
-def get_all_presets_dtos(tenant_id: str) -> List[PresetDto]:
-    presets = get_db_presets(tenant_id)
-    static_presets_dtos = list(STATIC_PRESETS.values())
-    return [PresetDto(**preset.to_dict()) for preset in presets] + static_presets_dtos
-
 
 def enrich_alerts_with_incidents(
     tenant_id: str, alerts: List[Alert], session: Optional[Session] = None
@@ -2427,106 +2403,6 @@ def create_incident_from_dto(
         incident_dict["severity"] = incident_dto.severity.order
 
     return create_incident_from_dict(tenant_id, incident_dict, session)
-
-def delete_incident_by_id(
-    tenant_id: str, incident_id: UUID, session: Optional[Session] = None
-) -> bool:
-    """Delete an incident for real. Returns False when it did not exist.
-
-    This used to flip `status` to a `deleted` value that no query filtered on,
-    so "deleted" incidents kept showing up everywhere. Rows now go away.
-
-    What goes: the incident row, its alert links, its enrichment row, its audit
-    trail and the comment @mentions on that trail.
-
-    What stays: the alerts themselves and their LastAlert rows — they outlive the
-    incident that grouped them — along with their own audit history, which is
-    keyed on the alert fingerprint rather than the incident id.
-
-    EVERY DEPENDENT IS REMOVED EXPLICITLY, not left to ON DELETE. The FKs do
-    declare CASCADE/SET NULL, but SQLite (a supported backend) ships with
-    `PRAGMA foreign_keys` OFF, so referential actions never fire there and the
-    same delete would strand links and enrichment rows. Doing it by hand makes
-    the outcome identical on every dialect; the FK actions stay as a backstop.
-
-    Two of these have no FK to fall back on at all: `alertaudit` rows for an
-    incident are keyed by its UUID in the `fingerprint` column, and
-    `commentmention` lost its FK to `alertaudit` deliberately. Without the
-    explicit deletes below, both would survive as rows nothing can reach, since
-    every read path finds them through a live incident id.
-
-    Kept in step with keep-api-gateway's `delete_incident_by_id`: both services
-    share this database and must agree on what deleting an incident means.
-
-    Note this also discards the record of who did what to the incident. Deleting
-    an incident is not itself audited, so there is no "who deleted it" entry that
-    this would contradict.
-    """
-    if isinstance(incident_id, str):
-        incident_id = __convert_to_uuid(incident_id)
-    with existed_or_new_session(session) as session:
-        audit_fingerprint = str(incident_id)
-        audit_ids = select(AlertAudit.id).where(
-            AlertAudit.tenant_id == tenant_id,
-            AlertAudit.fingerprint == audit_fingerprint,
-        )
-        # Mentions before the audit rows they point at, so the subquery can still
-        # find them. The subquery cannot be evaluated against in-session objects,
-        # so skip session synchronization.
-        session.execute(
-            delete(CommentMention)
-            .where(
-                CommentMention.tenant_id == tenant_id,
-                CommentMention.comment_id.in_(audit_ids),
-            )
-            .execution_options(synchronize_session=False)
-        )
-        session.execute(
-            delete(AlertAudit).where(
-                AlertAudit.tenant_id == tenant_id,
-                AlertAudit.fingerprint == audit_fingerprint,
-            )
-        )
-        session.execute(
-            delete(LastAlertToIncident).where(
-                LastAlertToIncident.tenant_id == tenant_id,
-                LastAlertToIncident.incident_id == incident_id,
-            )
-        )
-        # The legacy `alerttoincident` table has no model in this service; its FK
-        # is ON DELETE CASCADE, and nothing here writes to it.
-        session.execute(
-            delete(IncidentEnrichment).where(
-                IncidentEnrichment.tenant_id == tenant_id,
-                IncidentEnrichment.incident_id == incident_id,
-            )
-        )
-        # Sibling incidents point at this one; clear those references so they
-        # don't dangle (the FKs say SET NULL, which SQLite would skip).
-        session.execute(
-            update(Incident)
-            .where(
-                Incident.tenant_id == tenant_id,
-                Incident.merged_into_incident_id == incident_id,
-            )
-            .values(merged_into_incident_id=None)
-        )
-        session.execute(
-            update(Incident)
-            .where(
-                Incident.tenant_id == tenant_id,
-                Incident.same_incident_in_the_past_id == incident_id,
-            )
-            .values(same_incident_in_the_past_id=None)
-        )
-        result = session.execute(
-            delete(Incident).where(
-                Incident.tenant_id == tenant_id,
-                Incident.id == incident_id,
-            )
-        )
-        session.commit()
-        return result.rowcount > 0
 
 def get_all_alerts_by_fingerprints(
     tenant_id: str, fingerprints: List[str], session: Optional[Session] = None
