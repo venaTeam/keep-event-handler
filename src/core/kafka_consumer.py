@@ -32,6 +32,7 @@ from src.core.metrics import (
     consume_batch_size,
 )
 from src.controllers.event_controller import process_event_sync
+from src.core.tenant_resolution import _resolve_ingestion_tenant
 from src.event_management.process_event_task import record_terminal_error
 from src.models.event_dto import EventDTO
 
@@ -676,6 +677,13 @@ class KafkaEventConsumer(EventConsumer):
         """
         for attempt in range(MAX_PROCESSING_RETRIES):
             try:
+                # Resolve operator -> tenant on every attempt so transient DB
+                # blips are retried rather than dropping the message. Operator
+                # routing was removed from keep-ingestions (no DB dependency)
+                # and is now applied here before processing (VENA-5596 Epic 5).
+                resolved_tenant_id = _resolve_ingestion_tenant(event_dto.event)
+                event_dto.tenant_id = resolved_tenant_id
+                payload["tenant_id"] = resolved_tenant_id
                 process_event_sync(event_dto)
                 return
             except Exception as e:

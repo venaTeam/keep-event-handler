@@ -52,6 +52,7 @@ from src.models.db.rule import Rule
 from src.models.db.incident import Incident, IncidentType, IncidentStatus, IncidentSeverity
 from src.models.incident import IncidentDtoIn, IncidentDto
 from src.models.db.tenant import TenantApiKey, Tenant
+from src.models.db.operator import Operator
 from src.models.alert import AlertStatus, DeduplicationRuleDto, DeduplicationRuleRequestDto
 from src.utils.enrichment_helpers import derive_tracking_fields, javascript_iso_format
 from src.models.db.maintenance_window import MaintenanceWindowRule
@@ -305,6 +306,17 @@ def get_session_sync() -> Session:
     """
     return Session(engine)
 
+
+def get_operator_by_name(operator_name: str) -> Operator | None:
+    """Return the operator whose `name` matches the alert's operator routing key.
+
+    None means the operator is unknown -- callers should fall back to the
+    general tenant (VENA-5596 Epic 5)
+    """
+    with Session(engine) as session:
+        return session.exec(
+            select(Operator).where(Operator.name == operator_name)
+        ).first()
 
 # === Typed user-enrichment columns on LastAlert ===
 # Derived from the LastAlert model (single source of truth) — columns tagged
