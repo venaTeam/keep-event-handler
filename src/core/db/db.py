@@ -1113,6 +1113,30 @@ def get_last_alert_by_fingerprint(
         return session.exec(query).first()
 
 
+def get_last_alert_window_states(
+    tenant_id, fingerprints: list[str], session: Optional[Session] = None
+) -> dict[str, tuple[int | None, str | None]]:
+    """For each fingerprint that has a LastAlert row: its maintenance_window_id
+    and the provider status of its latest occurrence. Used to decide whether a
+    "Hide From Feed" window may hide a new occurrence."""
+    if not fingerprints:
+        return {}
+    with existed_or_new_session(session) as session:
+        query = (
+            select(LastAlert.fingerprint, LastAlert.maintenance_window_id, Alert.status)
+            .join(
+                Alert,
+                and_(Alert.id == LastAlert.alert_id, Alert.tenant_id == LastAlert.tenant_id),
+            )
+            .where(LastAlert.tenant_id == tenant_id)
+            .where(LastAlert.fingerprint.in_(fingerprints))
+        )
+        return {
+            fingerprint: (window_id, status)
+            for fingerprint, window_id, status in session.exec(query).all()
+        }
+
+
 def get_last_alert_hashes_by_fingerprints(
     tenant_id, fingerprints: list[str]
 ) -> dict[str, str | None]:

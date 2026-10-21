@@ -46,7 +46,7 @@ def _window(db_session, suppress=False, ignore_statuses=None, tenant_id=SINGLE_T
     return window
 
 
-def _send(fingerprint, status, minutes, source=SOURCE, notify_client=False):
+def _send(fingerprint, status, minutes, source=SOURCE, notify_client=False, severity="high"):
     ts = datetime.now(UTC) - timedelta(minutes=30) + timedelta(minutes=minutes)
     return process_event(
         ctx={"job_try": 1},
@@ -60,7 +60,7 @@ def _send(fingerprint, status, minutes, source=SOURCE, notify_client=False):
             "name": f"test-{fingerprint}",
             "last_received": ts.isoformat(),
             "status": status.value,
-            "severity": "high",
+            "severity": severity,
             "source": [source],
             "fingerprint": fingerprint,
         },
@@ -114,16 +114,40 @@ def test_alert_outside_the_filter_is_not_tagged(db_session):
     assert _last_alert(db_session, "fp-other").maintenance_window_id is None
 
 
-def test_visible_alert_is_hidden_by_a_new_matching_occurrence(db_session):
-    _send("fp-later", AlertStatus.FIRING, 0)
-    assert _last_alert(db_session, "fp-later").maintenance_window_id is None
+def test_alert_already_firing_stays_visible_when_re_sent(db_session):
+    _send("fp-firing", AlertStatus.FIRING, 0)
+    assert _last_alert(db_session, "fp-firing").maintenance_window_id is None
 
+    _window(db_session)
+    _send("fp-firing", AlertStatus.FIRING, 1, severity="critical")
+
+    assert len(_alerts(db_session, "fp-firing")) == 2
+    assert _last_alert(db_session, "fp-firing").maintenance_window_id is None
+
+
+def test_resolved_alert_firing_again_is_hidden_and_feeds_refetch(db_session):
+    _send("fp-refire", AlertStatus.FIRING, 0)
+    _send("fp-refire", AlertStatus.RESOLVED, 1)
     window = _window(db_session)
-    _send("fp-later", AlertStatus.ACKNOWLEDGED, 1, )  # ignored: stays visible
-    assert _last_alert(db_session, "fp-later").maintenance_window_id is None
-    _send("fp-later", AlertStatus.FIRING, 2)
 
-    assert _last_alert(db_session, "fp-later").maintenance_window_id == window.id
+    with patch("src.event_management.process_event_task._notify_client") as notify:
+        _send("fp-refire", AlertStatus.FIRING, 2, notify_client=True)
+
+    assert _last_alert(db_session, "fp-refire").maintenance_window_id == window.id
+    notify.assert_called_once()
+    assert notify.call_args.kwargs["refetch"] is True
+
+
+def test_hidden_alert_re_sent_stays_hidden(db_session):
+    window = _window(db_session)
+    _send("fp-repeat", AlertStatus.FIRING, 0)
+
+    with patch("src.event_management.process_event_task._notify_client") as notify:
+        _send("fp-repeat", AlertStatus.FIRING, 1, notify_client=True, severity="critical")
+
+    assert len(_alerts(db_session, "fp-repeat")) == 2
+    assert _last_alert(db_session, "fp-repeat").maintenance_window_id == window.id
+    notify.assert_not_called()
 
 
 def test_suppress_window_is_unchanged(db_session):
@@ -164,18 +188,53 @@ def test_hidden_alerts_are_not_correlated_or_notified(db_session):
     notify.assert_not_called()
 
 
-def test_visible_alerts_in_a_mixed_batch_are_still_notified(db_session):
+def test_mixed_batch_of_one_fingerprint(db_session):
+    """One batch holding a hidden and a visible occurrence of the same
+    fingerprint: the reason the hidden set is keyed by id(event)."""
     _window(db_session)
+    now = datetime.now(UTC)
+    batch = [
+        AlertDto(
+            id=f"mixed-{status}",
+            name="mixed",
+            status=status,
+            severity="high",
+            lastReceived=(now + timedelta(seconds=offset)).isoformat(),
+            source=[SOURCE],
+            fingerprint="fp-mixed",
+            labels={},
+        )
+        for offset, status in [(0, AlertStatus.FIRING), (1, AlertStatus.RESOLVED)]
+    ]
 
-    with patch(
-        "src.event_management.process_event_task._notify_client"
-    ) as notify:
-        _send("fp-mixed-hidden", AlertStatus.FIRING, 0, notify_client=True)
-        _send("fp-mixed-visible", AlertStatus.FIRING, 0, source="other-source", notify_client=True)
+    with patch("src.event_management.process_event_task._notify_client") as notify:
+        process_event(
+            ctx={"job_try": 1},
+            trace_id="test",
+            tenant_id=SINGLE_TENANT_UUID,
+            provider_id="test",
+            provider_type=SOURCE,
+            fingerprint=None,
+            api_key_name="test",
+            event=batch,
+            notify_client=True,
+        )
 
-    assert notify.call_count == 1
+    alerts = _alerts(db_session, "fp-mixed")
+    assert sorted(a.status for a in alerts) == ["firing", "resolved"]
+    # The resolved occurrence is the latest and no window matches it.
+    assert _last_alert(db_session, "fp-mixed").maintenance_window_id is None
     pushed = notify.call_args.args[2]
-    assert [a["fingerprint"] for a in pushed] == ["fp-mixed-visible"]
+    assert [(a["fingerprint"], a["status"]) for a in pushed] == [("fp-mixed", "resolved")]
+
+
+def test_refetch_signal_survives_coalescing():
+    import src.event_management.process_event_task as pet
+
+    merged = pet._merge_coalesced_data({"alerts": [{"fingerprint": "a"}]}, {})
+    assert merged == {}
+    merged = pet._merge_coalesced_data({}, {"alerts": [{"fingerprint": "b"}]})
+    assert merged == {}
 
 
 @pytest.fixture

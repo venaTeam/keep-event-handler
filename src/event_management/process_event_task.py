@@ -37,6 +37,7 @@ from src.core.db.db import (
     enrich_alerts_with_incidents,
     get_last_alert_by_fingerprint,
     get_last_alert_hashes_by_fingerprints,
+    get_last_alert_window_states,
     last_alert_enrichments_dict,
     get_provider_by_name,
     get_session_sync,
@@ -166,6 +167,11 @@ def _merge_coalesced_data(old_data, new_data):
     latest value."""
     if not isinstance(old_data, dict) or not isinstance(new_data, dict):
         return new_data
+    if old_data == {} or new_data == {}:
+        # An empty payload means "refetch everything", which already covers
+        # any listed alerts; merging a list into it would turn it into a
+        # local prepend in the UI and lose the refetch.
+        return {}
     merged = dict(old_data)
     for field, new_val in new_data.items():
         old_val = merged.get(field)
@@ -240,11 +246,21 @@ def _submit_notify(api_url, tenant_id, event, data):
         )
 
 
-def _notify_client(api_url, tenant_id, alerts_payload, incidents, notification_cache):
+def _notify_client(
+    api_url, tenant_id, alerts_payload, incidents, notification_cache, refetch=False
+):
     """Queue the notifications the UI reacts to for a processed batch: `poll-alerts`
     with an immutable snapshot of the alerts, and `incident-change` when incidents
     were touched. Both go through the notify pool, off the consumer thread."""
-    _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
+    # `refetch` sends an empty payload, the UI's "refetch alerts" signal, used
+    # when an alert on screen must disappear (e.g. hidden by a maintenance
+    # window); a listed payload is only ever prepended.
+    _submit_notify(
+        api_url,
+        tenant_id,
+        "poll-alerts",
+        {} if refetch else {"alerts": alerts_payload},
+    )
     if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
         incident_ids = [str(incident.id) for incident in incidents]
         _submit_notify(
@@ -1069,6 +1085,45 @@ def __save_to_db(
         raise
 
 
+def __keep_visible_alerts_visible(
+    tenant_id,
+    session: Session,
+    formatted_events: list[AlertDto],
+    hidden_window_ids: dict[int, int],
+    active_hide_window_ids: set[int],
+) -> bool:
+    """A "Hide From Feed" window only hides an alert that is new, or that was
+    resolved before this occurrence. An alert already on screen and unresolved
+    stays visible with its updates, rather than disappearing mid-incident.
+
+    Removes such events from `hidden_window_ids` in place. Returns True when an
+    alert that was on screen (resolved) becomes hidden, so open feeds must
+    refetch to drop it.
+    """
+    previous = get_last_alert_window_states(
+        tenant_id,
+        list(
+            {e.fingerprint for e in formatted_events if id(e) in hidden_window_ids}
+        ),
+        session=session,
+    )
+    newly_hidden = False
+    for event in formatted_events:
+        if id(event) not in hidden_window_ids:
+            continue
+        state = previous.get(event.fingerprint)
+        if state is None:
+            continue  # first occurrence: hide
+        previous_window_id, previous_status = state
+        if previous_window_id in active_hide_window_ids:
+            continue  # already hidden by an active window
+        if previous_status != AlertStatus.RESOLVED.value:
+            del hidden_window_ids[id(event)]
+        else:
+            newly_hidden = True
+    return newly_hidden
+
+
 def __handle_formatted_events(
     tenant_id,
     provider_type,
@@ -1109,6 +1164,7 @@ def __handle_formatted_events(
     # id(event), not fingerprint: one batch can hold a hidden and a visible
     # occurrence of the same fingerprint.
     hidden_window_ids: dict[int, int] = {}
+    newly_hidden = False
     if KEEP_MAINTENANCE_WINDOWS_ENABLED:
         with tracer.start_as_current_span("process_event_maintenance_windows_check"):
             maintenance_windows_bl = MaintenanceWindowsBl(
@@ -1119,6 +1175,18 @@ def __handle_formatted_events(
                     window_id = maintenance_windows_bl.get_hiding_window_id(event)
                     if window_id is not None:
                         hidden_window_ids[id(event)] = window_id
+                if hidden_window_ids:
+                    newly_hidden = __keep_visible_alerts_visible(
+                        tenant_id,
+                        session,
+                        formatted_events,
+                        hidden_window_ids,
+                        {
+                            rule.id
+                            for rule in maintenance_windows_bl.maintenance_rules
+                            if not rule.suppress
+                        },
+                    )
             else:
                 logger.debug(
                     "No maintenance windows configured for this tenant",
@@ -1301,7 +1369,12 @@ def __handle_formatted_events(
     with tracer.start_as_current_span("process_event_notify_client"):
         if not notify_client:
             return
-        if hidden_events and not enriched_formatted_events and not incidents:
+        if (
+            hidden_events
+            and not enriched_formatted_events
+            and not incidents
+            and not newly_hidden
+        ):
             logger.info(
                 "All alerts in the batch are hidden by maintenance windows, not notifying",
                 extra={"tenant_id": tenant_id},
@@ -1315,6 +1388,7 @@ def __handle_formatted_events(
             [alert.dict() for alert in enriched_formatted_events],
             incidents,
             get_notification_cache(),
+            refetch=newly_hidden,
         )
     return enriched_formatted_events + hidden_events
 

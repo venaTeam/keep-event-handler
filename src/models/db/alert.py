@@ -341,8 +341,8 @@ class LastAlert(SQLModel, table=True):
     # Id of the "Hide From Feed" window that matched the latest occurrence, or
     # NULL. Written by the event-handler on every occurrence; the feed hides the
     # row only while that window is active. No FK: a deleted window leaves a
-    # dangling id, which reads as visible. Cleared by the keep-workflows watcher
-    # once the window is no longer active.
+    # dangling id, which reads as visible. Never cleared when the window ends:
+    # visibility is decided at read time by the gateway.
     maintenance_window_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
 
     __table_args__ = (
