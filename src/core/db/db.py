@@ -1188,6 +1188,7 @@ def set_last_alert(
     session: Optional[Session] = None,
     max_retries=3,
     tracking: Optional[dict] = None,
+    maintenance_window_id: Optional[int] = None,
 ) -> Optional[LastAlert]:
     """Create or repoint the LastAlert row for a fingerprint.
 
@@ -1200,6 +1201,10 @@ def set_last_alert(
     to a concurrent occurrence of the same fingerprint. Status/dismiss clearing
     on re-fire/resolve also happens here (replacing the old dispose/
     make-permanent enrichment dance).
+
+    `maintenance_window_id` is the "Hide From Feed" window that matched this
+    occurrence, or None. It is written on every newer occurrence, including
+    None, so an occurrence no window matches makes the alert visible again.
 
     Returns the LastAlert row as written, so callers can read the derived
     values (and the user-enrichment columns) back without re-querying.
@@ -1251,6 +1256,7 @@ def set_last_alert(
                     last_alert.timestamp = alert.timestamp
                     last_alert.alert_id = alert.id
                     last_alert.alert_hash = alert.alert_hash
+                    last_alert.maintenance_window_id = maintenance_window_id
 
                     _apply_tracking_columns(
                         last_alert,
@@ -1274,6 +1280,7 @@ def set_last_alert(
                         first_timestamp=alert.timestamp,
                         alert_id=alert.id,
                         alert_hash=alert.alert_hash,
+                        maintenance_window_id=maintenance_window_id,
                     )
                     _apply_tracking_columns(
                         new_last_alert,

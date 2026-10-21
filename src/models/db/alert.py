@@ -337,6 +337,14 @@ class LastAlert(SQLModel, table=True):
         default=None, sa_column=Column(String(255), nullable=True, info={"tracking": True})
     )
 
+    # === Maintenance window ===
+    # Id of the "Hide From Feed" window that matched the latest occurrence, or
+    # NULL. Written by the event-handler on every occurrence; the feed hides the
+    # row only while that window is active. No FK: a deleted window leaves a
+    # dangling id, which reads as visible. Cleared by the keep-workflows watcher
+    # once the window is no longer active.
+    maintenance_window_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+
     __table_args__ = (
         # Original indexes from MySQL
         Index("idx_lastalert_tenant_timestamp", "tenant_id", "first_timestamp"),

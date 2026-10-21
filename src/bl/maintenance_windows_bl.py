@@ -72,6 +72,15 @@ class MaintenanceWindowsBl:
         self.close()
 
     def check_if_alert_in_maintenance_windows(self, alert: AlertDto) -> bool:
+        """Whether a "Hide From Feed" window matches the alert."""
+        return self.get_hiding_window_id(alert) is not None
+
+    def get_hiding_window_id(self, alert: AlertDto) -> int | None:
+        """Id of the active "Hide From Feed" window matching the alert, or None.
+
+        A matching "Show in Suppressed Status" window lets the alert through with
+        its status overridden and returns None. Either match writes an audit entry.
+        """
         extra = {"tenant_id": self.tenant_id, "fingerprint": alert.fingerprint}
 
         if not self.maintenance_rules:
@@ -79,7 +88,7 @@ class MaintenanceWindowsBl:
                 "No maintenance window rules for this tenant",
                 extra={"tenant_id": self.tenant_id},
             )
-            return False
+            return None
 
         self.logger.info("Checking maintenance window for alert", extra=extra)
         env = celpy.Environment()
@@ -147,11 +156,11 @@ class MaintenanceWindowsBl:
                         alert.status = AlertStatus.MAINTENANCE.value
                     else:
                         alert.status = AlertStatus.SUPPRESSED.value
-                    return False
+                    return None
 
-                return True
+                return maintenance_rule.id
         self.logger.info("Alert is not in maintenance window", extra=extra)
-        return False
+        return None
 
     @staticmethod
     def evaluate_cel(
