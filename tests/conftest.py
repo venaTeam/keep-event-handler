@@ -36,6 +36,7 @@ from src.core.elastic import ElasticClient
 from src.models.alert import AlertStatus
 from src.models.db.alert import *
 from src.models.db.maintenance_window import MaintenanceWindowRule
+from src.models.db.operator import Operator
 from src.models.db.provider import *
 from src.models.db.rule import *
 from src.models.db.tenant import *
