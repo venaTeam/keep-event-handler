@@ -20,6 +20,7 @@ from sqlmodel import Session, select
 # internals
 from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
 from src.bl.automations.publish_matches import publish_matches
+from src.bl.automations.errors import AutomationStampError
 from src.bl.automations.producer import MatchedPublishError
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
@@ -251,6 +252,38 @@ def _notify_client(api_url, tenant_id, alerts_payload, incidents, notification_c
         _submit_notify(
             api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
         )
+
+
+def _submit_preset_notify(api_url, tenant_id, alerts_payload):
+    """Run preset filtering off the consumer thread using immutable snapshots."""
+    try:
+        _sse_pool.submit(_run_preset_filter, api_url, tenant_id, alerts_payload)
+    except Exception:
+        logger.warning(
+            "SSE preset notify submit failed",
+            extra={"event": "poll-presets", "tenant_id": tenant_id},
+        )
+
+
+def _run_preset_filter(api_url, tenant_id, alerts_payload):
+    try:
+        alerts = [AlertDto(**alert_dict) for alert_dict in alerts_payload]
+        notification_cache = get_notification_cache()
+        presets = get_all_presets_dtos(tenant_id)
+        rules_engine = RulesEngine(tenant_id=tenant_id)
+        matching_presets = []
+        for preset_dto in presets:
+            if rules_engine.filter_alerts(alerts, preset_dto.cel_query):
+                matching_presets.append(preset_dto)
+        if notification_cache.should_notify(tenant_id, "poll-presets"):
+            _submit_notify(
+                api_url,
+                tenant_id,
+                "poll-presets",
+                {"preset_names": [preset.name.lower() for preset in matching_presets]},
+            )
+    except Exception:
+        logger.exception("Failed to send presets via SSE", extra={"tenant_id": tenant_id})
 
 
 def shutdown_sse_pool(wait: bool = True):
@@ -1746,7 +1779,7 @@ def process_event(
         # Standalone Kafka uses an empty context. Delivery failure must reach
         # its offset gate, without becoming a terminal error alert. ARQ keeps
         # the existing error recording and Retry behavior below.
-        if isinstance(e, MatchedPublishError) and not ctx:
+        if isinstance(e, (MatchedPublishError, AutomationStampError)) and not ctx:
             raise
         error_type = type(e).__name__
         error_message = str(e)
