@@ -27,6 +27,7 @@ from src.config.consts import (
     KAFKA_CONSUMER_BATCH_TIMEOUT_SECONDS,
 )
 from src.core.consumer_health import ConsumerPhase, consumer_health
+from src.core.tenant_resolution import _resolve_ingestion_tenant
 from src.core.metrics import (
     events_in_counter,
     events_out_counter,
@@ -796,6 +797,11 @@ class KafkaEventConsumer(EventConsumer):
         """
         for attempt in range(MAX_PROCESSING_RETRIES):
             try:
+                # Resolve operator -> tenant on every attempt so transient DB
+                # failures are retried instead of routing to a stale tenant.
+                resolved_tenant_id = _resolve_ingestion_tenant(event_dto.event)
+                event_dto.tenant_id = resolved_tenant_id
+                payload["tenant_id"] = resolved_tenant_id
                 from src.bl.automations.producer import delivery_budget
                 token = delivery_budget.set(budget)
                 try:
