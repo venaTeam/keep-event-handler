@@ -107,6 +107,11 @@ continue polling while NotReady. Repeated unchanged readiness warnings are limit
 to once per minute. Monitor `keep_automation_matched_dlq_total` and
 `keep_automation_matched_dlq_ready` alongside main delivery metrics.
 
+Readiness recovery uses Kafka metadata health and does not write synthetic
+records to the DLQ. This confirms broker/topic connectivity, not DLQ write
+authorization; actual DLQ delivery failures remain exposed through
+`keep_automation_matched_dlq_ready`, metrics, and logs.
+
 Known cross-service contract issue: the sibling automation consumer currently
 reads `alert.history_id`, whereas B5 emits `alert.id`. These are not safely
 interchangeable: alert `id` can be generated/provider-supplied and persistence

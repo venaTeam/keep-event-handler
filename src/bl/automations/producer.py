@@ -416,17 +416,22 @@ class MatchedProducer:
         if not self._dlq_lock.acquire(blocking=False):
             return
         try:
-            metadata = self._get_dlq().list_topics(timeout=settings.read_matched_publish_timeout_seconds())
+            client = self._get_dlq()
+            metadata = client.list_topics(timeout=settings.read_matched_publish_timeout_seconds())
             topic = getattr(metadata, 'topics', {}).get(self._dlq_topic)
             if topic is None or getattr(topic, 'error', None):
                 raise MatchedPublishError('DLQ metadata unavailable')
-            # Metadata cannot clear an earlier delivery failure.
-            if not self._dlq_delivery_failed:
-                self._dlq_healthy = True
-                self._dlq_error = None
+            # Readiness is a Kafka connectivity signal. A metadata check cannot
+            # prove write authorization, but retaining an old DLQ delivery
+            # failure forever would make readiness sticky after Kafka recovers.
+            self._dlq_healthy = True
+            self._dlq_delivery_failed = False
+            self._dlq_error = None
         except Exception as error:
             self._dlq_healthy = False
-            self._dlq_error = type(error).__name__ + ': DLQ metadata unavailable'
+            self._dlq_error = getattr(error, "detail", None) or (
+                type(error).__name__ + ': DLQ health check failed'
+            )
         finally:
             automation_matched_dlq_ready.set(int(self._dlq_healthy))
             self._dlq_lock.release()
