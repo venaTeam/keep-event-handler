@@ -344,6 +344,18 @@ class LastAlert(SQLModel, table=True):
     # dangling id, which reads as visible. Never cleared when the window ends:
     # visibility is decided at read time by the gateway.
     maintenance_window_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    # Freeze of an alert already on screen when a "Hide From Feed" window
+    # matches its new occurrences: the row keeps pointing at the pre-window
+    # occurrence and the latest one is held back here until the window stops
+    # being active (see fold_held_back_occurrence). Holding something back iff
+    # maintenance_pending_firing_count IS NOT NULL (0 = duplicates only).
+    # maintenance_frozen_window_id NULL while holding = released, catch up now.
+    maintenance_frozen_window_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    maintenance_pending_alert_id: UUID | None = Field(default=None, nullable=True)
+    maintenance_pending_last_received: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    maintenance_pending_firing_count: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
 
     __table_args__ = (
         # Original indexes from MySQL
