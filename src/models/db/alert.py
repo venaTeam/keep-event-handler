@@ -337,6 +337,26 @@ class LastAlert(SQLModel, table=True):
         default=None, sa_column=Column(String(255), nullable=True, info={"tracking": True})
     )
 
+    # === Maintenance window ===
+    # Id of the "Hide From Feed" window that matched the latest occurrence, or
+    # NULL. Written by the event-handler on every occurrence; the feed hides the
+    # row only while that window is active. No FK: a deleted window leaves a
+    # dangling id, which reads as visible. Never cleared when the window ends:
+    # visibility is decided at read time by the gateway.
+    maintenance_window_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    # Freeze of an alert already on screen when a "Hide From Feed" window
+    # matches its new occurrences: the row keeps pointing at the pre-window
+    # occurrence and the latest one is held back here until the window stops
+    # being active (see fold_held_back_occurrence). Holding something back iff
+    # maintenance_pending_firing_count IS NOT NULL (0 = duplicates only).
+    # maintenance_frozen_window_id NULL while holding = released, catch up now.
+    maintenance_frozen_window_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    maintenance_pending_alert_id: UUID | None = Field(default=None, nullable=True)
+    maintenance_pending_last_received: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    maintenance_pending_firing_count: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+
     __table_args__ = (
         # Original indexes from MySQL
         Index("idx_lastalert_tenant_timestamp", "tenant_id", "first_timestamp"),
@@ -362,6 +382,30 @@ class IncidentEnrichment(SQLModel, table=True):
 
     class Config:
         arbitrary_types_allowed = True
+
+class LastAlertMaintenanceWindow(SQLModel, table=True):
+    """Every active "Hide From Feed" window matching a lastalert row's current
+    occurrence, one row per (alert, window, kind). kind 'hide': the feed
+    excludes the row while any of them is active. kind 'freeze': the row is
+    caught up once none is. LastAlert.maintenance_window_id and
+    maintenance_frozen_window_id are the markers: NULL = no tags of that kind,
+    so untagged rows never read this table; readers count the marker's own
+    window as a tag too. No foreign keys, like the markers: writers replace a
+    row's tags whenever they set its marker (set_maintenance_window_tags)."""
+
+    tenant_id: str = Field(primary_key=True)
+    fingerprint: str = Field(primary_key=True)
+    kind: str = Field(sa_column=Column(String(10), primary_key=True))
+    maintenance_window_id: int = Field(primary_key=True)
+
+    __table_args__ = (
+        Index(
+            "ix_lastalertmaintenancewindow_tenant_window",
+            "tenant_id",
+            "maintenance_window_id",
+        ),
+    )
+
 
 class LastAlertToIncident(SQLModel, table=True):
     tenant_id: str = Field(foreign_key="tenant.id", nullable=False, primary_key=True)

@@ -35,11 +35,16 @@ from src.core.db.db import (
     apply_dismiss_lifecycle,
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
+    fold_held_back_occurrence,
     get_last_alert_by_fingerprint,
     get_last_alert_hashes_by_fingerprints,
+    get_last_alert_window_states,
     last_alert_enrichments_dict,
     get_provider_by_name,
     get_session_sync,
+    hold_back_occurrence,
+    MAINTENANCE_TAG_HIDE,
+    set_maintenance_window_tags,
     get_started_at_for_alerts,
     set_last_alert,
 )
@@ -166,6 +171,11 @@ def _merge_coalesced_data(old_data, new_data):
     latest value."""
     if not isinstance(old_data, dict) or not isinstance(new_data, dict):
         return new_data
+    if old_data == {} or new_data == {}:
+        # An empty payload means "refetch everything", which already covers
+        # any listed alerts; merging a list into it would turn it into a
+        # local prepend in the UI and lose the refetch.
+        return {}
     merged = dict(old_data)
     for field, new_val in new_data.items():
         old_val = merged.get(field)
@@ -394,7 +404,21 @@ def __save_to_db(
     deduplicated_events: list[AlertDto],
     provider_id: str | None = None,
     timestamp_forced: datetime.datetime | None = None,
+    hidden_window_ids: dict[int, list[int]] | None = None,
+    frozen_window_ids: dict[int, list[int]] | None = None,
 ):
+    """`hidden_window_ids` maps id(event) to the "Hide From Feed" windows that
+    matched it, the one that ends last first. They are written to its LastAlert
+    row (set_maintenance_window_tags), and the returned (enriched) event
+    objects are added to the map so the caller can keep them out of
+    correlation and client notifications.
+
+    `frozen_window_ids` does the same for occurrences of an alert already on
+    screen that such a window matched: they are stored in history, but their
+    LastAlert row keeps showing the pre-window occurrence and holds them back
+    (hold_back_occurrence) until the window stops being active."""
+    hidden_window_ids = {} if hidden_window_ids is None else hidden_window_ids
+    frozen_window_ids = {} if frozen_window_ids is None else frozen_window_ids
     logger.info(
         "Starting __save_to_db",
         extra={
@@ -447,13 +471,23 @@ def __save_to_db(
                         "last_received": event.last_received,
                     },
                 )
+                last_received = event.last_received
+                if isinstance(last_received, str):
+                    last_received = dateutil.parser.isoparse(last_received)
+                frozen_windows = frozen_window_ids.get(id(event))
+                if frozen_windows and hold_back_occurrence(
+                    tenant_id,
+                    event.fingerprint,
+                    frozen_windows,
+                    last_received,
+                    session,
+                ):
+                    continue
                 last_alert = get_last_alert_by_fingerprint(
                     tenant_id, event.fingerprint, session=session, for_update=True
                 )
                 if last_alert:
-                    last_received = event.last_received
-                    if isinstance(last_received, str):
-                        last_received = dateutil.parser.isoparse(last_received)
+                    fold_held_back_occurrence(last_alert, session)
                     last_alert.last_received = last_received
                     # Auto-undismiss / dispose even though this occurrence was
                     # deduplicated. Guard on a newer timestamp, like
@@ -462,6 +496,12 @@ def __save_to_db(
                         tzinfo=datetime.timezone.utc
                     ) < last_received.replace(tzinfo=datetime.timezone.utc):
                         apply_dismiss_lifecycle(last_alert, event.status)
+                        set_maintenance_window_tags(
+                            session,
+                            last_alert,
+                            MAINTENANCE_TAG_HIDE,
+                            hidden_window_ids.get(id(event), []),
+                        )
                     session.add(last_alert)
                     session.flush()
                 else:
@@ -553,6 +593,9 @@ def __save_to_db(
                 },
             )
             formatted_event.pushed = True
+            # Read before the extraction rules, which may replace the object.
+            hidden_windows = hidden_window_ids.get(id(formatted_event), [])
+            frozen_windows = frozen_window_ids.get(id(formatted_event), [])
 
             started_at = started_at_for_fingerprints.get(
                 formatted_event.fingerprint, None
@@ -802,9 +845,24 @@ def __save_to_db(
                         else None,
                     },
                 )
-                last_alert = set_last_alert(
-                    tenant_id, alert, session=session, tracking=tracking
-                )
+                last_alert = None
+                if frozen_windows:
+                    last_alert = hold_back_occurrence(
+                        tenant_id,
+                        alert.fingerprint,
+                        frozen_windows,
+                        last_received_val,
+                        session,
+                        alert=alert,
+                    )
+                if last_alert is None:
+                    last_alert = set_last_alert(
+                        tenant_id,
+                        alert,
+                        session=session,
+                        tracking=tracking,
+                        maintenance_window_ids=hidden_windows,
+                    )
                 if last_alert is not None:
                     formatted_event.firing_start_time = last_alert.firing_start_time
                     formatted_event.firing_start_time_since_last_resolved = (
@@ -904,6 +962,10 @@ def __save_to_db(
                     },
                 )
             enriched_formatted_events.append(formatted_event)
+            if hidden_windows:
+                hidden_window_ids[id(formatted_event)] = hidden_windows
+            if frozen_windows:
+                frozen_window_ids[id(formatted_event)] = frozen_windows
             logger.debug(
                 "Completed processing formatted event",
                 extra={
@@ -1052,6 +1114,43 @@ def __save_to_db(
         raise
 
 
+def __freeze_alerts_on_screen(
+    tenant_id,
+    session: Session,
+    formatted_events: list[AlertDto],
+    hidden_window_ids: dict[int, list[int]],
+    frozen_window_ids: dict[int, list[int]],
+    active_hide_window_ids: set[int],
+) -> None:
+    """A "Hide From Feed" window only hides an alert that is not on screen
+    yet: its first occurrence, or one that is still hidden by an active
+    window. An alert already on screen, whatever its status (resolved
+    included), stays visible rather than disappearing, but frozen: the feed
+    keeps showing its pre-window occurrence until the window stops being
+    active, and then catches up to the latest one. An occurrence the window
+    does not match (e.g. a status in its ignore_statuses) updates it at once.
+
+    Moves such events from `hidden_window_ids` to `frozen_window_ids` in place.
+    """
+    previous = get_last_alert_window_states(
+        tenant_id,
+        list(
+            {e.fingerprint for e in formatted_events if id(e) in hidden_window_ids}
+        ),
+        session=session,
+    )
+    for event in formatted_events:
+        if id(event) not in hidden_window_ids:
+            continue
+        state = previous.get(event.fingerprint)
+        if state is None:
+            continue  # first occurrence: hide
+        previous_windows, _ = state
+        if previous_windows & active_hide_window_ids:
+            continue  # already hidden by an active window
+        frozen_window_ids[id(event)] = hidden_window_ids.pop(id(event))
+
+
 def __handle_formatted_events(
     tenant_id,
     provider_type,
@@ -1086,33 +1185,42 @@ def __handle_formatted_events(
         },
     )
 
-    # first, check for maintenance windows
+    # first, check for maintenance windows. Events matched by a "Hide From Feed"
+    # window are stored like any other, tagged with the window's id; the
+    # gateway's feed query hides them while that window is active. Keyed by
+    # id(event), not fingerprint: one batch can hold a hidden and a visible
+    # occurrence of the same fingerprint. Occurrences of an alert already on
+    # screen go to frozen_window_ids instead (see __freeze_alerts_on_screen).
+    hidden_window_ids: dict[int, list[int]] = {}
+    frozen_window_ids: dict[int, list[int]] = {}
     if KEEP_MAINTENANCE_WINDOWS_ENABLED:
         with tracer.start_as_current_span("process_event_maintenance_windows_check"):
             maintenance_windows_bl = MaintenanceWindowsBl(
                 tenant_id=tenant_id, session=session
             )
             if maintenance_windows_bl.maintenance_rules:
-                formatted_events = [
-                    event
-                    for event in formatted_events
-                    if maintenance_windows_bl.check_if_alert_in_maintenance_windows(
-                        event
+                for event in formatted_events:
+                    window_ids = maintenance_windows_bl.get_hiding_window_ids(event)
+                    if window_ids:
+                        hidden_window_ids[id(event)] = window_ids
+                if hidden_window_ids:
+                    __freeze_alerts_on_screen(
+                        tenant_id,
+                        session,
+                        formatted_events,
+                        hidden_window_ids,
+                        frozen_window_ids,
+                        {
+                            rule.id
+                            for rule in maintenance_windows_bl.maintenance_rules
+                            if not rule.suppress
+                        },
                     )
-                    is False
-                ]
             else:
                 logger.debug(
                     "No maintenance windows configured for this tenant",
                     extra={"tenant_id": tenant_id},
                 )
-
-            if not formatted_events:
-                logger.info(
-                    "No alerts to process after running maintenance windows check",
-                    extra={"tenant_id": tenant_id},
-                )
-                return
 
     with tracer.start_as_current_span("process_event_deduplication"):
         # second, filter out any deduplicated events
@@ -1165,6 +1273,8 @@ def __handle_formatted_events(
             deduplicated_events,
             provider_id,
             timestamp_forced,
+            hidden_window_ids,
+            frozen_window_ids,
         )
 
     # let's save all fields to the DB so that we can use them in the future such in deduplication fields suggestions
@@ -1231,6 +1341,21 @@ def __handle_formatted_events(
                     )
                     continue
 
+    # Hidden and frozen events stay silent while their window is active: no
+    # correlation, no push to open feeds. They are still returned as processed.
+    hidden_events = [
+        event
+        for event in enriched_formatted_events
+        if id(event) in hidden_window_ids or id(event) in frozen_window_ids
+    ]
+    if hidden_events:
+        enriched_formatted_events = [
+            event
+            for event in enriched_formatted_events
+            if id(event) not in hidden_window_ids
+            and id(event) not in frozen_window_ids
+        ]
+
     if MAINTENANCE_WINDOW_ALERT_STRATEGY == "recover_previous_status":
         ignored_events = list(
             filter(
@@ -1277,6 +1402,12 @@ def __handle_formatted_events(
     with tracer.start_as_current_span("process_event_notify_client"):
         if not notify_client:
             return
+        if hidden_events and not enriched_formatted_events and not incidents:
+            logger.info(
+                "All alerts in the batch are hidden or frozen by maintenance windows, not notifying",
+                extra={"tenant_id": tenant_id},
+            )
+            return hidden_events
         api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
         logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
         _notify_client(
@@ -1286,7 +1417,7 @@ def __handle_formatted_events(
             incidents,
             get_notification_cache(),
         )
-    return enriched_formatted_events
+    return enriched_formatted_events + hidden_events
 
 
 @processing_time_summary.time()
