@@ -234,17 +234,40 @@ def test_resolve_during_the_window_is_shown_at_once(db_session):
     assert last_alert.maintenance_window_id is None
 
 
-def test_resolved_alert_firing_again_is_hidden_and_feeds_refetch(db_session):
+def test_resolved_alert_firing_again_is_frozen_not_hidden(db_session):
+    """A resolved alert on screen stays on screen, still resolved, when it
+    fires again into a window; it catches up when the window stops."""
     _send("fp-refire", AlertStatus.FIRING, 0)
     _send("fp-refire", AlertStatus.RESOLVED, 1)
+    shown_alert_id = _last_alert(db_session, "fp-refire").alert_id
     window = _window(db_session)
 
     with patch("src.event_management.process_event_task._notify_client") as notify:
         _send("fp-refire", AlertStatus.FIRING, 2, notify_client=True)
 
-    assert _last_alert(db_session, "fp-refire").maintenance_window_id == window.id
-    notify.assert_called_once()
-    assert notify.call_args.kwargs["refetch"] is True
+    last_alert = _last_alert(db_session, "fp-refire")
+    assert last_alert.maintenance_window_id is None
+    assert last_alert.alert_id == shown_alert_id
+    assert _alert_by_id(db_session, last_alert.alert_id).status == AlertStatus.RESOLVED.value
+    assert last_alert.maintenance_frozen_window_id == window.id
+    assert last_alert.maintenance_pending_firing_count == 1
+    notify.assert_not_called()
+
+
+def test_allowed_status_updates_a_frozen_resolved_alert_at_once(db_session):
+    """Only an occurrence the window does not match (a status in its
+    ignore_statuses) updates the frozen alert during the window."""
+    _send("fp-allowed", AlertStatus.FIRING, 0)
+    _send("fp-allowed", AlertStatus.RESOLVED, 1)
+    _window(db_session)
+    _send("fp-allowed", AlertStatus.FIRING, 2, severity="critical")
+    _send("fp-allowed", AlertStatus.ACKNOWLEDGED, 3)  # an ignored status
+
+    last_alert = _last_alert(db_session, "fp-allowed")
+    shown = _alert_by_id(db_session, last_alert.alert_id)
+    assert shown.status == AlertStatus.ACKNOWLEDGED.value
+    assert last_alert.maintenance_pending_firing_count is None
+    assert last_alert.maintenance_frozen_window_id is None
 
 
 def test_hidden_alert_re_sent_stays_hidden(db_session):

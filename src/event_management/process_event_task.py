@@ -250,21 +250,11 @@ def _submit_notify(api_url, tenant_id, event, data):
         )
 
 
-def _notify_client(
-    api_url, tenant_id, alerts_payload, incidents, notification_cache, refetch=False
-):
+def _notify_client(api_url, tenant_id, alerts_payload, incidents, notification_cache):
     """Queue the notifications the UI reacts to for a processed batch: `poll-alerts`
     with an immutable snapshot of the alerts, and `incident-change` when incidents
     were touched. Both go through the notify pool, off the consumer thread."""
-    # `refetch` sends an empty payload, the UI's "refetch alerts" signal, used
-    # when an alert on screen must disappear (e.g. hidden by a maintenance
-    # window); a listed payload is only ever prepended.
-    _submit_notify(
-        api_url,
-        tenant_id,
-        "poll-alerts",
-        {} if refetch else {"alerts": alerts_payload},
-    )
+    _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
     if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
         incident_ids = [str(incident.id) for incident in incidents]
         _submit_notify(
@@ -1131,16 +1121,16 @@ def __freeze_alerts_on_screen(
     hidden_window_ids: dict[int, list[int]],
     frozen_window_ids: dict[int, list[int]],
     active_hide_window_ids: set[int],
-) -> bool:
-    """A "Hide From Feed" window only hides an alert that is new, or that was
-    resolved before this occurrence. An alert already on screen and unresolved
-    stays visible rather than disappearing mid-incident, but frozen: the feed
+) -> None:
+    """A "Hide From Feed" window only hides an alert that is not on screen
+    yet: its first occurrence, or one that is still hidden by an active
+    window. An alert already on screen, whatever its status (resolved
+    included), stays visible rather than disappearing, but frozen: the feed
     keeps showing its pre-window occurrence until the window stops being
-    active, and then catches up to the latest one.
+    active, and then catches up to the latest one. An occurrence the window
+    does not match (e.g. a status in its ignore_statuses) updates it at once.
 
     Moves such events from `hidden_window_ids` to `frozen_window_ids` in place.
-    Returns True when an alert that was on screen (resolved) becomes hidden, so
-    open feeds must refetch to drop it.
     """
     previous = get_last_alert_window_states(
         tenant_id,
@@ -1149,21 +1139,16 @@ def __freeze_alerts_on_screen(
         ),
         session=session,
     )
-    newly_hidden = False
     for event in formatted_events:
         if id(event) not in hidden_window_ids:
             continue
         state = previous.get(event.fingerprint)
         if state is None:
             continue  # first occurrence: hide
-        previous_windows, previous_status = state
+        previous_windows, _ = state
         if previous_windows & active_hide_window_ids:
             continue  # already hidden by an active window
-        if previous_status != AlertStatus.RESOLVED.value:
-            frozen_window_ids[id(event)] = hidden_window_ids.pop(id(event))
-        else:
-            newly_hidden = True
-    return newly_hidden
+        frozen_window_ids[id(event)] = hidden_window_ids.pop(id(event))
 
 
 def __handle_formatted_events(
@@ -1208,7 +1193,6 @@ def __handle_formatted_events(
     # screen go to frozen_window_ids instead (see __freeze_alerts_on_screen).
     hidden_window_ids: dict[int, list[int]] = {}
     frozen_window_ids: dict[int, list[int]] = {}
-    newly_hidden = False
     if KEEP_MAINTENANCE_WINDOWS_ENABLED:
         with tracer.start_as_current_span("process_event_maintenance_windows_check"):
             maintenance_windows_bl = MaintenanceWindowsBl(
@@ -1220,7 +1204,7 @@ def __handle_formatted_events(
                     if window_ids:
                         hidden_window_ids[id(event)] = window_ids
                 if hidden_window_ids:
-                    newly_hidden = __freeze_alerts_on_screen(
+                    __freeze_alerts_on_screen(
                         tenant_id,
                         session,
                         formatted_events,
@@ -1418,12 +1402,7 @@ def __handle_formatted_events(
     with tracer.start_as_current_span("process_event_notify_client"):
         if not notify_client:
             return
-        if (
-            hidden_events
-            and not enriched_formatted_events
-            and not incidents
-            and not newly_hidden
-        ):
+        if hidden_events and not enriched_formatted_events and not incidents:
             logger.info(
                 "All alerts in the batch are hidden or frozen by maintenance windows, not notifying",
                 extra={"tenant_id": tenant_id},
@@ -1437,7 +1416,6 @@ def __handle_formatted_events(
             [alert.dict() for alert in enriched_formatted_events],
             incidents,
             get_notification_cache(),
-            refetch=newly_hidden,
         )
     return enriched_formatted_events + hidden_events
 
