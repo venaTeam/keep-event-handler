@@ -383,6 +383,30 @@ class IncidentEnrichment(SQLModel, table=True):
     class Config:
         arbitrary_types_allowed = True
 
+class LastAlertMaintenanceWindow(SQLModel, table=True):
+    """Every active "Hide From Feed" window matching a lastalert row's current
+    occurrence, one row per (alert, window, kind). kind 'hide': the feed
+    excludes the row while any of them is active. kind 'freeze': the row is
+    caught up once none is. LastAlert.maintenance_window_id and
+    maintenance_frozen_window_id are the markers: NULL = no tags of that kind,
+    so untagged rows never read this table; readers count the marker's own
+    window as a tag too. No foreign keys, like the markers: writers replace a
+    row's tags whenever they set its marker (set_maintenance_window_tags)."""
+
+    tenant_id: str = Field(primary_key=True)
+    fingerprint: str = Field(primary_key=True)
+    kind: str = Field(sa_column=Column(String(10), primary_key=True))
+    maintenance_window_id: int = Field(primary_key=True)
+
+    __table_args__ = (
+        Index(
+            "ix_lastalertmaintenancewindow_tenant_window",
+            "tenant_id",
+            "maintenance_window_id",
+        ),
+    )
+
+
 class LastAlertToIncident(SQLModel, table=True):
     tenant_id: str = Field(foreign_key="tenant.id", nullable=False, primary_key=True)
     timestamp: datetime = Field(default_factory=datetime.utcnow)

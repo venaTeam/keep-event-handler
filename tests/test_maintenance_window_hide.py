@@ -401,3 +401,159 @@ def test_bl_returns_none_for_a_suppress_window(mock_session):
 def test_bl_returns_none_for_an_ignored_status(mock_session):
     bl = _bl_with(mock_session, _rule(suppress=False))
     assert bl.get_hiding_window_id(_dto(AlertStatus.RESOLVED)) is None
+
+
+# --------------------------------------------------------------------------- #
+# Several windows matching one alert
+# --------------------------------------------------------------------------- #
+
+
+def _timed_window(db_session, name, ends_in_hours, suppress=False):
+    window = _window(db_session, suppress=suppress)
+    window.name = name
+    window.end_time = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=ends_in_hours)
+    db_session.add(window)
+    db_session.commit()
+    db_session.refresh(window)
+    return window
+
+
+def _tags(db_session, fingerprint):
+    from src.models.db.alert import LastAlertMaintenanceWindow
+
+    db_session.expire_all()
+    rows = db_session.exec(
+        select(LastAlertMaintenanceWindow).where(
+            LastAlertMaintenanceWindow.fingerprint == fingerprint
+        )
+    ).all()
+    return sorted((row.kind, row.maintenance_window_id) for row in rows)
+
+
+@pytest.mark.parametrize("created_first", ["shorter", "longer"])
+def test_overlapping_windows_tag_every_window_and_mark_the_one_ending_last(
+    db_session, created_first
+):
+    """SegevSi's review: A ends at +1h, B at +2h, both match. The row must
+    stay hidden until B ends, whichever window was loaded first."""
+    if created_first == "shorter":
+        a = _timed_window(db_session, "A", 1)
+        b = _timed_window(db_session, "B", 2)
+    else:
+        b = _timed_window(db_session, "B", 2)
+        a = _timed_window(db_session, "A", 1)
+
+    _send("fp-overlap", AlertStatus.FIRING, 0)
+
+    last_alert = _last_alert(db_session, "fp-overlap")
+    assert last_alert.maintenance_window_id == b.id
+    assert _tags(db_session, "fp-overlap") == sorted([("hide", a.id), ("hide", b.id)])
+    audits = db_session.exec(
+        select(AlertAudit.description).where(
+            AlertAudit.fingerprint == "fp-overlap",
+            AlertAudit.action == ActionType.MAINTENANCE.value,
+        )
+    ).all()
+    assert sorted(audits) == [
+        "Alert in maintenance due to rule `A`",
+        "Alert in maintenance due to rule `B`",
+    ]
+
+
+def test_hide_wins_over_suppress(db_session):
+    _timed_window(db_session, "S", 2, suppress=True)
+    hide = _timed_window(db_session, "H", 1)
+
+    _send("fp-both", AlertStatus.FIRING, 0)
+
+    alerts = _alerts(db_session, "fp-both")
+    assert [a.status for a in alerts] == [AlertStatus.FIRING.value]
+    assert _last_alert(db_session, "fp-both").maintenance_window_id == hide.id
+    assert _tags(db_session, "fp-both") == [("hide", hide.id)]
+    audits = db_session.exec(
+        select(AlertAudit.description).where(
+            AlertAudit.fingerprint == "fp-both",
+            AlertAudit.action == ActionType.MAINTENANCE.value,
+        )
+    ).all()
+    assert audits == ["Alert in maintenance due to rule `H`"]
+
+
+def test_alert_stays_hidden_while_any_of_its_windows_is_active(db_session):
+    """Hidden by A and B; B (the marker) is disabled. A new occurrence only A
+    matches is still hidden, not frozen: A is one of the row's windows."""
+    a = _timed_window(db_session, "A", 1)
+    b = _timed_window(db_session, "B", 2)
+    _send("fp-any", AlertStatus.FIRING, 0)
+
+    b.enabled = False
+    db_session.add(b)
+    db_session.commit()
+    _send("fp-any", AlertStatus.FIRING, 1, severity="critical")
+
+    last_alert = _last_alert(db_session, "fp-any")
+    assert last_alert.maintenance_window_id == a.id
+    assert last_alert.maintenance_frozen_window_id is None
+    assert _tags(db_session, "fp-any") == [("hide", a.id)]
+
+
+def test_frozen_alert_is_tagged_with_every_matching_window(db_session):
+    _send("fp-freeze-two", AlertStatus.FIRING, 0)
+    a = _timed_window(db_session, "A", 1)
+    b = _timed_window(db_session, "B", 2)
+
+    _send("fp-freeze-two", AlertStatus.FIRING, 1, severity="critical")
+
+    last_alert = _last_alert(db_session, "fp-freeze-two")
+    assert last_alert.maintenance_window_id is None
+    assert last_alert.maintenance_frozen_window_id == b.id
+    assert _tags(db_session, "fp-freeze-two") == sorted(
+        [("freeze", a.id), ("freeze", b.id)]
+    )
+
+
+def test_occurrence_no_window_matches_clears_the_tags(db_session):
+    _timed_window(db_session, "A", 1)
+    _timed_window(db_session, "B", 2)
+    _send("fp-clear", AlertStatus.FIRING, 0)
+
+    _send("fp-clear", AlertStatus.RESOLVED, 1)  # resolved is an ignored status
+
+    assert _last_alert(db_session, "fp-clear").maintenance_window_id is None
+    assert _tags(db_session, "fp-clear") == []
+
+
+def test_catch_up_clears_the_freeze_tags(db_session):
+    from src.core.db.db import fold_held_back_occurrence
+
+    _send("fp-fold-tags", AlertStatus.FIRING, 0)
+    _timed_window(db_session, "A", 1)
+    _timed_window(db_session, "B", 2)
+    _send("fp-fold-tags", AlertStatus.FIRING, 1, severity="critical")
+
+    last_alert = get_last_alert_by_fingerprint(
+        SINGLE_TENANT_UUID, "fp-fold-tags", session=db_session, for_update=True
+    )
+    assert fold_held_back_occurrence(last_alert, db_session) is True
+    db_session.commit()
+
+    assert _last_alert(db_session, "fp-fold-tags").maintenance_frozen_window_id is None
+    assert _tags(db_session, "fp-fold-tags") == []
+
+
+def test_bl_orders_windows_by_end_time_then_id(mock_session):
+    early = _rule(suppress=False)
+    late = _rule(suppress=False)
+    late.id = 8
+    late.end_time = early.end_time + timedelta(hours=1)
+    tie = _rule(suppress=False)
+    tie.id = 3
+    tie.end_time = late.end_time
+    mock_session.query.return_value.filter.return_value.filter.return_value.filter.return_value.filter.return_value.all.return_value = [
+        early,
+        late,
+        tie,
+    ]
+    bl = MaintenanceWindowsBl(tenant_id="test-tenant", session=mock_session)
+
+    assert bl.get_hiding_window_ids(_dto()) == [3, 8, 7]
