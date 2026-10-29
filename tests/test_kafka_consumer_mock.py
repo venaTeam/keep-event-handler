@@ -91,7 +91,7 @@ def test_consume_loop_retries_then_terminal_commit():
             mock_process.side_effect = Exception("Processing Error")
 
             with patch("src.core.kafka_consumer.MAX_PROCESSING_RETRIES", 3):
-                with patch("src.core.kafka_consumer.record_terminal_error") as mock_terminal:
+                with patch.object(KafkaEventConsumer, "_record_terminal", return_value=True) as mock_terminal:
                     with patch("src.core.kafka_consumer.time.sleep"):
                         consumer = KafkaEventConsumer()
                         consumer._consumer = mock_consumer_instance
@@ -139,7 +139,7 @@ def test_process_message_json_decode_error():
     budget = RetryBudget(max_poll_interval_ms=300000)
 
     with patch("src.core.kafka_consumer.events_error_counter") as mock_error_counter:
-        with patch("src.core.kafka_consumer.record_terminal_error") as mock_terminal:
+        with patch.object(KafkaEventConsumer, "_record_terminal", return_value=True) as mock_terminal:
             # Should not raise - returns True (commit past malformed message).
             result = consumer._process_message(mock_msg, budget)
             assert result is True

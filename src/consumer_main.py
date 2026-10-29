@@ -317,6 +317,13 @@ def main():
         _stop_trigger_index_safely()
         _stop_matched_producer_safely()
 
+        try:
+            from src.core.dlq_producer import close as close_dlq_producer
+
+            close_dlq_producer()
+        except Exception:
+            logger.exception("Failed to flush DLQ producer")
+
         # Flush any pending SSE notifications queued on the background pool so
         # they aren't lost on a graceful shutdown of the standalone consumer.
         try:
