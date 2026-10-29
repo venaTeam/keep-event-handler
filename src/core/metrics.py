@@ -40,6 +40,15 @@ events_error_counter = Counter(
     f"{METRIC_PREFIX}events_error_total",
     "Total number of events with error",
 )
+
+# Terminal failures successfully diverted to the DLQ topic. With alertraw
+# removed, 'Terminal failure lost' log lines + this counter are the only
+# signals on failed diverts (see docs/deploy/dlq-replay.md).
+dlq_diverted_total = Counter(
+    f"{METRIC_PREFIX}dlq_diverted_total",
+    "Terminal failures diverted to the DLQ topic",
+    labelnames=["reason"],
+)
 processing_time_summary = Summary(
     f"{METRIC_PREFIX}processing_time_seconds",
     "Average time spent processing events",
