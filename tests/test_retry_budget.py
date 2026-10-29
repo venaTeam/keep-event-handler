@@ -142,7 +142,7 @@ def test_poison_never_retries_and_records_terminal():
     with patch("src.core.kafka_consumer.MAX_PROCESSING_RETRIES", 3):
         with patch("src.core.kafka_consumer.process_event_sync") as mock_process:
             mock_process.side_effect = _http_error(400)  # poison
-            with patch.object(KafkaEventConsumer, "_record_terminal") as mock_terminal:
+            with patch.object(KafkaEventConsumer, "_record_terminal", return_value=True) as mock_terminal:
                 consumer._process_with_retries(MagicMock(), budget, payload)
 
     # Poison: tried exactly once, no retry.
@@ -158,7 +158,7 @@ def test_transient_retries_then_terminal_at_cap():
     with patch("src.core.kafka_consumer.MAX_PROCESSING_RETRIES", 3):
         with patch("src.core.kafka_consumer.process_event_sync") as mock_process:
             mock_process.side_effect = _http_error(503)  # transient
-            with patch.object(KafkaEventConsumer, "_record_terminal") as mock_terminal:
+            with patch.object(KafkaEventConsumer, "_record_terminal", return_value=True) as mock_terminal:
                 with patch("src.core.kafka_consumer.time.sleep"):
                     consumer._process_with_retries(MagicMock(), budget, payload)
 
@@ -182,7 +182,7 @@ def test_budget_exhaustion_routes_to_terminal_not_another_retry():
     with patch("src.core.kafka_consumer.MAX_PROCESSING_RETRIES", 5):
         with patch("src.core.kafka_consumer.process_event_sync") as mock_process:
             mock_process.side_effect = _http_error(503)  # transient
-            with patch.object(KafkaEventConsumer, "_record_terminal") as mock_terminal:
+            with patch.object(KafkaEventConsumer, "_record_terminal", return_value=True) as mock_terminal:
                 with patch("src.core.kafka_consumer.time.sleep") as mock_sleep:
                     clock[0] = 1.0  # past the 0.8s budget
                     consumer._process_with_retries(MagicMock(), budget, payload)
@@ -200,7 +200,7 @@ def test_success_does_not_record_terminal():
 
     with patch("src.core.kafka_consumer.process_event_sync") as mock_process:
         mock_process.return_value = None
-        with patch.object(KafkaEventConsumer, "_record_terminal") as mock_terminal:
+        with patch.object(KafkaEventConsumer, "_record_terminal", return_value=True) as mock_terminal:
             consumer._process_with_retries(MagicMock(), budget, payload)
 
     assert mock_process.call_count == 1

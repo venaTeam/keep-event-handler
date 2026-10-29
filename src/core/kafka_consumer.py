@@ -706,12 +706,11 @@ class KafkaEventConsumer(EventConsumer):
         except json.JSONDecodeError as e:
             self.logger.error(f"Failed to decode message (poison): {e}")
             events_error_counter.inc()
-            self._record_terminal(
+            return self._record_terminal(
                 payload={"raw": raw_text} if raw_text is not None else None,
                 error=e,
                 reason="malformed",
             )
-            return True  # commit past the malformed message
 
         trace_id = payload.get("trace_id", "unknown")
         self.logger.debug(f"Processing message: {trace_id}")
@@ -737,8 +736,7 @@ class KafkaEventConsumer(EventConsumer):
                     f"Invalid event payload (poison, trace_id={trace_id}): {e}"
                 )
                 events_error_counter.inc()
-                self._record_terminal(payload=payload, error=e, reason="poison")
-                return True
+                return self._record_terminal(payload=payload, error=e, reason="poison")
 
             # Process with bounded, batch-wide retries and timing.
             with processing_time_summary.time():
@@ -753,7 +751,8 @@ class KafkaEventConsumer(EventConsumer):
 
             if resolved is False:
                 self.logger.warning(
-                    "Raw record left uncommitted after matched delivery failure "
+                    "Raw record left uncommitted after a matched delivery or "
+                    "terminal record failure "
                     "(topic=%s, partition=%s, offset=%s, trace_id=%s)",
                     msg.topic(), msg.partition(), msg.offset(), trace_id,
                     extra={
@@ -782,20 +781,16 @@ class KafkaEventConsumer(EventConsumer):
                 f"Unexpected error processing message (trace_id={trace_id}): {e}"
             )
             events_error_counter.inc()
-            try:
-                self._record_terminal(payload=payload, error=e, reason="unexpected")
-            except Exception:
-                self.logger.exception("Terminal recording failed; not committing")
-                return False
-            return True
+            return self._record_terminal(payload=payload, error=e, reason="unexpected")
 
     def _process_with_retries(
         self, event_dto: EventDTO, budget: "RetryBudget", payload: dict
     ) -> bool | None:
         """Process an event with bounded, batch-wide retry.
 
-        True means processed; False means unresolved (do not commit); None
-        means terminally handled (commit allowed). Matched delivery retries
+        True means processed or terminally recorded (commit allowed); False
+        means unresolved, including a terminal record that couldn't be written
+        (do not commit). Matched delivery retries
         happen inside the producer; exhaustion never repeats database work.
 
         A poison error is never retried. A transient error retries up to
@@ -836,8 +831,7 @@ class KafkaEventConsumer(EventConsumer):
                     self.logger.error(
                         "Poison message — recording and committing (no retry)"
                     )
-                    self._record_terminal(payload=payload, error=e, reason="poison")
-                    return
+                    return self._record_terminal(payload=payload, error=e, reason="poison")
 
                 # transient
                 if budget.shutting_down():
@@ -852,20 +846,18 @@ class KafkaEventConsumer(EventConsumer):
                     self.logger.error(
                         "Retries exhausted (attempt cap) — recording and committing"
                     )
-                    self._record_terminal(
+                    return self._record_terminal(
                         payload=payload, error=e, reason="attempt_cap"
                     )
-                    return
 
                 if budget.exhausted():
                     self.logger.error(
                         "Retry budget exhausted (poll-interval guard) — "
                         "recording and committing"
                     )
-                    self._record_terminal(
+                    return self._record_terminal(
                         payload=payload, error=e, reason="budget_exhausted"
                     )
-                    return
 
                 budget.sleep_for(attempt)
 
@@ -877,20 +869,34 @@ class KafkaEventConsumer(EventConsumer):
                         "shutdown during retry; leaving the message unresolved"
                     ) from e
 
-    def _record_terminal(self, payload, error: Exception, reason: str):
-        """Terminal sink for a poison / retry-exhausted message.
+    def _record_terminal(self, payload, error: Exception, reason: str) -> bool:
+        """Terminal sink for a poison / retry-exhausted message. Returns True
+        when the message may be committed, False when it must be processed again.
 
-        The sink is the DLQ topic — same AppChi envelope as keep-ingestions'
-        _send_to_dlq, consumed by keep-reconciler for re-ingestion (see
-        docs/deploy/dlq-replay.md). alertraw is removed: there is no DB
-        fallback, so a failed divert loses the event and logs it inline.
-        Best-effort: never raises into the consume loop.
+        - Flag off: the previous alertraw path, always committed, so deploying
+          this changes nothing until KEEP_HANDLER_DLQ_ENABLED is turned on.
+        - Flag on: the DLQ topic, consumed by keep-reconciler (see
+          docs/deploy/dlq-replay.md). A failed write returns False rather than
+          losing the event: the record is rewound and replayed with backoff.
         """
         tenant_id = payload.get("tenant_id") if isinstance(payload, dict) else None
         provider_type = (
             payload.get("provider_type") if isinstance(payload, dict) else None
         )
         error_message = f"{type(error).__name__}: {error}"
+
+        if not KEEP_HANDLER_DLQ_ENABLED:
+            try:
+                record_terminal_error(
+                    tenant_id=tenant_id,
+                    provider_type=provider_type,
+                    raw_event=payload,
+                    error_message=error_message,
+                )
+            except Exception:
+                self.logger.exception("Failed to record terminal error for poison message")
+            return True
+
         try:
             # Storm-guard only what fails the same way on every replay: a poison
             # flood must not fill the DLQ topic. Outage failures (attempt cap,
@@ -910,34 +916,30 @@ class KafkaEventConsumer(EventConsumer):
                         "reason": reason,
                     },
                 )
-                return
+                return True
 
-            if KEEP_HANDLER_DLQ_ENABLED and produce_to_dlq(
+            if produce_to_dlq(
                 payload=payload,
                 error=error,
                 tenant_id=tenant_id,
                 provider_type=provider_type,
+                reason=reason,
             ):
                 dlq_diverted_total.labels(reason=reason).inc()
-                return
+                return True
 
-            # Flag off, store-guarded-out, or divert failed: log the loss inline
-            # so the payload is greppable. No DB fallback (alertraw removed).
             self.logger.error(
-                "Terminal failure lost "
-                f"({'dlq_divert_flag_off' if not KEEP_HANDLER_DLQ_ENABLED else 'produce_failed'})",
+                "DLQ divert failed; leaving the message uncommitted to retry",
                 extra={
                     "tenant_id": tenant_id,
                     "provider_type": provider_type,
                     "reason": reason,
-                    "payload": payload,  # keep.inline: greppable recovery
                     "error": error_message,
                 },
             )
         except Exception:
-            # Be defensive: the consume loop must never die on terminal
-            # recording. The message is still committed by every caller.
-            self.logger.exception("Failed to record terminal error for poison message")
+            self.logger.exception("Terminal recording failed; leaving the message uncommitted")
+        return False
 
     def stop(self):
         """Stop the consumer gracefully."""

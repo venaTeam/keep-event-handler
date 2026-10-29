@@ -91,31 +91,52 @@ class TestRecordTerminal:
         sink.guard.assert_called_once()
         sink.produce.assert_not_called()
 
-    def test_flag_off_logs_loss_without_producing(self, consumer, sink, monkeypatch):
+    def test_flag_off_keeps_the_alertraw_path(self, consumer, sink, monkeypatch):
+        """With the flag off nothing changes: the old alertraw write, committed."""
         monkeypatch.setattr(kafka_consumer, "KEEP_HANDLER_DLQ_ENABLED", False)
+        alertraw = MagicMock()
+        monkeypatch.setattr(kafka_consumer, "record_terminal_error", alertraw)
 
-        consumer._record_terminal(PAYLOAD, ValueError("boom"), reason="attempt_cap")
+        assert consumer._record_terminal(PAYLOAD, ValueError("boom"), reason="attempt_cap") is True
 
         sink.produce.assert_not_called()
-        message = consumer.logger.error.call_args.args[0]
-        assert "Terminal failure lost" in message
-        assert "dlq_divert_flag_off" in message
-        extra = consumer.logger.error.call_args.kwargs["extra"]
-        assert extra["payload"] is PAYLOAD
-        assert extra["reason"] == "attempt_cap"
+        alertraw.assert_called_once_with(
+            tenant_id="t1",
+            provider_type="grafana",
+            raw_event=PAYLOAD,
+            error_message="ValueError: boom",
+        )
 
-    def test_failed_divert_logs_loss(self, consumer, sink):
+    def test_flag_off_alertraw_failure_still_commits(self, consumer, sink, monkeypatch):
+        monkeypatch.setattr(kafka_consumer, "KEEP_HANDLER_DLQ_ENABLED", False)
+        monkeypatch.setattr(
+            kafka_consumer, "record_terminal_error", MagicMock(side_effect=RuntimeError("db"))
+        )
+
+        assert consumer._record_terminal(PAYLOAD, ValueError("boom"), reason="poison") is True
+
+    def test_successful_divert_commits(self, consumer, sink):
+        assert consumer._record_terminal(PAYLOAD, ValueError("boom"), reason="poison") is True
+        assert sink.produce.call_args.kwargs["reason"] == "poison"
+
+    def test_failed_divert_is_not_committed(self, consumer, sink):
+        """With the flag on, a DLQ write that fails must not lose the event:
+        the caller leaves it uncommitted so it is processed again."""
         sink.produce.return_value = False
 
-        consumer._record_terminal(PAYLOAD, ValueError("boom"), reason="poison")
+        assert consumer._record_terminal(PAYLOAD, ValueError("boom"), reason="attempt_cap") is False
 
         sink.diverted.labels.assert_not_called()
-        assert "produce_failed" in consumer.logger.error.call_args.args[0]
+        assert "uncommitted" in consumer.logger.error.call_args.args[0]
+
+    def test_storm_guarded_poison_is_committed(self, consumer, sink):
+        sink.guard.return_value = False
+        assert consumer._record_terminal(PAYLOAD, ValueError("bad"), reason="poison") is True
 
     def test_never_raises(self, consumer, sink):
         sink.produce.side_effect = RuntimeError("unexpected")
 
-        consumer._record_terminal(PAYLOAD, ValueError("boom"), reason="poison")
+        assert consumer._record_terminal(PAYLOAD, ValueError("boom"), reason="poison") is False
 
         consumer.logger.exception.assert_called_once()
 
@@ -162,7 +183,7 @@ class TestReasons:
     def test_malformed_json(self, consumer):
         msg = MagicMock()
         msg.value.return_value = b"not json"
-        with patch.object(KafkaEventConsumer, "_record_terminal") as terminal:
+        with patch.object(KafkaEventConsumer, "_record_terminal", return_value=True) as terminal:
             assert consumer._process_message(msg, RetryBudget(max_poll_interval_ms=300000)) is True
         assert terminal.call_args.kwargs["reason"] == "malformed"
         assert terminal.call_args.kwargs["payload"] == {"raw": "not json"}
@@ -186,3 +207,62 @@ def _validation_error():
         Model(x="nope")
     except Exception as e:
         return e
+
+
+class TestCommitDecision:
+    """`_process_message` commits exactly when the terminal record was written."""
+
+    def _message(self, value: bytes):
+        msg = MagicMock()
+        msg.value.return_value = value
+        return msg
+
+    @pytest.mark.parametrize("written", [True, False])
+    def test_malformed(self, consumer, written):
+        with patch.object(KafkaEventConsumer, "_record_terminal", return_value=written):
+            result = consumer._process_message(
+                self._message(b"not json"), RetryBudget(max_poll_interval_ms=300000)
+            )
+        assert result is written
+
+    @pytest.mark.parametrize("written", [True, False])
+    def test_retry_exhausted(self, consumer, written):
+        msg = self._message(b'{"event": {"name": "x"}, "tenant_id": "t1"}')
+        with patch.object(KafkaEventConsumer, "_record_terminal", return_value=written):
+            with patch.object(kafka_consumer, "process_event_sync", side_effect=_http_error(503)):
+                with patch.object(kafka_consumer, "_resolve_ingestion_tenant", return_value="t1"):
+                    with patch.object(kafka_consumer, "MAX_PROCESSING_RETRIES", 1):
+                        result = consumer._process_message(
+                            msg, RetryBudget(max_poll_interval_ms=300000)
+                        )
+        assert result is written
+
+    def test_success(self, consumer):
+        msg = self._message(b'{"event": {"name": "x"}, "tenant_id": "t1"}')
+        with patch.object(kafka_consumer, "process_event_sync"):
+            with patch.object(kafka_consumer, "_resolve_ingestion_tenant", return_value="t1"):
+                assert consumer._process_message(msg, RetryBudget(max_poll_interval_ms=300000)) is True
+
+
+def test_failed_dlq_write_rewinds_and_pauses_the_partition(sink):
+    """A terminal failure whose DLQ write fails goes down the same unresolved
+    path as any other: rewound, paused with backoff, not committed."""
+    sink.produce.return_value = False
+    kafka = MagicMock()
+    with patch.object(kafka_consumer, "Consumer", return_value=kafka):
+        consumer = KafkaEventConsumer()
+    consumer._consumer = kafka
+
+    msg = MagicMock()
+    msg.value.return_value = b"not json"  # malformed -> terminal right away
+    msg.topic.return_value = "keep-events"
+    msg.partition.return_value = 0
+    msg.offset.return_value = 7
+
+    consumer._process_batch([msg], RetryBudget(max_poll_interval_ms=300000))
+
+    kafka.commit.assert_not_called()
+    rewound = kafka.seek.call_args.args[0]
+    assert (rewound.topic, rewound.partition, rewound.offset) == ("keep-events", 0, 7)
+    kafka.pause.assert_called_once()
+    assert ("keep-events", 0) in consumer._replay_due
