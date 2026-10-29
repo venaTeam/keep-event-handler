@@ -19,6 +19,9 @@ from sqlmodel import Session, select
 
 # internals
 from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
+from src.bl.automations.publish_matches import publish_matches
+from src.bl.automations.errors import AutomationStampError
+from src.bl.automations.producer import MatchedPublishError
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
@@ -86,9 +89,7 @@ from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 
 # Background pool that delivers SSE notifications off the Kafka consumer thread.
-# It also performs the remaining consumer-thread notify work — alert
-# serialization and the per-preset CEL filtering loop — so none of it runs on
-# the consumer hot path.
+# Alert snapshots are prepared on the consumer thread before submission.
 # SSE_NOTIFY_WORKERS=1 (default) keeps notifications strictly FIFO-ordered; raising
 # it speeds up delivery when the gateway is slow, at the cost of strict ordering
 # (safe here: the UI dedups poll-alerts by fingerprint; other events are idempotent).
@@ -245,12 +246,45 @@ def _notify_client(api_url, tenant_id, alerts_payload, incidents, notification_c
     """Queue the notifications the UI reacts to for a processed batch: `poll-alerts`
     with an immutable snapshot of the alerts, and `incident-change` when incidents
     were touched. Both go through the notify pool, off the consumer thread."""
-    _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
+    if alerts_payload:
+        _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
     if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
         incident_ids = [str(incident.id) for incident in incidents]
         _submit_notify(
             api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
         )
+
+
+def _submit_preset_notify(api_url, tenant_id, alerts_payload):
+    """Run preset filtering off the consumer thread using immutable snapshots."""
+    try:
+        _sse_pool.submit(_run_preset_filter, api_url, tenant_id, alerts_payload)
+    except Exception:
+        logger.warning(
+            "SSE preset notify submit failed",
+            extra={"event": "poll-presets", "tenant_id": tenant_id},
+        )
+
+
+def _run_preset_filter(api_url, tenant_id, alerts_payload):
+    try:
+        alerts = [AlertDto(**alert_dict) for alert_dict in alerts_payload]
+        notification_cache = get_notification_cache()
+        presets = get_all_presets_dtos(tenant_id)
+        rules_engine = RulesEngine(tenant_id=tenant_id)
+        matching_presets = []
+        for preset_dto in presets:
+            if rules_engine.filter_alerts(alerts, preset_dto.cel_query):
+                matching_presets.append(preset_dto)
+        if notification_cache.should_notify(tenant_id, "poll-presets"):
+            _submit_notify(
+                api_url,
+                tenant_id,
+                "poll-presets",
+                {"preset_names": [preset.name.lower() for preset in matching_presets]},
+            )
+    except Exception:
+        logger.exception("Failed to send presets via SSE", extra={"tenant_id": tenant_id})
 
 
 def shutdown_sse_pool(wait: bool = True):
@@ -1191,6 +1225,10 @@ def __handle_formatted_events(
                 event, deduplication_rules, last_alerts_fingerprint_to_hash
             )
 
+        # Persistence dedup may remove a raw redelivery. B5 must still see it,
+        # preserving the stable upstream alert id in the matched message.
+        automation_events = list(formatted_events)
+
         # filter out the deduplicated events
         deduplicated_events = list(
             filter(lambda event: event.is_full_duplicate, formatted_events)
@@ -1335,18 +1373,29 @@ def __handle_formatted_events(
     if MAINTENANCE_WINDOW_ALERT_STRATEGY == "recover_previous_status":
         enriched_formatted_events.extend(ignored_events)
 
-    with tracer.start_as_current_span("process_event_notify_client"):
-        if not notify_client:
-            return
-        api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
-        logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
-        _notify_client(
-            api_url,
-            tenant_id,
-            [alert.dict() for alert in enriched_formatted_events],
-            incidents,
-            get_notification_cache(),
-        )
+    if notify_client and (enriched_formatted_events or incidents):
+        try:
+            with tracer.start_as_current_span("process_event_notify_client"):
+                api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
+                logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
+                _notify_client(
+                    api_url,
+                    tenant_id,
+                    [alert.dict() for alert in enriched_formatted_events],
+                    incidents,
+                    get_notification_cache(),
+                )
+        except Exception as error:
+            logger.warning(
+                "Failed to schedule alert notifications; continuing matched publishing "
+                "(tenant_id=%s, error_type=%s)",
+                tenant_id, type(error).__name__,
+            )
+
+    # Finish indexing, correlation, and notification scheduling before waiting
+    # on matched Kafka. Include persistence duplicates for raw redelivery.
+    # Delivery failures still propagate to the raw-offset gate.
+    publish_matches(tenant_id, automation_events)
     return enriched_formatted_events
 
 
@@ -1365,8 +1414,10 @@ def process_event(
     notify_client: bool = True,
     timestamp_forced: datetime.datetime | None = None,
     provider_name: str | None = None,
+    received_at: str | None = None,
 ) -> list[Alert]:
     start_time = time.time()
+    received_at = received_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
     job_id = ctx.get("job_id")
 
     extra_dict = {
@@ -1712,6 +1763,12 @@ def process_event(
                 event = [event]
                 raw_event = [raw_event]
 
+            # Provider parsing is complete. Preserve supplied firing times,
+            # including invalid values for existing validation to handle.
+            for alert in event:
+                if alert.time_created is None:
+                    alert.time_created = received_at
+
             with tracer.start_as_current_span("process_event_internal_preparation"):
                 logger.debug(
                     "Running internal preparation",
@@ -1780,6 +1837,11 @@ def process_event(
             )
             return []
     except Exception as e:
+        # Standalone Kafka uses an empty context. Delivery failure must reach
+        # its offset gate, without becoming a terminal error alert. ARQ keeps
+        # the existing error recording and Retry behavior below.
+        if isinstance(e, (MatchedPublishError, AutomationStampError)) and not ctx:
+            raise
         error_type = type(e).__name__
         error_message = str(e)
         stacktrace = traceback.format_exc()
