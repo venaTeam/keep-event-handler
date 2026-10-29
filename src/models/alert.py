@@ -328,7 +328,7 @@ class AlertDto(BaseModel):
             values["environment"] = AlertEnvironment.PRODUCTION.value
 
         # this is code duplication of enrichment_helpers.py and should be refactored
-        last_received = values.get("last_received", None)
+        last_received = values.get("last_received") or values.get("lastReceived")
         if not last_received:
             last_received = datetime.datetime.now(datetime.timezone.utc).isoformat()
             values["last_received"] = last_received

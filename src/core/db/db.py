@@ -1182,6 +1182,21 @@ def _apply_tracking_columns(
         setattr(row, col_name, value)
 
 
+def _last_alert_is_newer(last_alert: LastAlert, incoming_tracking: dict) -> bool:
+    """True when the stored LastAlert is newer, in event time, than the incoming
+    occurrence, i.e. the incoming one is an out-of-order replay. Equal times
+    still apply, so a resolve stamped like its firing isn't dropped."""
+    stored = last_alert.last_received
+    incoming = incoming_tracking.get("last_received")
+    if stored is None or incoming is None:
+        return False
+    if isinstance(incoming, str):
+        incoming = parse(incoming)
+    return stored.replace(tzinfo=timezone.utc) > incoming.replace(
+        tzinfo=timezone.utc
+    )
+
+
 def set_last_alert(
     tenant_id: str,
     alert: Alert,
@@ -1206,6 +1221,8 @@ def set_last_alert(
     """
     fingerprint = alert.fingerprint
     logger.info(f"Setting last alert for `{fingerprint}`")
+    incoming_tracking = tracking or {}
+    stale_drop_log = {"tenant_id": tenant_id, "fingerprint": fingerprint}
     with existed_or_new_session(session) as session:
         for attempt in range(1, max_retries + 1):
             logger.info(
@@ -1229,7 +1246,33 @@ def set_last_alert(
 
                 # To prevent rare, but possible race condition
                 # For example if older alert failed to process
-                # and retried after new one
+                # and retried after new one — or an out-of-order DLQ replay
+                # (e.g. an old firing re-processed after its resolve already
+                # landed) being processed last and wrongly becoming the
+                # current state. `alert.timestamp` is our insert time, so it
+                # can't detect that ordering; use event-time `last_received`.
+                if last_alert and _last_alert_is_newer(
+                    last_alert, incoming_tracking
+                ):
+                    logger.info(
+                        "Out-of-order occurrence dropped for `%s` (event-time "
+                        "last_received older than stored)",
+                        fingerprint,
+                        extra={
+                            "alert_id": alert.id,
+                            **stale_drop_log,
+                            "incoming_last_received": incoming_tracking[
+                                "last_received"
+                            ],
+                            "stored_last_received": last_alert.last_received,
+                        },
+                    )
+                    # The Alert row itself is already persisted; just don't
+                    # repoint LastAlert to it. Commit to release the row lock,
+                    # and break (not continue) so we don't re-loop the retry
+                    # counter for a dropped event.
+                    session.commit()
+                    break
                 if last_alert and last_alert.timestamp.replace(
                     tzinfo=timezone.utc
                 ) < alert.timestamp.replace(tzinfo=timezone.utc):
