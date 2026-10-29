@@ -150,7 +150,7 @@ class TriggerIndexService:
         # runs per alert against a 1ms p99 budget, and an os.environ lookup on
         # that path would cost more than the probe it guards. A deploy gate does
         # not need to be flippable without a restart.
-        self._enabled = settings.read_index_enabled()
+        self._enabled = settings.read_matching_enabled()
         # Published at construction so match() is legal before start().
         self._index = TriggerIndex.empty()
         self._ready = False
@@ -432,11 +432,11 @@ def start_trigger_index() -> bool:
     global _subscriber
     # Always reported, both ways: this gauge is what keeps "off on purpose"
     # separable from "should be running but isn't".
-    enabled = settings.read_index_enabled()
+    enabled = settings.read_matching_enabled()
     automation_index_enabled.set(1 if enabled else 0)
     if not enabled:
         logger.info(
-            "automations: AUTOMATION_INDEX_ENABLED is off -- no trigger index, "
+            "automations: AUTOMATION_MATCHING_ENABLED is off -- no trigger index, "
             "no reload subscriber, and match() returns no matches"
         )
         return False
