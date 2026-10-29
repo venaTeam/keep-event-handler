@@ -56,7 +56,7 @@ class TestBuildDlqPayload:
             event_type="alert",
         )
         assert payload["alert"] == {"name": "cpu", "fingerprint": "fp-1"}
-        assert payload["error"] == {"message": "ValueError: boom"}
+        assert payload["error"] == {"message": "ValueError: boom", "reason": None}
         assert payload["tenant_id"] == "t1"
         assert payload["provider_type"] == "grafana"
         assert payload["fingerprint"] == "fp-1"
@@ -188,3 +188,9 @@ class TestClose:
 
     def test_noop_without_producer(self):
         close()
+
+
+def test_reason_is_in_the_error(producer):
+    """keep-reconciler decides from it whether a replay can ever succeed."""
+    produce_to_dlq({"event": {"a": 1}}, ValueError("x"), reason="attempt_cap")
+    assert sent_payload(producer)["error"]["reason"] == "attempt_cap"

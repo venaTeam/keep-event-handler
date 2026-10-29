@@ -73,6 +73,7 @@ def _build_dlq_payload(
     event_type: str | None = None,
     trace_id: str | None = None,
     dlq_replay_count: int | None = None,
+    reason: str | None = None,
 ) -> dict:
     """
     AppChi-style envelope — byte-compatible with keep-ingestions'
@@ -92,7 +93,9 @@ def _build_dlq_payload(
         event = {"_unserializable_payload": event}
     return {
         "alert": event,
-        "error": {"message": error_message},
+        # keep-reconciler doesn't replay poison/malformed (they fail the same
+        # way every time) and keeps retrying outage failures.
+        "error": {"message": error_message, "reason": reason},
         "trace_id": trace_id,
         "tenant_id": tenant_id,
         "provider_type": provider_type,
@@ -113,6 +116,7 @@ def produce_to_dlq(
     error: Exception,
     tenant_id: str | None = None,
     provider_type: str | None = None,
+    reason: str | None = None,
 ) -> bool:
     """Divert a failed event to KAFKA_DLQ_TOPIC. Never raises.
 
@@ -144,6 +148,7 @@ def produce_to_dlq(
         event_type=payload.get("event_type") if is_dict else "alert",
         trace_id=payload.get("trace_id") if is_dict else None,
         dlq_replay_count=payload.get("dlq_replay_count") if is_dict else None,
+        reason=reason,
     )
 
     # Payload defect tracking: poison messages may themselves be unserializable.
