@@ -710,6 +710,20 @@ class EnrichmentsBl:
             entity_type=entity_type,
         )
 
+    def stamp_automation_match(self, fingerprint: str, grace_seconds: int) -> None:
+        """Persist coverage atomically; replay must never accept a missing row."""
+        if self.ENRICHMENT_DISABLED:
+            raise RuntimeError("Automation coverage requires enrichment to be enabled")
+        self.enrich_entity(
+            fingerprint,
+            {"automation_matched": True, "grace_seconds": grace_seconds},
+            action_type=ActionType.GENERIC_ENRICH,
+            action_callee="automation-matcher",
+            action_description="Automation coverage matched",
+            audit_enabled=False,
+            require_existing=True,
+        )
+
     def enrich_entity(
         self,
         fingerprint: str | UUID,
@@ -722,6 +736,7 @@ class EnrichmentsBl:
         force=False,
         audit_enabled=True,
         entity_type: str = "alert",
+        require_existing: bool = False,
     ):
         """
         should_exist = False only in mapping where the alert is not yet in elastic
@@ -764,6 +779,7 @@ class EnrichmentsBl:
             audit_enabled=audit_enabled,
             strict=False,
             entity_type=entity_type,
+            require_existing=require_existing,
         )
 
         self.logger.debug(

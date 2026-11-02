@@ -314,6 +314,16 @@ class LastAlert(SQLModel, table=True):
         sa_column=Column(Boolean, nullable=False, server_default="false", info={"enrichable": True}),
     )
 
+    # Persistent fingerprint-level automation coverage (B6), never ingestion tracking.
+    automation_matched: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false", info={"enrichable": True}),
+    )
+    grace_seconds: int | None = Field(
+        default=None,
+        sa_column=Column(Integer, nullable=True, info={"enrichable": True}),
+    )
+
     # === Ticket linkage (assign-ticket modal) ===
     ticket_type: str | None = Field(default=None, sa_column=Column(String(50), nullable=True, info={"enrichable": True}))
     ticket_url: str | None = Field(default=None, sa_column=Column(String(500), nullable=True, info={"enrichable": True}))

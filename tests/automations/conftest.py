@@ -32,7 +32,7 @@ _PROBE_TIMEOUT_SECONDS = 0.25
 def automations_enabled(monkeypatch):
     """These tests exercise the feature switched ON.
 
-    AUTOMATION_INDEX_ENABLED defaults to OFF so the code can ship without
+    AUTOMATION_MATCHING_ENABLED defaults to OFF so the code can ship without
     running (deployment gate), which would otherwise turn every behavioural
     test in this package into an assertion about a no-op. Patched on the
     settings module rather than via the environment because
@@ -43,7 +43,7 @@ def automations_enabled(monkeypatch):
     """
     from src.bl.automations import settings
 
-    monkeypatch.setattr(settings, "AUTOMATION_INDEX_ENABLED", True)
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
 
 
 def _host_port(url: str, default_port: int = 5432) -> tuple[str, int]:

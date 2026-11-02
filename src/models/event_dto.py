@@ -15,6 +15,7 @@ class EventDTO(BaseModel):
     tenant_id: str
     event: Dict[str, Any]
     trace_id: Optional[str] = None
+    received_at: Optional[str] = None
     provider_type: Optional[str] = None
     provider_id: Optional[str] = None
     fingerprint: Optional[str | List[str]] = None
