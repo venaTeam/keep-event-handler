@@ -504,10 +504,8 @@ def __save_to_db(
                     # backwards — and could re-fire dismiss/undismiss
                     # lifecycle on stale state.
                     stored_lr = last_alert.last_received
-                    if (
-                        stored_lr is not None
-                        and stored_lr.replace(tzinfo=datetime.timezone.utc)
-                        > last_received.replace(tzinfo=datetime.timezone.utc)
+                    if _last_alert_is_newer(
+                        last_alert, {"last_received": last_received}
                     ):
                         logger.info(
                             "Out-of-order deduplicated occurrence ignored "

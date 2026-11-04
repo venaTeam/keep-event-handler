@@ -117,3 +117,31 @@ def test_resolve_with_same_time_as_firing_still_applies(db_session):
     _send("fp-same", RESOLVED, T_FIRING)
 
     assert _current_status(db_session, "fp-same") == RESOLVED
+
+
+def test_stored_time_in_a_non_utc_session_is_converted_not_relabelled():
+    """Postgres returns timestamptz in the session's timezone (12:20+02:00 is
+    10:20Z); a later occurrence must not be taken for an older one."""
+    from datetime import timedelta
+
+    from src.core.db.db import _last_alert_is_newer
+    from src.models.db.alert import LastAlert
+
+    stored = LastAlert(
+        last_received=datetime(2026, 11, 4, 12, 20, tzinfo=timezone(timedelta(hours=2)))
+    )
+    later = datetime(2026, 11, 4, 10, 25, tzinfo=timezone.utc)
+    earlier = datetime(2026, 11, 4, 10, 15, tzinfo=timezone.utc)
+
+    assert _last_alert_is_newer(stored, {"last_received": later}) is False
+    assert _last_alert_is_newer(stored, {"last_received": earlier}) is True
+
+
+def test_repeated_alert_with_later_time_updates_last_received(db_session):
+    from datetime import timedelta
+
+    _send("fp-repeat", FIRING, T_FIRING)
+    _send("fp-repeat", FIRING, T_FIRING + timedelta(minutes=5))
+
+    last_alert = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, "fp-repeat")
+    assert _as_utc(last_alert.last_received) == T_FIRING + timedelta(minutes=5)
