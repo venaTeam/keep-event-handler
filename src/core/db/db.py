@@ -1276,8 +1276,11 @@ def _apply_tracking_columns(
 
 
 def _as_utc(value: datetime) -> datetime:
-    """Treat a naive datetime as UTC (SQLite returns naive values)."""
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    # Postgres returns timestamptz in the session's timezone: convert it,
+    # don't relabel it. Naive values are already UTC.
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def hold_back_occurrence(
@@ -1411,9 +1414,7 @@ def _last_alert_is_newer(last_alert: LastAlert, incoming_tracking: dict) -> bool
         return False
     if isinstance(incoming, str):
         incoming = parse(incoming)
-    return stored.replace(tzinfo=timezone.utc) > incoming.replace(
-        tzinfo=timezone.utc
-    )
+    return _as_utc(stored) > _as_utc(incoming)
 
 
 def set_last_alert(
