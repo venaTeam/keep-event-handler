@@ -298,10 +298,13 @@ def test_bad_alert_is_counted_and_valid_siblings_publish(monkeypatch, caplog):
     after = next(s.value for s in metric.collect()[0].samples if s.name.endswith("_total"))
     assert after == before + 1
     assert b"keep_automation_matched_alerts_rejected_total" in generate_latest()
-    assert "alert_index=1" in caplog.text
-    assert "alert_id='event-789'" in caplog.text
-    assert "time_created" in caplog.text
-    assert "do-not-log-this" not in caplog.text
+    rejected = next(
+        r for r in caplog.records if r.getMessage() == "Rejected malformed matched alert"
+    )
+    assert rejected.alert_index == 1
+    assert rejected.alert_id == "event-789"
+    assert "time_created" in rejected.reason
+    assert all("do-not-log-this" not in repr(r.__dict__) for r in caplog.records)
 
 
 def test_delivery_failure_is_not_rejected_as_bad_data(monkeypatch):
@@ -329,8 +332,11 @@ def test_poll_exception_is_unresolved_and_marks_producer_unhealthy(queue_full, c
 
     assert producer.healthy is False
     assert client.produce.call_count == (1 if queue_full else 2)
-    assert "poll_error=ValueError" in caplog.text
-    assert "sensitive broker details" not in caplog.text
+    incomplete = next(
+        r for r in caplog.records if r.getMessage() == "Matched-message delivery incomplete"
+    )
+    assert incomplete.poll_error_type == "ValueError"
+    assert all("sensitive broker details" not in repr(r.__dict__) for r in caplog.records)
 
 
 def test_poll_exception_after_partial_ack_preserves_counts(monkeypatch):

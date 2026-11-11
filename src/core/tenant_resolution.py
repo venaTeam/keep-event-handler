@@ -47,7 +47,7 @@ def _resolve_ingestion_tenant(event) -> str:
             extra={"operator": operator_name, "tenant_id": GENERIC_TENANT_UUID},
         )
         return GENERIC_TENANT_UUID
-    logger.info(
+    logger.debug(
         "Routing alert by operator",
         extra={"operator": operator_name, "tenant_id": operator.tenant_id},
     )

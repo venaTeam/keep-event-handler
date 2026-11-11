@@ -141,9 +141,26 @@ def test_unhealthy_matched_producer_gates_readyz(
     assert status == 503
     assert 'producer unavailable' in body['reason']
     assert 'consumer:' in body['reason']
-    assert 'Readiness state: ready=False' in caplog.text
+    readiness = [r for r in caplog.records if r.getMessage() == 'Readiness state']
+    assert len(readiness) == 1
+    assert readiness[0].ready is False
     get(probe_server, '/readyz')
-    assert caplog.text.count('Readiness state: ready=False') == 1
+    readiness = [r for r in caplog.records if r.getMessage() == 'Readiness state']
+    assert len(readiness) == 1
+
+
+def test_matched_producer_health_error_log_is_throttled(
+    probe_server, monkeypatch, caplog
+):
+    become_consuming()
+    fake = MagicMock()
+    fake.health.side_effect = RuntimeError("boom")
+    monkeypatch.setattr(producer_module, "_producer", fake)
+
+    get(probe_server, '/readyz')
+    get(probe_server, '/readyz')
+
+    assert caplog.text.count('Matched producer readiness check failed') == 1
 
 
 def test_disabled_matched_producer_does_not_gate_readyz(probe_server, monkeypatch):

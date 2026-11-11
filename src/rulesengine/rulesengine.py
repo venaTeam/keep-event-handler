@@ -64,9 +64,7 @@ class RulesEngine:
             events: list of events
             session: db session
         """
-        self.logger.info("Running CEL rules")
         cel_incidents = self._run_cel_rules(events, session)
-        self.logger.info("CEL rules ran successfully")
 
         return cel_incidents
 
@@ -79,38 +77,51 @@ class RulesEngine:
             events: list of events
             session: db session
         """
-        self.logger.info("Running rules")
         rules = get_rules_db(tenant_id=self.tenant_id)
 
         incidents_dto = {}
         for rule in rules:
-            self.logger.info(f"Evaluating rule {rule.name}")
+            self.logger.debug(
+                "Evaluating rule",
+                extra={"rule_id": rule.id, "rule_name": rule.name},
+            )
             for event in events:
-                self.logger.info(
-                    f"Checking if rule {rule.name} apply to event {event.id}"
-                )
                 try:
                     matched_rules = self._check_if_rule_apply(rule, event)
                 except ValueError as e:
                     if "Invalid name" in str(e):
                         self.logger.warning(
-                            f"{str(e)} in the CEL expression {rule.definition_cel} for alert {event.id}. This might mean there's a blank space in the field name",
-                            extra={"alert_id": event.id, "payload": event.dict()},
+                            "Invalid name in the CEL expression. This might mean there's a blank space in the field name",
+                            extra={
+                                "error": str(e),
+                                "rule_id": rule.id,
+                                "definition_cel": rule.definition_cel,
+                                "alert_id": event.id,
+                                "fingerprint": event.fingerprint,
+                            },
                         )
                         continue
                 except Exception:
                     self.logger.exception(
-                        f"Failed to evaluate rule {rule.name} on event {event.id}",
+                        "Failed to evaluate rule",
                         extra={
-                            "rule": rule.dict(),
-                            "event": event.dict(),
+                            "rule_id": rule.id,
+                            "rule_name": rule.name,
+                            "definition_cel": rule.definition_cel,
+                            "alert_id": event.id,
+                            "fingerprint": event.fingerprint,
                         },
                     )
                     continue
 
                 if matched_rules:
-                    self.logger.info(
-                        f"Rule {rule.name} on event {event.id} is relevant"
+                    self.logger.debug(
+                        "Rule is relevant for event",
+                        extra={
+                            "rule_id": rule.id,
+                            "rule_name": rule.name,
+                            "alert_id": event.id,
+                        },
                     )
 
                     rule_fingerprints = self._calc_rule_fingerprint(event, rule)
@@ -147,8 +158,12 @@ class RulesEngine:
                             )
 
                             if not incident.is_visible:
-                                self.logger.info(
-                                    f"No existing incidents for rule {rule.name}. Checking incident creation conditions"
+                                self.logger.debug(
+                                    "No visible incident for rule, checking incident creation conditions",
+                                    extra={
+                                        "rule_id": rule.id,
+                                        "incident_id": incident.id,
+                                    },
                                 )
 
                                 rule_groups = self._extract_subrules(
@@ -168,7 +183,11 @@ class RulesEngine:
                                             and len(rule_groups) == len(matched_rules)
                                         ):
                                             self.logger.info(
-                                                "Single event is enough, so creating incident"
+                                                "Single event is enough, so creating incident",
+                                                extra={
+                                                    "rule_id": rule.id,
+                                                    "incident_id": incident.id,
+                                                },
                                             )
                                             incident.is_visible = True
                                         elif rule.create_on == "all":
@@ -195,7 +214,11 @@ class RulesEngine:
                                 except StaleDataError as ex:
                                     if "expected to update" in ex.args[0]:
                                         self.logger.warning(
-                                            f"Race condition met while updating incident `{incident_id}`, retry #{attempt}"
+                                            "Race condition met while updating incident",
+                                            extra={
+                                                "incident_id": incident_id,
+                                                "attempt": attempt,
+                                            },
                                         )
                                         session.rollback()
                                         continue
@@ -218,16 +241,23 @@ class RulesEngine:
                                 ).inc()
 
                 else:
-                    self.logger.info(
-                        f"Rule {rule.name} on event {event.id} is not relevant"
+                    self.logger.debug(
+                        "Rule is not relevant for event",
+                        extra={
+                            "rule_id": rule.id,
+                            "rule_name": rule.name,
+                            "alert_id": event.id,
+                        },
                     )
 
-        self.logger.info("Rules ran successfully")
         # if we don't have any updated groups, we don't need to create any alerts
         if not incidents_dto:
             return []
 
-        self.logger.info(f"Rules ran, {len(incidents_dto)} incidents created")
+        self.logger.info(
+            "Rules ran, incidents created",
+            extra={"incidents_count": len(incidents_dto)},
+        )
 
         return list(incidents_dto.values())
 
@@ -268,6 +298,7 @@ class RulesEngine:
                 existed_incident.user_generated_name = f"{rule.incident_prefix}-{existed_incident.running_number} - {existed_incident.user_generated_name}"
                 self.logger.info(
                     "Incident name updated with prefix",
+                    extra={"incident_id": existed_incident.id},
                 )
 
         # if not incident name template, return the incident
@@ -277,7 +308,7 @@ class RulesEngine:
         elif existed_incident and not expired:
             incident_name = copy.copy(rule.incident_name_template)
             current_name = existed_incident.user_generated_name
-            self.logger.info(
+            self.logger.debug(
                 "Updating the incident name based on the new event",
                 extra={
                     "incident_id": existed_incident.id,
@@ -328,7 +359,12 @@ class RulesEngine:
                 variables = self.get_vaiables(rule.incident_name_template)
                 if not variables:
                     self.logger.warning(
-                        f"Failed to fetch the appropriate labels from the event {event.id} and rule {rule.name}"
+                        "Failed to fetch the appropriate labels from the event",
+                        extra={
+                            "rule_id": rule.id,
+                            "rule_name": rule.name,
+                            "alert_id": event.id,
+                        },
                     )
                     incident_name = None
                 for var in variables:
@@ -360,7 +396,10 @@ class RulesEngine:
     def _process_event_for_history_based_rule(
         self, incident: Incident, rule: Rule, session: Session
     ) -> Incident:
-        self.logger.info("Multiple events required for the incident to start")
+        self.logger.debug(
+            "Multiple events required for the incident to start",
+            extra={"rule_id": rule.id, "incident_id": incident.id},
+        )
 
         enrich_incidents_with_alerts(
             tenant_id=self.tenant_id,
@@ -440,7 +479,8 @@ class RulesEngine:
             for k, v in d.items():
                 if k[0] in forbidden_starts:  # Only check first character
                     logger.warning(
-                        f"Removed key '{k}' starting with forbidden character '{k[0]}'"
+                        "Removed key starting with forbidden character",
+                        extra={"key": k},
                     )
                     continue
 
@@ -602,8 +642,9 @@ class RulesEngine:
             # than we will have None in the rule_fingerprint
             if not rule_fingerprints:
                 self.logger.warning(
-                    f"Failed to calculate rule fingerprint for event {event.id} and rule {rule.name}",
+                    "Failed to calculate rule fingerprint",
                     extra={
+                        "alert_id": event.id,
                         "rule_id": rule.id,
                         "rule_name": rule.name,
                         "tenant_id": self.tenant_id,
@@ -613,8 +654,9 @@ class RulesEngine:
             # if any of the values is None, we will return "none"
             if any([fingerprint is None for fingerprint in rule_fingerprints]):
                 self.logger.warning(
-                    f"Failed to fetch the appropriate labels from the event {event.id} and rule {rule.name}",
+                    "Failed to fetch the appropriate labels from the event",
                     extra={
+                        "alert_id": event.id,
                         "rule_id": rule.id,
                         "rule_name": rule.name,
                         "tenant_id": self.tenant_id,
@@ -717,8 +759,13 @@ class RulesEngine:
             except ValueError as e:
                 if "Invalid name" in str(e):
                     logger.warning(
-                        f"{str(e)} in the CEL expression {cel} for alert {alert.id}. This might mean there's a blank space in the field name",
-                        extra={"alert_id": alert.id, "payload": alert.dict()},
+                        "Invalid name in the CEL expression. This might mean there's a blank space in the field name",
+                        extra={
+                            "error": str(e),
+                            "cel": cel,
+                            "alert_id": alert.id,
+                            "fingerprint": alert.fingerprint,
+                        },
                     )
                     continue
             except celpy.evaluation.CELEvalError as e:
@@ -740,16 +787,19 @@ class RulesEngine:
                     except Exception:
                         pass
                     logger.debug(
-                        f"Type mismtach between operator and operand in the CEL expression {cel} for alert {alert.id}"
+                        "Type mismtach between operator and operand in the CEL expression",
+                        extra={"cel": cel, "alert_id": alert.id},
                     )
                     continue
                 logger.warning(
-                    f"Failed to evaluate the CEL expression {cel} for alert {alert.id} - {e}"
+                    "Failed to evaluate the CEL expression",
+                    extra={"cel": cel, "alert_id": alert.id, "error": str(e)},
                 )
                 continue
             except Exception:
                 logger.exception(
-                    f"Failed to evaluate the CEL expression {cel} for alert {alert.id}"
+                    "Failed to evaluate the CEL expression",
+                    extra={"cel": cel, "alert_id": alert.id},
                 )
                 continue
             if r:

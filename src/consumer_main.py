@@ -49,15 +49,17 @@ def init_services():
 
 def start_metrics_server(port: int):
     """Start Prometheus metrics HTTP server in a background thread."""
-    logger.info(f"Starting Prometheus metrics server on port {port}")
+    logger.info("Starting Prometheus metrics server", extra={"port": port})
     
     # start_http_server runs in a daemon thread by default
     start_http_server(port)
     
-    logger.info(f"Prometheus metrics available at http://0.0.0.0:{port}/metrics")
+    logger.info("Prometheus metrics available", extra={"port": port})
 
 
 READINESS_PATHS = ("/readyz",)
+# How often a persisting readiness failure is logged again
+READINESS_LOG_INTERVAL_SECONDS = 60
 # `/`, `/health`, `/healthz` and `/ready` are LEGACY ALIASES and load-bearing:
 # production probes target `/`. Serving only /livez would 404 there and kill
 # every pod the moment this image landed, with no chart change to revert.
@@ -84,6 +86,7 @@ def create_health_server(port: int):
     class HealthHandler(BaseHTTPRequestHandler):
         _last_readiness_log = 0.0
         _last_readiness_state = None
+        _last_producer_error_log = None
         def _respond(self, ok: bool, reason: str, probe: str):
             body = json.dumps(
                 {
@@ -102,6 +105,8 @@ def create_health_server(port: int):
         def do_GET(self):
             path = self.path.split("?", 1)[0]
             if path in READINESS_PATHS:
+                import time
+                cls = type(self)
                 ok, reason = consumer_health.is_ready()
                 try:
                     producer_ok, producer_reason = get_matched_producer().health()
@@ -109,15 +114,27 @@ def create_health_server(port: int):
                         reason = f"consumer: {reason}; matched publishing: {producer_reason}"
                         ok = False
                 except Exception:
-                    logger.exception("Matched producer readiness check failed")
+                    # Probes hit this every few seconds while health() raises
+                    now = time.monotonic()
+                    if (
+                        cls._last_producer_error_log is None
+                        or now - cls._last_producer_error_log
+                        >= READINESS_LOG_INTERVAL_SECONDS
+                    ):
+                        logger.exception("Matched producer readiness check failed")
+                        cls._last_producer_error_log = now
                     ok, reason = False, "matched producer health check failed"
-                import time
                 state = (ok, reason)
                 now = time.monotonic()
-                cls = type(self)
-                if state != cls._last_readiness_state or (not ok and now - cls._last_readiness_log >= 60):
-                    logger.log(logging.INFO if ok else logging.WARNING,
-                               'Readiness state: ready=%s reason=%s', ok, reason)
+                if state != cls._last_readiness_state or (
+                    not ok
+                    and now - cls._last_readiness_log >= READINESS_LOG_INTERVAL_SECONDS
+                ):
+                    logger.log(
+                        logging.INFO if ok else logging.WARNING,
+                        "Readiness state",
+                        extra={"ready": ok, "reason": reason},
+                    )
                     cls._last_readiness_state = state
                     cls._last_readiness_log = now
                 self._respond(ok, reason, "readiness")
@@ -141,7 +158,7 @@ def create_health_server(port: int):
     server.daemon_threads = True
     
     def serve():
-        logger.info(f"Health check server started on port {port}")
+        logger.info("Health check server started", extra={"port": port})
         server.serve_forever()
     
     thread = threading.Thread(target=serve, daemon=True)
@@ -244,7 +261,10 @@ def main():
     health_port = int(config("HEALTH_CHECK_PORT", default="8092"))
     
     if messaging_type != "KAFKA":
-        logger.error(f"This entrypoint only supports KAFKA messaging, got: {messaging_type}")
+        logger.error(
+            "This entrypoint only supports KAFKA messaging",
+            extra={"messaging_type": messaging_type},
+        )
         logger.error("For Redis/ARQ, use the FastAPI-based entrypoint (main.py with gunicorn)")
         sys.exit(1)
     
@@ -306,7 +326,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt, shutting down...")
     except Exception as e:
-        logger.exception(f"Fatal error in event handler: {e}")
+        logger.exception("Fatal error in event handler", extra={"error": str(e)})
         sys.exit(1)
     finally:
         # Ordering is load-bearing: the trigger index stop is BOUNDED, while

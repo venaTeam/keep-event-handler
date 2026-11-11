@@ -37,7 +37,7 @@ def setup(app: FastAPI):
     logger = logging.getLogger(__name__)
     # Configure the OpenTelemetry SDK
     service_name = os.environ.get(
-        "OTEL_SERVICE_NAME", os.environ.get("SERVICE_NAME", "keep-api")
+        "OTEL_SERVICE_NAME", os.environ.get("SERVICE_NAME", "keep-event-handler")
     )
     otlp_collector_endpoint = os.environ.get(
         "OTEL_EXPORTER_OTLP_ENDPOINT", os.environ.get("OTLP_ENDPOINT", False)

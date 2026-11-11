@@ -37,6 +37,7 @@ from src.core.metrics import (
     automation_unresolved_partitions,
 )
 from src.controllers.event_controller import process_event_sync
+from src.logging_conf import reset_log_context, set_log_context
 from src.event_management.process_event_task import record_terminal_error
 from src.models.event_dto import EventDTO
 
@@ -331,7 +332,14 @@ class KafkaEventConsumer(EventConsumer):
             return
 
         conf = self._build_consumer_config()
-        self.logger.info(f"Starting Kafka Consumer on topic '{self.topic}' with config: {self._redact_config(conf)}")
+        self.logger.info(
+            "Starting Kafka Consumer",
+            extra={
+                "topic": self.topic,
+                "consumer_group": self.group_id,
+                "config": self._redact_config(conf),
+            },
+        )
 
         self._consumer = Consumer(conf)
         self._consumer.subscribe(
@@ -363,7 +371,10 @@ class KafkaEventConsumer(EventConsumer):
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully."""
-        self.logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        self.logger.info(
+            "Received signal, initiating graceful shutdown...",
+            extra={"signum": signum},
+        )
         self._running = False
         self._shutdown_event.set()
         consumer_health.set_phase(ConsumerPhase.STOPPING)
@@ -393,7 +404,14 @@ class KafkaEventConsumer(EventConsumer):
 
     def _on_assign(self, consumer, partitions):
         """Callback when partitions are assigned."""
-        self.logger.info(f"Partitions assigned: {[p.partition for p in partitions]}")
+        self.logger.info(
+            "Partitions assigned",
+            extra={
+                "topic": self.topic,
+                "consumer_group": self.group_id,
+                "partitions": [p.partition for p in partitions],
+            },
+        )
         if self._is_cooperative:
             # Under the cooperative protocol librdkafka does NOT apply the
             # assignment for us. Skipping this leaves the consumer processing
@@ -414,7 +432,14 @@ class KafkaEventConsumer(EventConsumer):
         that were processed are already committed individually by
         _process_batch.
         """
-        self.logger.info(f"Partitions revoked: {[p.partition for p in partitions]}")
+        self.logger.info(
+            "Partitions revoked",
+            extra={
+                "topic": self.topic,
+                "consumer_group": self.group_id,
+                "partitions": [p.partition for p in partitions],
+            },
+        )
         for partition in partitions:
             key = (partition.topic, partition.partition)
             self._unresolved_offsets.pop(key, None)
@@ -447,8 +472,13 @@ class KafkaEventConsumer(EventConsumer):
             self._replay_failures.pop(key, None)
             self._replay_due.pop(key, None)
         self.logger.warning(
-            f"Partitions LOST: {[p.partition for p in partitions]} — "
-            "not committing; they may already be owned by another member"
+            "Partitions LOST — not committing; they may already be owned by "
+            "another member",
+            extra={
+                "topic": self.topic,
+                "consumer_group": self.group_id,
+                "partitions": [p.partition for p in partitions],
+            },
         )
         if self._is_cooperative:
             try:
@@ -492,10 +522,13 @@ class KafkaEventConsumer(EventConsumer):
                     if err:
                         if err.code() == KafkaError._PARTITION_EOF:
                             self.logger.debug(
-                                f"Reached end of partition {msg.partition()}"
+                                "Reached end of partition",
+                                extra={"partition": msg.partition()},
                             )
                         else:
-                            self.logger.error(f"Consumer error: {err}")
+                            self.logger.error(
+                                "Consumer error", extra={"error": str(err)}
+                            )
                             consecutive_errors += 1
                             if consecutive_errors >= max_consecutive_errors:
                                 raise KafkaException(err)
@@ -521,13 +554,17 @@ class KafkaEventConsumer(EventConsumer):
                 self.logger.info("KeyboardInterrupt received, shutting down...")
                 break
             except KafkaException as e:
-                self.logger.exception(f"Kafka exception in consume loop: {e}")
+                self.logger.exception(
+                    "Kafka exception in consume loop", extra={"error": str(e)}
+                )
                 if not self._running:
                     break
                 # Brief backoff before retrying
                 self._shutdown_event.wait(timeout=1.0)
             except Exception as e:
-                self.logger.exception(f"Unexpected error in consume loop: {e}")
+                self.logger.exception(
+                    "Unexpected error in consume loop", extra={"error": str(e)}
+                )
                 events_error_counter.inc()
                 # Don't crash on individual message errors, continue processing
                 continue
@@ -558,8 +595,13 @@ class KafkaEventConsumer(EventConsumer):
         self._replay_failures[key] = failures
         self._replay_due[key] = time.monotonic() + delay
         self.logger.warning(
-            "Paused unresolved partition (topic=%s, partition=%s, offset=%s, retry_seconds=%s)",
-            key[0], key[1], self._unresolved_offsets[key], delay,
+            "Paused unresolved partition",
+            extra={
+                "topic": key[0],
+                "partition": key[1],
+                "offset": self._unresolved_offsets[key],
+                "retry_seconds": delay,
+            },
         )
 
     def _resume_due_replays(self) -> None:
@@ -668,8 +710,14 @@ class KafkaEventConsumer(EventConsumer):
                 # The `message=` form commits that offset directly and never
                 # touches the offset store (see enable.auto.offset.store).
                 self._consumer.commit(commit_boundary, asynchronous=False)
-                self.logger.debug('Raw Kafka offset committed: topic=%s partition=%s next_offset=%s',
-                                  key[0], key[1], commit_boundary.offset() + 1)
+                self.logger.debug(
+                    "Raw Kafka offset committed",
+                    extra={
+                        "topic": key[0],
+                        "partition": key[1],
+                        "next_offset": commit_boundary.offset() + 1,
+                    },
+                )
 
             if shutting_down:
                 # Every remaining partition's records are simply not committed,
@@ -695,7 +743,15 @@ class KafkaEventConsumer(EventConsumer):
             raw_text = msg.value().decode("utf-8")
             payload = json.loads(raw_text)
         except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to decode message (poison): {e}")
+            self.logger.error(
+                "Failed to decode message (poison)",
+                extra={
+                    "topic": msg.topic(),
+                    "partition": msg.partition(),
+                    "offset": msg.offset(),
+                    "error": str(e),
+                },
+            )
             events_error_counter.inc()
             self._record_terminal(
                 payload={"raw": raw_text} if raw_text is not None else None,
@@ -704,8 +760,9 @@ class KafkaEventConsumer(EventConsumer):
             return True  # commit past the malformed message
 
         trace_id = payload.get("trace_id", "unknown")
-        self.logger.debug(f"Processing message: {trace_id}")
+        self.logger.debug("Processing message", extra={"trace_id": trace_id})
 
+        log_context_tokens = set_log_context(None, trace_id)
         try:
             # Construct DTO. A bad shape raises pydantic ValidationError =
             # poison.
@@ -724,7 +781,8 @@ class KafkaEventConsumer(EventConsumer):
                 )
             except ValidationError as e:
                 self.logger.error(
-                    f"Invalid event payload (poison, trace_id={trace_id}): {e}"
+                    "Invalid event payload (poison)",
+                    extra={"trace_id": trace_id, "error": str(e)},
                 )
                 events_error_counter.inc()
                 self._record_terminal(payload=payload, error=e)
@@ -743,9 +801,7 @@ class KafkaEventConsumer(EventConsumer):
 
             if resolved is False:
                 self.logger.warning(
-                    "Raw record left uncommitted after matched delivery failure "
-                    "(topic=%s, partition=%s, offset=%s, trace_id=%s)",
-                    msg.topic(), msg.partition(), msg.offset(), trace_id,
+                    "Raw record left uncommitted after matched delivery failure",
                     extra={
                         "topic": msg.topic(), "partition": msg.partition(),
                         "offset": msg.offset(), "trace_id": trace_id,
@@ -754,13 +810,15 @@ class KafkaEventConsumer(EventConsumer):
                 return False
 
             events_out_counter.inc()
-            self.logger.debug(f"Successfully processed message: {trace_id}")
+            self.logger.debug(
+                "Successfully processed message", extra={"trace_id": trace_id}
+            )
             return True
 
         except ShutdownRequested:
             self.logger.info(
-                "Abandoning in-flight message for redelivery "
-                f"(shutdown, trace_id={trace_id})"
+                "Abandoning in-flight message for redelivery (shutdown)",
+                extra={"trace_id": trace_id},
             )
             return False
 
@@ -769,7 +827,8 @@ class KafkaEventConsumer(EventConsumer):
             # its own terminal recording. Be defensive: record + commit rather
             # than freeze the partition.
             self.logger.exception(
-                f"Unexpected error processing message (trace_id={trace_id}): {e}"
+                "Unexpected error processing message",
+                extra={"trace_id": trace_id, "error": str(e)},
             )
             events_error_counter.inc()
             try:
@@ -778,6 +837,9 @@ class KafkaEventConsumer(EventConsumer):
                 self.logger.exception("Terminal recording failed; not committing")
                 return False
             return True
+
+        finally:
+            reset_log_context(log_context_tokens)
 
     def _process_with_retries(
         self, event_dto: EventDTO, budget: "RetryBudget", payload: dict
@@ -804,27 +866,50 @@ class KafkaEventConsumer(EventConsumer):
                 payload["tenant_id"] = resolved_tenant_id
                 from src.bl.automations.producer import delivery_budget
                 token = delivery_budget.set(budget)
+                log_context_tokens = set_log_context(
+                    resolved_tenant_id, event_dto.trace_id
+                )
                 try:
                     process_event_sync(event_dto)
                 finally:
+                    reset_log_context(log_context_tokens)
                     delivery_budget.reset(token)
                 return True
             except (MatchedPublishError, AutomationStampError):
+                from src.bl.automations.producer import delivery_context
+                source = delivery_context.get()
                 self.logger.error(
-                    "Automation coverage or delivery failed; leaving raw record unresolved"
+                    "Automation coverage or delivery failed; leaving raw record unresolved",
+                    extra={
+                        "topic": source.get("source_topic"),
+                        "partition": source.get("source_partition"),
+                        "offset": source.get("source_offset"),
+                        "trace_id": event_dto.trace_id,
+                        "tenant_id": event_dto.tenant_id,
+                    },
                 )
                 return False
             except Exception as e:
                 kind = classify_error(e)
+                log_extra = {
+                    "tenant_id": event_dto.tenant_id,
+                    "trace_id": event_dto.trace_id,
+                }
                 self.logger.warning(
-                    f"Error processing event "
-                    f"(attempt {attempt + 1}/{MAX_PROCESSING_RETRIES}, "
-                    f"class={kind}): {e}"
+                    "Error processing event",
+                    extra={
+                        **log_extra,
+                        "attempt": attempt + 1,
+                        "max_attempts": MAX_PROCESSING_RETRIES,
+                        "error_class": kind,
+                        "error": str(e),
+                    },
                 )
 
                 if kind == "poison":
                     self.logger.error(
-                        "Poison message — recording and committing (no retry)"
+                        "Poison message — recording and committing (no retry)",
+                        extra=log_extra,
                     )
                     self._record_terminal(payload=payload, error=e)
                     return
@@ -840,7 +925,8 @@ class KafkaEventConsumer(EventConsumer):
 
                 if attempt == MAX_PROCESSING_RETRIES - 1:
                     self.logger.error(
-                        "Retries exhausted (attempt cap) — recording and committing"
+                        "Retries exhausted (attempt cap) — recording and committing",
+                        extra=log_extra,
                     )
                     self._record_terminal(payload=payload, error=e)
                     return
@@ -848,7 +934,8 @@ class KafkaEventConsumer(EventConsumer):
                 if budget.exhausted():
                     self.logger.error(
                         "Retry budget exhausted (poll-interval guard) — "
-                        "recording and committing"
+                        "recording and committing",
+                        extra=log_extra,
                     )
                     self._record_terminal(payload=payload, error=e)
                     return
@@ -896,7 +983,7 @@ class KafkaEventConsumer(EventConsumer):
             try:
                 self._consumer.close()
             except Exception as e:
-                self.logger.error(f"Error closing consumer: {e}")
+                self.logger.error("Error closing consumer", extra={"error": str(e)})
             self._consumer = None
         consumer_health.set_assignment([])
         consumer_health.set_phase(ConsumerPhase.STOPPED)

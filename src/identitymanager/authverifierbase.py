@@ -107,7 +107,6 @@ class AuthVerifierBase:
         Raises:
             HTTPException: If authentication or authorization fails.
         """
-        self.logger.debug("Starting authentication process")
         if self.read_only and api_key not in self.read_only_bypass_keys:
             # check if the scopes have scopes other than only read
             if any([scope.split(":")[0] != "read" for scope in self.scopes]):
@@ -120,13 +119,7 @@ class AuthVerifierBase:
         authenticated_entity = self.authenticate(
             request, api_key, authorization, token, body
         )
-        self.logger.debug(
-            f"Authentication successful for entity: {authenticated_entity}"
-        )
-
-        self.logger.debug("Starting authorization process")
         self.authorize(authenticated_entity)
-        self.logger.debug("Authorization successful")
 
         return authenticated_entity
 
@@ -154,9 +147,7 @@ class AuthVerifierBase:
         Raises:
             HTTPException: If authentication fails.
         """
-        self.logger.debug("Attempting authentication")
         if token:
-            self.logger.debug("Attempting to authenticate with bearer token")
             try:
                 return self._verify_bearer_token(token)
             except HTTPException:
@@ -173,7 +164,6 @@ class AuthVerifierBase:
             return api_key
 
         if api_key:
-            self.logger.debug("Attempting to authenticate with API key")
             try:
                 return self._verify_api_key(request, api_key, authorization)
             except HTTPException:
@@ -183,11 +173,15 @@ class AuthVerifierBase:
                 raise HTTPException(
                     status_code=401, detail="Invalid authentication credentials"
                 )
-        self.logger.error(
+        self.logger.warning(
             "No valid authentication method found",
             extra={
-                "headers": request.headers,
-                "body": body,
+                "path": request.url.path,
+                "method": request.method,
+                "user-agent": request.headers.get("user-agent"),
+                # header names only; values may hold credentials
+                "header_names": list(request.headers.keys()),
+                "body_type": type(body).__name__,
             },
         )
         raise HTTPException(
@@ -204,7 +198,6 @@ class AuthVerifierBase:
         Raises:
             HTTPException: If authorization fails.
         """
-        self.logger.debug(f"Authorizing entity: {authenticated_entity}")
         self._authorize(authenticated_entity)
 
     def _authorize(self, authenticated_entity: AuthenticatedEntity) -> None:
@@ -218,9 +211,15 @@ class AuthVerifierBase:
             HTTPException: If the entity doesn't have the required scopes.
         """
         role = get_role_by_role_name(authenticated_entity.role)
-        self.logger.debug(f"Checking scopes for role: {role}")
         if not role.has_scopes(self.scopes):
-            self.logger.warning(f"Authorization failed. Required scopes: {self.scopes}")
+            self.logger.warning(
+                "Authorization failed. Required scopes",
+                extra={
+                    "tenant_id": authenticated_entity.tenant_id,
+                    "required_scopes": self.scopes,
+                    "entity_role": authenticated_entity.role,
+                },
+            )
             raise HTTPException(
                 status_code=403,
                 detail=f"You don't have the required scopes to access this resource [required scopes: {self.scopes}]",
@@ -246,7 +245,6 @@ class AuthVerifierBase:
         Raises:
             HTTPException: If no valid API key is found.
         """
-        self.logger.debug("Extracting API key")
         api_key = api_key or request.query_params.get("api_key", None)
         if not api_key:
             # A special treatment for CloudWatch SNS Confirmation requests
@@ -262,7 +260,8 @@ class AuthVerifierBase:
                 ):
                     tenant_id = request.query_params.get("tenant_id", "keep")
                     self.logger.info(
-                        f"Allowing unauthenticated access for tenant: {tenant_id} for CloudWatch"
+                        "Allowing unauthenticated access for CloudWatch",
+                        extra={"tenant_id": tenant_id, "path": request.url.path},
                     )
                     return AuthenticatedEntity(
                         tenant_id=tenant_id,
@@ -299,9 +298,10 @@ class AuthVerifierBase:
                 else:
                     api_key = credentials
             else:
-                self.logger.error(f"Unsupported authentication scheme: {scheme}")
+                self.logger.error(
+                    "Unsupported authentication scheme", extra={"scheme": scheme}
+                )
                 raise HTTPException(status_code=401, detail="Missing API Key")
-        self.logger.debug("API key extracted successfully")
         return api_key
 
     def _verify_api_key(
@@ -324,43 +324,27 @@ class AuthVerifierBase:
         Raises:
             HTTPException: If the API key is invalid.
         """
-        self.logger.debug("Verifying API key")
         tenant_api_key = get_api_key(api_key)
         if not tenant_api_key:
             self.logger.warning("Invalid API Key")
             raise HTTPException(status_code=401, detail="Invalid API Key")
 
         try:
-            self.logger.debug("Updating API Key last used")
-            # if the key was updated in the last update_key_interval seconds, skip the update
+            # skip the update if the key's last-used time is already cached
             if (
                 f"{tenant_api_key.tenant_id}:{tenant_api_key.reference_id}"
-                in self.key_last_used_updates
+                not in self.key_last_used_updates
             ):
-                # if the key was updated in the last update_key_interval seconds, skip the update
-                if self.key_last_used_updates[
-                    f"{tenant_api_key.tenant_id}:{tenant_api_key.reference_id}"
-                ] > (
-                    datetime.datetime.now()
-                    - datetime.timedelta(seconds=self.update_key_interval)
-                ):
-                    self.logger.debug(
-                        f"API Key last used updated in the last {self.update_key_interval} seconds"
-                    )
-            # else, update the key
-            else:
                 update_key_last_used(
                     tenant_api_key.tenant_id, reference_id=tenant_api_key.reference_id
                 )
                 self.key_last_used_updates[
                     f"{tenant_api_key.tenant_id}:{tenant_api_key.reference_id}"
                 ] = datetime.datetime.now()
-            self.logger.debug("Successfully updated API Key last used")
         except Exception:
             self.logger.exception("Failed to update API Key last used")
 
         request.state.tenant_id = tenant_api_key.tenant_id
-        self.logger.debug(f"API key verified for tenant: {tenant_api_key.tenant_id}")
         # check if impersonation is enabled, if not, return the api key's authenticated entity
         if not self.impersonation_enabled:
             return AuthenticatedEntity(
@@ -381,7 +365,13 @@ class AuthVerifierBase:
                 tenant_api_key.role,
             )
 
-        self.logger.info("Impersonating user")
+        self.logger.info(
+            "Impersonating user",
+            extra={
+                "impersonated_user": user_name,
+                "tenant_id": tenant_api_key.tenant_id,
+            },
+        )
         user_name = request.headers.get(self.impersonation_user_header)
         role = request.headers.get(self.impersonation_role_header)
         if not user_name or not role:
@@ -397,11 +387,24 @@ class AuthVerifierBase:
 
         # auto provision user
         if self.impersonation_auto_provision:
-            self.logger.info(f"Auto provisioning user: {user_name}")
+            self.logger.info(
+                "Auto provisioning user",
+                extra={"user_name": user_name, "tenant_id": tenant_api_key.tenant_id},
+            )
             self._provision_user(tenant_api_key.tenant_id, user_name, role)
-            self.logger.info(f"User {user_name} provisioned successfully")
+            self.logger.info(
+                "User provisioned successfully",
+                extra={"user_name": user_name, "tenant_id": tenant_api_key.tenant_id},
+            )
 
-        self.logger.info("User impersonated successfully")
+        self.logger.info(
+            "User impersonated successfully",
+            extra={
+                "user_name": user_name,
+                "tenant_id": tenant_api_key.tenant_id,
+                "role": role,
+            },
+        )
         return AuthenticatedEntity(
             tenant_id=tenant_api_key.tenant_id,
             email=user_name,
