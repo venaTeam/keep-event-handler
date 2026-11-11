@@ -1081,8 +1081,13 @@ def bulk_upsert_alert_fields(
                 # Handle any potential race conditions
                 session.rollback()
                 if "Deadlock found" in str(e):
-                    logger.info(
-                        f"Deadlock found during bulk_upsert_alert_fields `{e}`, retry #{attempt}"
+                    logger.warning(
+                        "Deadlock found during bulk_upsert_alert_fields",
+                        extra={
+                            "tenant_id": tenant_id,
+                            "attempt": attempt,
+                            "error": str(e),
+                        },
                     )
                     if attempt >= max_retries:
                         raise e
@@ -1433,15 +1438,19 @@ def set_last_alert(
     values (and the user-enrichment columns) back without re-querying.
     """
     fingerprint = alert.fingerprint
-    logger.info(f"Setting last alert for `{fingerprint}`")
+    logger.debug(
+        "Setting last alert",
+        extra={"tenant_id": tenant_id, "fingerprint": fingerprint},
+    )
     with existed_or_new_session(session) as session:
         for attempt in range(1, max_retries + 1):
-            logger.info(
-                f"Attempt {attempt} to set last alert for `{fingerprint}`",
+            logger.debug(
+                "Attempt to set last alert",
                 extra={
                     "alert_id": alert.id,
                     "tenant_id": tenant_id,
                     "fingerprint": fingerprint,
+                    "attempt": attempt,
                 },
             )
             try:
@@ -1465,10 +1474,11 @@ def set_last_alert(
                 if last_alert and last_alert.timestamp.replace(
                     tzinfo=timezone.utc
                 ) < alert.timestamp.replace(tzinfo=timezone.utc):
-                    logger.info(
-                        f"Update last alert for `{fingerprint}`: {last_alert.alert_id} -> {alert.id}",
+                    logger.debug(
+                        "Update last alert",
                         extra={
                             "alert_id": alert.id,
+                            "previous_alert_id": last_alert.alert_id,
                             "tenant_id": tenant_id,
                             "fingerprint": fingerprint,
                         },
@@ -1504,7 +1514,14 @@ def set_last_alert(
                     session.add(last_alert)
 
                 elif not last_alert:
-                    logger.info(f"No last alert for `{fingerprint}`, creating new")
+                    logger.debug(
+                        "No last alert, creating new",
+                        extra={
+                            "alert_id": alert.id,
+                            "tenant_id": tenant_id,
+                            "fingerprint": fingerprint,
+                        },
+                    )
                     new_last_alert = LastAlert(
                         tenant_id=tenant_id,
                         fingerprint=alert.fingerprint,
@@ -1554,12 +1571,26 @@ def set_last_alert(
                 session.rollback()
                 message = ex.args[0] if ex.args else ""
                 if "no such savepoint" in message:
-                    logger.info(
-                        f"No such savepoint while updating lastalert for `{fingerprint}`, retry #{attempt}"
+                    logger.warning(
+                        "No such savepoint while updating lastalert",
+                        extra={
+                            "alert_id": alert.id,
+                            "tenant_id": tenant_id,
+                            "fingerprint": fingerprint,
+                            "attempt": attempt,
+                            "error": message,
+                        },
                     )
                 elif "Deadlock found" in message:
-                    logger.info(
-                        f"Deadlock found while updating lastalert for `{fingerprint}`, retry #{attempt}"
+                    logger.warning(
+                        "Deadlock found while updating lastalert",
+                        extra={
+                            "alert_id": alert.id,
+                            "tenant_id": tenant_id,
+                            "fingerprint": fingerprint,
+                            "attempt": attempt,
+                            "error": message,
+                        },
                     )
                 else:
                     logger.exception(
@@ -2286,9 +2317,13 @@ def add_alerts_to_incident(
     exclude_unlinked_alerts: bool = False,  # if True, do not add alerts to incident if they are manually unlinked
     max_retries=3,
 ) -> Optional[Incident]:
-    logger.info(
-        f"Adding alerts to incident {incident.id} in database, total {len(fingerprints)} alerts",
-        extra={"tags": {"tenant_id": tenant_id, "incident_id": incident.id}},
+    logger.debug(
+        "Adding alerts to incident in database",
+        extra={
+            "tenant_id": tenant_id,
+            "incident_id": incident.id,
+            "alerts_count": len(fingerprints),
+        },
     )
 
     with existed_or_new_session(session) as session:
@@ -2356,10 +2391,13 @@ def add_alerts_to_incident(
             for idx, entry in enumerate(alert_to_incident_entries):
                 session.add(entry)
                 if (idx + 1) % 100 == 0:
-                    logger.info(
-                        f"Added {idx + 1}/{len(alert_to_incident_entries)} alerts to incident {incident.id} in database",
+                    logger.debug(
+                        "Adding alerts to incident in database: progress",
                         extra={
-                            "tags": {"tenant_id": tenant_id, "incident_id": incident.id}
+                            "tenant_id": tenant_id,
+                            "incident_id": incident.id,
+                            "added_count": idx + 1,
+                            "alerts_count": len(alert_to_incident_entries),
                         },
                     )
                     session.flush()
@@ -2451,8 +2489,14 @@ def add_alerts_to_incident(
                     break
                 except StaleDataError as ex:
                     if "expected to update" in ex.args[0]:
-                        logger.info(
-                            f"Phantom read detected while updating incident `{incident_id}`, retry #{attempt}"
+                        logger.warning(
+                            "Phantom read detected while updating incident",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "incident_id": incident_id,
+                                "attempt": attempt,
+                                "error": str(ex),
+                            },
                         )
                         session.rollback()
                         continue
@@ -2461,6 +2505,14 @@ def add_alerts_to_incident(
             session.add(incident)
             session.refresh(incident)
 
+            logger.info(
+                "Added alerts to incident",
+                extra={
+                    "tenant_id": tenant_id,
+                    "incident_id": incident_id,
+                    "alerts_count": len(new_fingerprints),
+                },
+            )
             return incident
 
 
@@ -3231,8 +3283,14 @@ def update_key_last_used(
                 break
             except StaleDataError as ex:
                 if "expected to update" in ex.args[0]:
-                    logger.info(
-                        f"Phantom read detected while updating API key `{reference_id}`, retry #{attempt}"
+                    logger.warning(
+                        "Phantom read detected while updating API key",
+                        extra={
+                            "tenant_id": tenant_id,
+                            "reference_id": reference_id,
+                            "attempt": attempt,
+                            "error": str(ex),
+                        },
                     )
                     session.rollback()
                     continue

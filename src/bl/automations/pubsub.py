@@ -216,7 +216,7 @@ class ReloadSubscriber:
                 delay,
             )
         else:
-            logger.debug(
+            logger.warning(
                 "automations: reload subscriber still down (%s)",
                 _redacted(error, self._url),
             )
@@ -232,9 +232,13 @@ class ReloadSubscriber:
             # is at-most-once), so converge now rather than waiting for the
             # timer.
             self._service.signal()
-        except Exception:  # noqa: BLE001 - the retry path must never raise onward
-            # Next iteration retries with a longer backoff.
-            logger.debug("automations: re-subscribe attempt failed", exc_info=True)
+        except Exception as resubscribe_error:  # noqa: BLE001 - the retry path must never raise onward
+            # Next iteration retries with a longer backoff. No exc_info: the
+            # traceback can carry the unredacted redis URL.
+            logger.warning(
+                "automations: re-subscribe attempt failed (%s)",
+                _redacted(resubscribe_error, self._url),
+            )
 
 
 _TRANSPORT_ERRORS: tuple[type[BaseException], ...] | None = None

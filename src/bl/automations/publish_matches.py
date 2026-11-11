@@ -92,9 +92,13 @@ def _reject_malformed_alert(
     # Do not stringify malformed objects or log arbitrary payloads.
     alert_id = alert_id[:200] if isinstance(alert_id, str) else None
     logger.warning(
-        "Rejected malformed matched alert "
-        "(tenant_id=%s, alert_index=%s, alert_id=%r, reason=%s)",
-        tenant_id, alert_index, alert_id, error,
+        "Rejected malformed matched alert",
+        extra={
+            "tenant_id": tenant_id,
+            "alert_index": alert_index,
+            "alert_id": alert_id,
+            "reason": str(error),
+        },
     )
     producer.reject(tenant_id, alert, matches, error)
 

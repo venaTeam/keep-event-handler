@@ -397,8 +397,9 @@ class IncidentBl:
                     break
                 except StaleDataError as ex:
                     if "expected to update" in ex.args[0]:
-                        self.logger.info(
-                            f"Phantom read detected while updating incident `{incident_id}`, retry #{attempt}"
+                        self.logger.warning(
+                            "Phantom read detected while updating incident",
+                            extra={"incident_id": incident_id, "attempt": attempt},
                         )
                         self.session.rollback()
                         continue
