@@ -33,6 +33,29 @@ KAFKA_SSL_CAFILE = None
 KAFKA_SSL_CERTFILE = None
 KAFKA_SSL_KEYFILE = None
 
+# --- DLQ (terminal failures divert to keep-events-dlq; replayed by
+# keep-reconciler). Names match the reconciler/ingestions env contract so one
+# chart configures all producers and the consumer with the same variables. ---
+KEEP_HANDLER_DLQ_ENABLED = config("KEEP_HANDLER_DLQ_ENABLED", default="false") == "true"
+KAFKA_DLQ_TOPIC = config("KAFKA_DLQ_TOPIC", default="keep-events-dlq")
+# The reconciler contract is a JSON list; the handler consumer also tolerates
+# a comma-separated, and dlq_producer._bootstrap_servers handles both.
+KAFKA_DLQ_BOOTSTRAP_SERVERS = config(
+    "KAFKA_DLQ_BOOTSTRAP_SERVERS", default=KAFKA_BOOTSTRAP_SERVERS
+)
+KAFKA_DLQ_SECURITY_PROTOCOL = config(
+    "KAFKA_DLQ_SECURITY_PROTOCOL", default=KAFKA_SECURITY_PROTOCOL
+)
+KAFKA_DLQ_SASL_MECHANISM = config(
+    "KAFKA_DLQ_SASL_MECHANISM", default=KAFKA_SASL_MECHANISM
+)
+KAFKA_DLQ_SASL_USERNAME = config(
+    "KAFKA_DLQ_SASL_USERNAME", default=KAFKA_SASL_USERNAME
+)
+KAFKA_DLQ_SASL_PASSWORD = config(
+    "KAFKA_DLQ_SASL_PASSWORD", default=KAFKA_SASL_PASSWORD
+)
+
 ARQ_KEEP_RESULT = 3600
 ARQ_EXPIRES = 3600
 

@@ -35,6 +35,7 @@ from src.config.consts import (
 )
 from src.event_management.error_storm_guard import should_record_error
 from src.core.db.db import (
+    _last_alert_is_newer,
     apply_dismiss_lifecycle,
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
@@ -429,6 +430,13 @@ def __validate_last_received(event):
             ).isoformat()
 
 
+def _naive_utc(value: datetime.datetime) -> datetime.datetime:
+    # Alert.timestamp is stored as naive UTC.
+    if value.tzinfo is not None:
+        value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def __save_to_db(
     tenant_id,
     provider_type,
@@ -522,6 +530,28 @@ def __save_to_db(
                 )
                 if last_alert:
                     fold_held_back_occurrence(last_alert, session)
+                    # Only advance if this occurrence is actually newer in
+                    # event time. A DLQ replay is processed after its newer
+                    # successors but carries an older `last_received` (e.g. a
+                    # late firing replay after the resolve already landed);
+                    # overwriting unconditionally would drag last_received
+                    # backwards — and could re-fire dismiss/undismiss
+                    # lifecycle on stale state.
+                    stored_lr = last_alert.last_received
+                    if _last_alert_is_newer(
+                        last_alert, {"last_received": last_received}
+                    ):
+                        logger.info(
+                            "Out-of-order deduplicated occurrence ignored "
+                            "(event-time last_received older than stored)",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "fingerprint": event.fingerprint,
+                                "incoming_last_received": last_received,
+                                "stored_last_received": stored_lr,
+                            },
+                        )
+                        continue
                     last_alert.last_received = last_received
                     # Auto-undismiss / dispose even though this occurrence was
                     # deduplicated. Guard on a newer timestamp, like
@@ -726,6 +756,19 @@ def __save_to_db(
                 "last_received": last_received_val,
                 "started_at": getattr(formatted_event, "started_at", None),
             }
+            # A late occurrence (e.g. a DLQ replay landing after its successor)
+            # is kept in the history at its event time, but must not become
+            # the current state or run the rest of the pipeline.
+            stored_last_alert = get_last_alert_by_fingerprint(
+                tenant_id, formatted_event.fingerprint, session=session
+            )
+            out_of_order = (
+                stored_last_alert is not None
+                and last_received_val is not None
+                and _last_alert_is_newer(stored_last_alert, tracking)
+            )
+            if out_of_order:
+                alert_args["timestamp"] = _naive_utc(last_received_val)
             if timestamp_forced is not None:
                 alert_args["timestamp"] = timestamp_forced
 
@@ -764,7 +807,8 @@ def __save_to_db(
                     },
                 )
                 session.flush()
-                saved_alerts.append(alert)
+                if not out_of_order:
+                    saved_alerts.append(alert)
                 alert_id = alert.id
                 formatted_event.event_id = str(alert_id)
                 logger.debug(
@@ -820,6 +864,9 @@ def __save_to_db(
                         user_id="system",
                         description=f"Alert recieved from provider with status {formatted_event.status}",
                     )
+                    if out_of_order:
+                        # Sort the activity entry by when it happened, too.
+                        audit.timestamp = alert_args["timestamp"]
                     session.add(audit)
                     logger.debug(
                         "Audit event added to session",
@@ -930,6 +977,18 @@ def __save_to_db(
                     },
                 )
                 raise
+
+            if out_of_order:
+                logger.info(
+                    "Out-of-order occurrence kept in history only",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "fingerprint": formatted_event.fingerprint,
+                        "last_received": last_received_val,
+                        "stored_last_received": stored_last_alert.last_received,
+                    },
+                )
+                continue
 
             # Mapping
             try:
@@ -1908,10 +1967,21 @@ def process_event(
             )
             return []
     except Exception as e:
-        # Standalone Kafka uses an empty context. Delivery failure must reach
-        # its offset gate, without becoming a terminal error alert. ARQ keeps
-        # the existing error recording and Retry behavior below.
-        if isinstance(e, (MatchedPublishError, AutomationStampError)) and not ctx:
+        # Standalone Kafka uses an empty context: the consumer owns retries and
+        # the terminal record (DLQ or alertraw), so every failure must reach it
+        # instead of being swallowed. ARQ keeps the error recording and Retry
+        # behavior below.
+        if not ctx:
+            if not isinstance(e, (MatchedPublishError, AutomationStampError)):
+                logger.exception(
+                    "Error processing event",
+                    extra={
+                        **extra_dict,
+                        "processing_time": time.time() - start_time,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    },
+                )
             raise
         error_type = type(e).__name__
         error_message = str(e)
@@ -1983,27 +2053,18 @@ def process_event(
 
         events_error_counter.inc()
 
-        # Retrying only if context is present (running the job in arq worker)
-        if bool(ctx):
-            retry_defer = ctx["job_try"] * TIMES_TO_RETRY_JOB
-            logger.warning(
-                "Retrying job",
-                extra={
-                    **extra_dict,
-                    "job_try": ctx.get("job_try", 0),
-                    "retry_defer": retry_defer,
-                    "error_type": error_type,
-                },
-            )
-            raise Retry(defer=retry_defer)
-        else:
-            logger.warning(
-                "Not retrying job (no context)",
-                extra={
-                    **extra_dict,
-                    "error_type": error_type,
-                },
-            )
+        # Only the arq worker reaches here (Kafka mode re-raised above).
+        retry_defer = ctx["job_try"] * TIMES_TO_RETRY_JOB
+        logger.warning(
+            "Retrying job",
+            extra={
+                **extra_dict,
+                "job_try": ctx.get("job_try", 0),
+                "retry_defer": retry_defer,
+                "error_type": error_type,
+            },
+        )
+        raise Retry(defer=retry_defer)
     finally:
         alert_enrichment_duration_seconds.labels(
             source=provider_type or "unknown"
