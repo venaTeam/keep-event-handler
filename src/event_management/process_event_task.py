@@ -1967,10 +1967,21 @@ def process_event(
             )
             return []
     except Exception as e:
-        # Standalone Kafka uses an empty context. Delivery failure must reach
-        # its offset gate, without becoming a terminal error alert. ARQ keeps
-        # the existing error recording and Retry behavior below.
-        if isinstance(e, (MatchedPublishError, AutomationStampError)) and not ctx:
+        # Standalone Kafka uses an empty context: the consumer owns retries and
+        # the terminal record (DLQ or alertraw), so every failure must reach it
+        # instead of being swallowed. ARQ keeps the error recording and Retry
+        # behavior below.
+        if not ctx:
+            if not isinstance(e, (MatchedPublishError, AutomationStampError)):
+                logger.exception(
+                    "Error processing event",
+                    extra={
+                        **extra_dict,
+                        "processing_time": time.time() - start_time,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    },
+                )
             raise
         error_type = type(e).__name__
         error_message = str(e)
@@ -2042,27 +2053,18 @@ def process_event(
 
         events_error_counter.inc()
 
-        # Retrying only if context is present (running the job in arq worker)
-        if bool(ctx):
-            retry_defer = ctx["job_try"] * TIMES_TO_RETRY_JOB
-            logger.warning(
-                "Retrying job",
-                extra={
-                    **extra_dict,
-                    "job_try": ctx.get("job_try", 0),
-                    "retry_defer": retry_defer,
-                    "error_type": error_type,
-                },
-            )
-            raise Retry(defer=retry_defer)
-        else:
-            logger.warning(
-                "Not retrying job (no context)",
-                extra={
-                    **extra_dict,
-                    "error_type": error_type,
-                },
-            )
+        # Only the arq worker reaches here (Kafka mode re-raised above).
+        retry_defer = ctx["job_try"] * TIMES_TO_RETRY_JOB
+        logger.warning(
+            "Retrying job",
+            extra={
+                **extra_dict,
+                "job_try": ctx.get("job_try", 0),
+                "retry_defer": retry_defer,
+                "error_type": error_type,
+            },
+        )
+        raise Retry(defer=retry_defer)
     finally:
         alert_enrichment_duration_seconds.labels(
             source=provider_type or "unknown"
