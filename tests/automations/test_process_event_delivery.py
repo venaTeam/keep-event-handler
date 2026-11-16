@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from arq import Retry
+from sqlalchemy.exc import InternalError
 
 import src.bl.automations.publish_matches as publishing
 import src.event_management.process_event_task as task
@@ -12,6 +13,7 @@ from src.bl.automations.models import AutomationMatch
 from src.bl.automations.errors import AutomationStampError
 from src.bl.automations.producer import MatchedPublishError, MatchedLockTimeout
 from src.controllers.event_controller import process_event_sync
+import src.core.kafka_consumer as kafka_consumer
 from src.core.kafka_consumer import KafkaEventConsumer, RetryBudget
 from src.models.event_dto import EventDTO
 
@@ -181,13 +183,36 @@ def test_arq_keeps_error_recording_and_retry(delivery_flow, failure):
     session.close.assert_called_once()
 
 
-def test_other_kafka_errors_keep_existing_terminal_handling(delivery_flow):
+def test_other_kafka_errors_reach_the_consumer(delivery_flow):
+    """Kafka mode re-raises so the consumer retries and records the terminal
+    failure (DLQ or alertraw); nothing is written here."""
     dto, session, save, errors, counter, producer = delivery_flow
     producer.publish.side_effect = ValueError("bad event")
-    assert process_event_sync(dto) is None
-    errors.assert_called_once()
-    counter.inc.assert_called_once()
+    with pytest.raises(ValueError):
+        process_event_sync(dto)
+    errors.assert_not_called()
+    counter.inc.assert_not_called()
     session.close.assert_called_once()
+
+
+def test_read_only_database_is_retried_then_diverted(delivery_flow, monkeypatch):
+    dto, session, save, errors, counter, producer = delivery_flow
+    save.side_effect = InternalError(
+        "INSERT", {}, Exception("cannot execute INSERT in a read-only transaction")
+    )
+    monkeypatch.setattr("src.core.kafka_consumer.Consumer", lambda *args: MagicMock())
+    consumer = KafkaEventConsumer()
+    terminal = MagicMock(return_value=True)
+    monkeypatch.setattr(consumer, "_record_terminal", terminal)
+    message = MagicMock()
+    message.value.return_value = json.dumps(dto.dict()).encode()
+    assert consumer._process_message(
+        message, RetryBudget(300000, max_sleep_seconds=0)
+    ) is True
+    assert save.call_count == kafka_consumer.MAX_PROCESSING_RETRIES
+    assert terminal.call_args.kwargs["reason"] == "attempt_cap"
+    assert isinstance(terminal.call_args.kwargs["error"], InternalError)
+    errors.assert_not_called()
 
 
 @pytest.mark.parametrize("notify", [False, True])
