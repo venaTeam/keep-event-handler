@@ -1,3 +1,4 @@
+import contextvars
 import inspect
 import logging
 import logging.config
@@ -47,6 +48,39 @@ def get_gunicorn_log_level():
 
     # o/w, use Keep's log level
     return LOG_LEVEL
+
+
+# Per-event log context, set by the Kafka consumer for each message
+_tenant_id_var: contextvars.ContextVar = contextvars.ContextVar(
+    "log_tenant_id", default=None
+)
+_trace_id_var: contextvars.ContextVar = contextvars.ContextVar(
+    "log_trace_id", default=None
+)
+
+
+def set_log_context(tenant_id=None, trace_id=None):
+    """Set the per-event log context; returns tokens for reset_log_context."""
+    return _tenant_id_var.set(tenant_id), _trace_id_var.set(trace_id)
+
+
+def reset_log_context(tokens):
+    tenant_token, trace_token = tokens
+    _tenant_id_var.reset(tenant_token)
+    _trace_id_var.reset(trace_token)
+
+
+class LogContextFilter(logging.Filter):
+    """Adds tenant_id / trace_id from the event context; explicit extra wins."""
+
+    def filter(self, record):
+        tenant_id = _tenant_id_var.get()
+        if tenant_id is not None and "tenant_id" not in record.__dict__:
+            record.tenant_id = tenant_id
+        trace_id = _trace_id_var.get()
+        if trace_id is not None and "trace_id" not in record.__dict__:
+            record.trace_id = trace_id
+        return True
 
 
 class DevTerminalFormatter(logging.Formatter):
@@ -155,13 +189,13 @@ class CustomizedUvicornLogger(logging.Logger):
 CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "log_context": {"()": LogContextFilter},
+    },
     "formatters": {
         "dev_terminal": {
             "()": DevTerminalFormatter,
             "format": "%(asctime)s - %(thread)s %(otelTraceID)s %(threadName)s %(levelname)s - %(message)s",
-        },
-        "uvicorn_access": {
-            "format": "%(asctime)s - %(otelTraceID)s - %(threadName)s - %(message)s"
         },
     },
     "handlers": {
@@ -170,10 +204,7 @@ CONFIG = {
             "formatter": "dev_terminal",
             "class": "logging.StreamHandler",
             "stream": "ext://sys.stdout",
-        },
-        "uvicorn_access": {
-            "class": "logging.StreamHandler",
-            "formatter": "uvicorn_access",
+            "filters": ["log_context"],
         },
     },
     "loggers": {
@@ -182,9 +213,10 @@ CONFIG = {
             "level": LOG_LEVEL,
             "propagate": False,
         },
+        # Off: only health/metrics probes hit this app
         "uvicorn.access": {
-            "handlers": ["uvicorn_access"],
-            "level": get_gunicorn_log_level(),
+            "handlers": [],
+            "level": "WARNING",
             "propagate": False,
         },
         "uvicorn.error": {
@@ -231,6 +263,7 @@ def setup_logging():
             "host": KEEP_FLUENTBIT_HOST,
             "port": int(KEEP_FLUENTBIT_PORT),
             "service_name": SERVICE_NAME,
+            "filters": ["log_context"],
         }
         # Idempotent: setup_logging() may run more than once (e.g. in tests).
         if "fluentbit" not in CONFIG["loggers"][""]["handlers"]:

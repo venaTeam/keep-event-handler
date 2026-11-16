@@ -99,7 +99,7 @@ class MaintenanceWindowsBl:
             )
             return []
 
-        self.logger.info("Checking maintenance window for alert", extra=extra)
+        self.logger.debug("Checking maintenance window for alert", extra=extra)
         env = celpy.Environment()
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
@@ -127,7 +127,7 @@ class MaintenanceWindowsBl:
         hide_rules = [rule for rule in matched if not rule.suppress]
         applied = hide_rules or matched
         if not applied:
-            self.logger.info("Alert is not in maintenance window", extra=extra)
+            self.logger.debug("Alert is not in maintenance window", extra=extra)
             return []
 
         for maintenance_rule in applied:

@@ -30,10 +30,15 @@ async def extract_generic_body(request: Request) -> dict | bytes | FormData:
         return await request.form()
     else:
         try:
-            logger.debug("Parsing body as json")
-            body = await request.json()
-            logger.debug("Parsed body as json")
-            return body
+            return await request.json()
         except Exception:
-            logger.debug("Failed to parse body as json, returning raw body")
+            if isinstance(content_type, str) and content_type.startswith(
+                "application/json"
+            ):
+                logger.warning(
+                    "Failed to parse body as json, returning raw body",
+                    extra={"content_type": content_type},
+                )
+            else:
+                logger.debug("Failed to parse body as json, returning raw body")
             return await request.body()

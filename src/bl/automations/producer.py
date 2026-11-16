@@ -189,7 +189,9 @@ class MatchedProducer:
         automation_matched_producer_ready.set(1)
         if self._recovery_pending:
             self._recovery_pending = False
-            logger.info("Matched producer recovered (topic=%s)", MATCHED_ALERTS_TOPIC)
+            logger.info(
+                "Matched producer recovered", extra={"topic": MATCHED_ALERTS_TOPIC}
+            )
 
     @contextmanager
     def _lock_until(self, deadline: float):
@@ -235,7 +237,11 @@ class MatchedProducer:
             self._recovery_pending = True
             automation_matched_producer_ready.set(0)
             logger.error(
-                "Matched producer metadata check failed: %s", type(error).__name__
+                "Matched producer metadata check failed",
+                extra={
+                    "topic": MATCHED_ALERTS_TOPIC,
+                    "error_type": type(error).__name__,
+                },
             )
             return False
 
@@ -367,15 +373,20 @@ class MatchedProducer:
             self._recovery_pending = True
             automation_matched_producer_ready.set(0)
             logger.warning(
-                "Matched-message delivery incomplete "
-                "(topic=%s, acknowledged=%s, total=%s, failed=%s, pending=%s, "
-                "poll_error=%s)",
-                MATCHED_ALERTS_TOPIC,
-                acknowledged,
-                len(encoded),
-                len(failures),
-                len(pending),
-                type(polling_error).__name__ if polling_error is not None else None,
+                "Matched-message delivery incomplete",
+                extra={
+                    **delivery_context.get(),
+                    "topic": MATCHED_ALERTS_TOPIC,
+                    "acknowledged_count": acknowledged,
+                    "total_count": len(encoded),
+                    "failed_count": len(failures),
+                    "pending_count": len(pending),
+                    "poll_error_type": (
+                        type(polling_error).__name__
+                        if polling_error is not None
+                        else None
+                    ),
+                },
             )
             error = MatchedPublishError(
                 f"matched delivery incomplete ({acknowledged}/{len(encoded)} acknowledged)"
@@ -403,9 +414,18 @@ class MatchedProducer:
             try:
                 remaining = client.flush(max(0, deadline - self._clock()))
                 if remaining:
-                    logger.error("Producer shutdown: destination=%s undelivered=%s", destination, remaining)
+                    logger.error(
+                        "Producer shutdown left undelivered messages",
+                        extra={"destination": destination, "undelivered": remaining},
+                    )
             except Exception as error:
-                logger.error("Producer shutdown failed: destination=%s error=%s", destination, type(error).__name__)
+                logger.error(
+                    "Producer shutdown failed",
+                    extra={
+                        "destination": destination,
+                        "error_type": type(error).__name__,
+                    },
+                )
 
     def _get_dlq(self):
         if self._dlq_client is None:
@@ -478,10 +498,12 @@ class MatchedProducer:
         ).inc(len(encoded))
         automation_matched_dlq_ready.set(0)
         logger.error(
-            "Matched DLQ failed after bounded retries: topic=%s error=%s; raw offset unresolved",
-            self._dlq_topic,
-            type(last_error).__name__ if last_error else "unknown",
-            extra=delivery_context.get(),
+            "Matched DLQ failed after bounded retries; raw offset unresolved",
+            extra={
+                **delivery_context.get(),
+                "topic": self._dlq_topic,
+                "error_type": type(last_error).__name__ if last_error else "unknown",
+            },
         )
         raise MatchedPublishError(
             f"{str(cause)[:256]}; DLQ delivery failed; raw offset unresolved"
@@ -551,12 +573,14 @@ class MatchedProducer:
                 kind=record_type.value,
             ).inc(len(encoded))
             logger.warning(
-                "Matched messages parked in DLQ: topic=%s records=%s kind=%s; "
-                "this fan-out resolved, automation execution pending recovery",
-                self._dlq_topic,
-                len(encoded),
-                record_type.value,
-                extra=delivery_context.get(),
+                "Matched messages parked in DLQ; this fan-out resolved, "
+                "automation execution pending recovery",
+                extra={
+                    **delivery_context.get(),
+                    "topic": self._dlq_topic,
+                    "records_count": len(encoded),
+                    "kind": record_type.value,
+                },
             )
             return PublishOutcome.DLQ
         finally:
