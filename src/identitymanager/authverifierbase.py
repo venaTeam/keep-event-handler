@@ -330,17 +330,17 @@ class AuthVerifierBase:
             raise HTTPException(status_code=401, detail="Invalid API Key")
 
         try:
-            # skip the update if the key's last-used time is already cached
-            if (
-                f"{tenant_api_key.tenant_id}:{tenant_api_key.reference_id}"
-                not in self.key_last_used_updates
+            # refresh at most once per update_key_interval seconds
+            cache_key = f"{tenant_api_key.tenant_id}:{tenant_api_key.reference_id}"
+            now = datetime.datetime.now()
+            last_update = self.key_last_used_updates.get(cache_key)
+            if last_update is None or now - last_update > datetime.timedelta(
+                seconds=float(self.update_key_interval)
             ):
                 update_key_last_used(
                     tenant_api_key.tenant_id, reference_id=tenant_api_key.reference_id
                 )
-                self.key_last_used_updates[
-                    f"{tenant_api_key.tenant_id}:{tenant_api_key.reference_id}"
-                ] = datetime.datetime.now()
+                self.key_last_used_updates[cache_key] = now
         except Exception:
             self.logger.exception("Failed to update API Key last used")
 

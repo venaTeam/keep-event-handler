@@ -2502,6 +2502,15 @@ def add_alerts_to_incident(
                         continue
                     else:
                         raise
+            else:
+                logger.error(
+                    "Failed to update incident after adding alerts",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "incident_id": incident_id,
+                        "attempts": max_retries,
+                    },
+                )
             session.add(incident)
             session.refresh(incident)
 
