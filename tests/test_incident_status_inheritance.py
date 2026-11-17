@@ -217,6 +217,37 @@ def test_acknowledged_incident_also_hands_over_its_assignee(db_session):
     assert _state(db_session, fp)["assignee"] == "owner@keep"
 
 
+def test_a_firing_incidents_assignee_is_inherited(db_session):
+    """Claimed and then set back to firing: no status to hand over, but the
+    incident still has an owner, and so does an alert that joins it."""
+    incident = _incident(db_session, assignee="owner@keep")
+    fp = _alert(db_session, "inh-firing-owned")
+
+    add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+
+    state = _state(db_session, fp)
+    assert state["effective"] == "firing"
+    assert state["override"] is None
+    assert state["assignee"] == "owner@keep"
+
+
+def test_a_suppressed_incidents_assignee_is_inherited_with_the_dismissal(
+    db_session,
+):
+    incident = _incident(
+        db_session,
+        dismiss_mode=IncidentDismissMode.PERMANENT.value,
+        assignee="owner@keep",
+    )
+    fp = _alert(db_session, "inh-sup-owned")
+
+    add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+
+    state = _state(db_session, fp)
+    assert state["effective"] == "suppressed"
+    assert state["assignee"] == "owner@keep"
+
+
 def test_a_resolved_alert_is_never_dragged_out_of_resolved(db_session):
     incident = _incident(
         db_session, dismiss_mode=IncidentDismissMode.PERMANENT.value
