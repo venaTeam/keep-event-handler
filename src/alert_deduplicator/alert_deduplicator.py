@@ -272,7 +272,7 @@ class AlertDeduplicator:
             provider_type=provider_type or "keep",
             provider_id=provider_id,
             full_deduplication=True,
-            ignore_fields=["last_received"],
+            ignore_fields=["last_received", "time_created"],
             priority=0,
             last_updated=None,
             last_updated_by=None,

@@ -64,6 +64,7 @@ def test_enrichment_columns_match_model():
     assert LASTALERT_ENRICHMENT_COLUMNS == {
         "status", "status_disposable", "dismiss_mode", "dismissed_until", "assignee",
         "note", "deleted", "ticket_type", "ticket_url", "ticket_provider_id",
+        "automation_matched", "grace_seconds",
     }
 
 

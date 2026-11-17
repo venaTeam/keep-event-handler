@@ -19,6 +19,9 @@ from sqlmodel import Session, select
 
 # internals
 from src.alert_deduplicator.alert_deduplicator import AlertDeduplicator
+from src.bl.automations.publish_matches import publish_matches
+from src.bl.automations.errors import AutomationStampError
+from src.bl.automations.producer import MatchedPublishError
 from src.bl.enrichments_bl import EnrichmentsBl
 from src.bl.incidents_bl import IncidentBl
 from src.bl.maintenance_windows_bl import MaintenanceWindowsBl
@@ -32,14 +35,20 @@ from src.config.consts import (
 )
 from src.event_management.error_storm_guard import should_record_error
 from src.core.db.db import (
+    _last_alert_is_newer,
     apply_dismiss_lifecycle,
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
+    fold_held_back_occurrence,
     get_last_alert_by_fingerprint,
     get_last_alert_hashes_by_fingerprints,
+    get_last_alert_window_states,
     last_alert_enrichments_dict,
     get_provider_by_name,
     get_session_sync,
+    hold_back_occurrence,
+    MAINTENANCE_TAG_HIDE,
+    set_maintenance_window_tags,
     get_started_at_for_alerts,
     set_last_alert,
 )
@@ -85,9 +94,7 @@ from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 
 # Background pool that delivers SSE notifications off the Kafka consumer thread.
-# It also performs the remaining consumer-thread notify work — alert
-# serialization and the per-preset CEL filtering loop — so none of it runs on
-# the consumer hot path.
+# Alert snapshots are prepared on the consumer thread before submission.
 # SSE_NOTIFY_WORKERS=1 (default) keeps notifications strictly FIFO-ordered; raising
 # it speeds up delivery when the gateway is slow, at the cost of strict ordering
 # (safe here: the UI dedups poll-alerts by fingerprint; other events are idempotent).
@@ -166,6 +173,11 @@ def _merge_coalesced_data(old_data, new_data):
     latest value."""
     if not isinstance(old_data, dict) or not isinstance(new_data, dict):
         return new_data
+    if old_data == {} or new_data == {}:
+        # An empty payload means "refetch everything", which already covers
+        # any listed alerts; merging a list into it would turn it into a
+        # local prepend in the UI and lose the refetch.
+        return {}
     merged = dict(old_data)
     for field, new_val in new_data.items():
         old_val = merged.get(field)
@@ -244,12 +256,45 @@ def _notify_client(api_url, tenant_id, alerts_payload, incidents, notification_c
     """Queue the notifications the UI reacts to for a processed batch: `poll-alerts`
     with an immutable snapshot of the alerts, and `incident-change` when incidents
     were touched. Both go through the notify pool, off the consumer thread."""
-    _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
+    if alerts_payload:
+        _submit_notify(api_url, tenant_id, "poll-alerts", {"alerts": alerts_payload})
     if incidents and notification_cache.should_notify(tenant_id, "incident-change"):
         incident_ids = [str(incident.id) for incident in incidents]
         _submit_notify(
             api_url, tenant_id, "incident-change", {"incident_ids": incident_ids}
         )
+
+
+def _submit_preset_notify(api_url, tenant_id, alerts_payload):
+    """Run preset filtering off the consumer thread using immutable snapshots."""
+    try:
+        _sse_pool.submit(_run_preset_filter, api_url, tenant_id, alerts_payload)
+    except Exception:
+        logger.warning(
+            "SSE preset notify submit failed",
+            extra={"event": "poll-presets", "tenant_id": tenant_id},
+        )
+
+
+def _run_preset_filter(api_url, tenant_id, alerts_payload):
+    try:
+        alerts = [AlertDto(**alert_dict) for alert_dict in alerts_payload]
+        notification_cache = get_notification_cache()
+        presets = get_all_presets_dtos(tenant_id)
+        rules_engine = RulesEngine(tenant_id=tenant_id)
+        matching_presets = []
+        for preset_dto in presets:
+            if rules_engine.filter_alerts(alerts, preset_dto.cel_query):
+                matching_presets.append(preset_dto)
+        if notification_cache.should_notify(tenant_id, "poll-presets"):
+            _submit_notify(
+                api_url,
+                tenant_id,
+                "poll-presets",
+                {"preset_names": [preset.name.lower() for preset in matching_presets]},
+            )
+    except Exception:
+        logger.exception("Failed to send presets via SSE", extra={"tenant_id": tenant_id})
 
 
 def shutdown_sse_pool(wait: bool = True):
@@ -385,6 +430,13 @@ def __validate_last_received(event):
             ).isoformat()
 
 
+def _naive_utc(value: datetime.datetime) -> datetime.datetime:
+    # Alert.timestamp is stored as naive UTC.
+    if value.tzinfo is not None:
+        value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def __save_to_db(
     tenant_id,
     provider_type,
@@ -394,7 +446,21 @@ def __save_to_db(
     deduplicated_events: list[AlertDto],
     provider_id: str | None = None,
     timestamp_forced: datetime.datetime | None = None,
+    hidden_window_ids: dict[int, list[int]] | None = None,
+    frozen_window_ids: dict[int, list[int]] | None = None,
 ):
+    """`hidden_window_ids` maps id(event) to the "Hide From Feed" windows that
+    matched it, the one that ends last first. They are written to its LastAlert
+    row (set_maintenance_window_tags), and the returned (enriched) event
+    objects are added to the map so the caller can keep them out of
+    correlation and client notifications.
+
+    `frozen_window_ids` does the same for occurrences of an alert already on
+    screen that such a window matched: they are stored in history, but their
+    LastAlert row keeps showing the pre-window occurrence and holds them back
+    (hold_back_occurrence) until the window stops being active."""
+    hidden_window_ids = {} if hidden_window_ids is None else hidden_window_ids
+    frozen_window_ids = {} if frozen_window_ids is None else frozen_window_ids
     logger.info(
         "Starting __save_to_db",
         extra={
@@ -447,13 +513,45 @@ def __save_to_db(
                         "last_received": event.last_received,
                     },
                 )
+                last_received = event.last_received
+                if isinstance(last_received, str):
+                    last_received = dateutil.parser.isoparse(last_received)
+                frozen_windows = frozen_window_ids.get(id(event))
+                if frozen_windows and hold_back_occurrence(
+                    tenant_id,
+                    event.fingerprint,
+                    frozen_windows,
+                    last_received,
+                    session,
+                ):
+                    continue
                 last_alert = get_last_alert_by_fingerprint(
                     tenant_id, event.fingerprint, session=session, for_update=True
                 )
                 if last_alert:
-                    last_received = event.last_received
-                    if isinstance(last_received, str):
-                        last_received = dateutil.parser.isoparse(last_received)
+                    fold_held_back_occurrence(last_alert, session)
+                    # Only advance if this occurrence is actually newer in
+                    # event time. A DLQ replay is processed after its newer
+                    # successors but carries an older `last_received` (e.g. a
+                    # late firing replay after the resolve already landed);
+                    # overwriting unconditionally would drag last_received
+                    # backwards — and could re-fire dismiss/undismiss
+                    # lifecycle on stale state.
+                    stored_lr = last_alert.last_received
+                    if _last_alert_is_newer(
+                        last_alert, {"last_received": last_received}
+                    ):
+                        logger.info(
+                            "Out-of-order deduplicated occurrence ignored "
+                            "(event-time last_received older than stored)",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "fingerprint": event.fingerprint,
+                                "incoming_last_received": last_received,
+                                "stored_last_received": stored_lr,
+                            },
+                        )
+                        continue
                     last_alert.last_received = last_received
                     # Auto-undismiss / dispose even though this occurrence was
                     # deduplicated. Guard on a newer timestamp, like
@@ -462,6 +560,12 @@ def __save_to_db(
                         tzinfo=datetime.timezone.utc
                     ) < last_received.replace(tzinfo=datetime.timezone.utc):
                         apply_dismiss_lifecycle(last_alert, event.status)
+                        set_maintenance_window_tags(
+                            session,
+                            last_alert,
+                            MAINTENANCE_TAG_HIDE,
+                            hidden_window_ids.get(id(event), []),
+                        )
                     session.add(last_alert)
                     session.flush()
                 else:
@@ -553,6 +657,9 @@ def __save_to_db(
                 },
             )
             formatted_event.pushed = True
+            # Read before the extraction rules, which may replace the object.
+            hidden_windows = hidden_window_ids.get(id(formatted_event), [])
+            frozen_windows = frozen_window_ids.get(id(formatted_event), [])
 
             started_at = started_at_for_fingerprints.get(
                 formatted_event.fingerprint, None
@@ -649,6 +756,19 @@ def __save_to_db(
                 "last_received": last_received_val,
                 "started_at": getattr(formatted_event, "started_at", None),
             }
+            # A late occurrence (e.g. a DLQ replay landing after its successor)
+            # is kept in the history at its event time, but must not become
+            # the current state or run the rest of the pipeline.
+            stored_last_alert = get_last_alert_by_fingerprint(
+                tenant_id, formatted_event.fingerprint, session=session
+            )
+            out_of_order = (
+                stored_last_alert is not None
+                and last_received_val is not None
+                and _last_alert_is_newer(stored_last_alert, tracking)
+            )
+            if out_of_order:
+                alert_args["timestamp"] = _naive_utc(last_received_val)
             if timestamp_forced is not None:
                 alert_args["timestamp"] = timestamp_forced
 
@@ -687,7 +807,8 @@ def __save_to_db(
                     },
                 )
                 session.flush()
-                saved_alerts.append(alert)
+                if not out_of_order:
+                    saved_alerts.append(alert)
                 alert_id = alert.id
                 formatted_event.event_id = str(alert_id)
                 logger.debug(
@@ -743,6 +864,9 @@ def __save_to_db(
                         user_id="system",
                         description=f"Alert recieved from provider with status {formatted_event.status}",
                     )
+                    if out_of_order:
+                        # Sort the activity entry by when it happened, too.
+                        audit.timestamp = alert_args["timestamp"]
                     session.add(audit)
                     logger.debug(
                         "Audit event added to session",
@@ -802,9 +926,24 @@ def __save_to_db(
                         else None,
                     },
                 )
-                last_alert = set_last_alert(
-                    tenant_id, alert, session=session, tracking=tracking
-                )
+                last_alert = None
+                if frozen_windows:
+                    last_alert = hold_back_occurrence(
+                        tenant_id,
+                        alert.fingerprint,
+                        frozen_windows,
+                        last_received_val,
+                        session,
+                        alert=alert,
+                    )
+                if last_alert is None:
+                    last_alert = set_last_alert(
+                        tenant_id,
+                        alert,
+                        session=session,
+                        tracking=tracking,
+                        maintenance_window_ids=hidden_windows,
+                    )
                 if last_alert is not None:
                     formatted_event.firing_start_time = last_alert.firing_start_time
                     formatted_event.firing_start_time_since_last_resolved = (
@@ -838,6 +977,18 @@ def __save_to_db(
                     },
                 )
                 raise
+
+            if out_of_order:
+                logger.info(
+                    "Out-of-order occurrence kept in history only",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "fingerprint": formatted_event.fingerprint,
+                        "last_received": last_received_val,
+                        "stored_last_received": stored_last_alert.last_received,
+                    },
+                )
+                continue
 
             # Mapping
             try:
@@ -904,6 +1055,10 @@ def __save_to_db(
                     },
                 )
             enriched_formatted_events.append(formatted_event)
+            if hidden_windows:
+                hidden_window_ids[id(formatted_event)] = hidden_windows
+            if frozen_windows:
+                frozen_window_ids[id(formatted_event)] = frozen_windows
             logger.debug(
                 "Completed processing formatted event",
                 extra={
@@ -1052,6 +1207,43 @@ def __save_to_db(
         raise
 
 
+def __freeze_alerts_on_screen(
+    tenant_id,
+    session: Session,
+    formatted_events: list[AlertDto],
+    hidden_window_ids: dict[int, list[int]],
+    frozen_window_ids: dict[int, list[int]],
+    active_hide_window_ids: set[int],
+) -> None:
+    """A "Hide From Feed" window only hides an alert that is not on screen
+    yet: its first occurrence, or one that is still hidden by an active
+    window. An alert already on screen, whatever its status (resolved
+    included), stays visible rather than disappearing, but frozen: the feed
+    keeps showing its pre-window occurrence until the window stops being
+    active, and then catches up to the latest one. An occurrence the window
+    does not match (e.g. a status in its ignore_statuses) updates it at once.
+
+    Moves such events from `hidden_window_ids` to `frozen_window_ids` in place.
+    """
+    previous = get_last_alert_window_states(
+        tenant_id,
+        list(
+            {e.fingerprint for e in formatted_events if id(e) in hidden_window_ids}
+        ),
+        session=session,
+    )
+    for event in formatted_events:
+        if id(event) not in hidden_window_ids:
+            continue
+        state = previous.get(event.fingerprint)
+        if state is None:
+            continue  # first occurrence: hide
+        previous_windows, _ = state
+        if previous_windows & active_hide_window_ids:
+            continue  # already hidden by an active window
+        frozen_window_ids[id(event)] = hidden_window_ids.pop(id(event))
+
+
 def __handle_formatted_events(
     tenant_id,
     provider_type,
@@ -1086,33 +1278,42 @@ def __handle_formatted_events(
         },
     )
 
-    # first, check for maintenance windows
+    # first, check for maintenance windows. Events matched by a "Hide From Feed"
+    # window are stored like any other, tagged with the window's id; the
+    # gateway's feed query hides them while that window is active. Keyed by
+    # id(event), not fingerprint: one batch can hold a hidden and a visible
+    # occurrence of the same fingerprint. Occurrences of an alert already on
+    # screen go to frozen_window_ids instead (see __freeze_alerts_on_screen).
+    hidden_window_ids: dict[int, list[int]] = {}
+    frozen_window_ids: dict[int, list[int]] = {}
     if KEEP_MAINTENANCE_WINDOWS_ENABLED:
         with tracer.start_as_current_span("process_event_maintenance_windows_check"):
             maintenance_windows_bl = MaintenanceWindowsBl(
                 tenant_id=tenant_id, session=session
             )
             if maintenance_windows_bl.maintenance_rules:
-                formatted_events = [
-                    event
-                    for event in formatted_events
-                    if maintenance_windows_bl.check_if_alert_in_maintenance_windows(
-                        event
+                for event in formatted_events:
+                    window_ids = maintenance_windows_bl.get_hiding_window_ids(event)
+                    if window_ids:
+                        hidden_window_ids[id(event)] = window_ids
+                if hidden_window_ids:
+                    __freeze_alerts_on_screen(
+                        tenant_id,
+                        session,
+                        formatted_events,
+                        hidden_window_ids,
+                        frozen_window_ids,
+                        {
+                            rule.id
+                            for rule in maintenance_windows_bl.maintenance_rules
+                            if not rule.suppress
+                        },
                     )
-                    is False
-                ]
             else:
                 logger.debug(
                     "No maintenance windows configured for this tenant",
                     extra={"tenant_id": tenant_id},
                 )
-
-            if not formatted_events:
-                logger.info(
-                    "No alerts to process after running maintenance windows check",
-                    extra={"tenant_id": tenant_id},
-                )
-                return
 
     with tracer.start_as_current_span("process_event_deduplication"):
         # second, filter out any deduplicated events
@@ -1129,6 +1330,10 @@ def __handle_formatted_events(
             event = alert_deduplicator.apply_deduplication(
                 event, deduplication_rules, last_alerts_fingerprint_to_hash
             )
+
+        # Persistence dedup may remove a raw redelivery. B5 must still see it,
+        # preserving the stable upstream alert id in the matched message.
+        automation_events = list(formatted_events)
 
         # filter out the deduplicated events
         deduplicated_events = list(
@@ -1165,6 +1370,8 @@ def __handle_formatted_events(
             deduplicated_events,
             provider_id,
             timestamp_forced,
+            hidden_window_ids,
+            frozen_window_ids,
         )
 
     # let's save all fields to the DB so that we can use them in the future such in deduplication fields suggestions
@@ -1231,6 +1438,21 @@ def __handle_formatted_events(
                     )
                     continue
 
+    # Hidden and frozen events stay silent while their window is active: no
+    # correlation, no push to open feeds. They are still returned as processed.
+    hidden_events = [
+        event
+        for event in enriched_formatted_events
+        if id(event) in hidden_window_ids or id(event) in frozen_window_ids
+    ]
+    if hidden_events:
+        enriched_formatted_events = [
+            event
+            for event in enriched_formatted_events
+            if id(event) not in hidden_window_ids
+            and id(event) not in frozen_window_ids
+        ]
+
     if MAINTENANCE_WINDOW_ALERT_STRATEGY == "recover_previous_status":
         ignored_events = list(
             filter(
@@ -1274,19 +1496,37 @@ def __handle_formatted_events(
     if MAINTENANCE_WINDOW_ALERT_STRATEGY == "recover_previous_status":
         enriched_formatted_events.extend(ignored_events)
 
-    with tracer.start_as_current_span("process_event_notify_client"):
-        if not notify_client:
-            return
-        api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
-        logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
-        _notify_client(
-            api_url,
-            tenant_id,
-            [alert.dict() for alert in enriched_formatted_events],
-            incidents,
-            get_notification_cache(),
-        )
-    return enriched_formatted_events
+    if notify_client:
+        if hidden_events and not enriched_formatted_events and not incidents:
+            logger.info(
+                "All alerts in the batch are hidden or frozen by maintenance windows, not notifying",
+                extra={"tenant_id": tenant_id},
+            )
+            publish_matches(tenant_id, automation_events)
+            return hidden_events
+        try:
+            with tracer.start_as_current_span("process_event_notify_client"):
+                api_url = os.environ.get("KEEP_API_URL", "http://localhost:8080")
+                logger.info(f"Notifying API at {api_url} to poll alerts for {tenant_id}")
+                _notify_client(
+                    api_url,
+                    tenant_id,
+                    [alert.dict() for alert in enriched_formatted_events],
+                    incidents,
+                    get_notification_cache(),
+                )
+        except Exception as error:
+            logger.warning(
+                "Failed to schedule alert notifications; continuing matched publishing "
+                "(tenant_id=%s, error_type=%s)",
+                tenant_id, type(error).__name__,
+            )
+
+    # Finish indexing, correlation, and notification scheduling before waiting
+    # on matched Kafka. Include persistence duplicates for raw redelivery.
+    # Delivery failures still propagate to the raw-offset gate.
+    publish_matches(tenant_id, automation_events)
+    return enriched_formatted_events + hidden_events
 
 
 @processing_time_summary.time()
@@ -1304,8 +1544,10 @@ def process_event(
     notify_client: bool = True,
     timestamp_forced: datetime.datetime | None = None,
     provider_name: str | None = None,
+    received_at: str | None = None,
 ) -> list[Alert]:
     start_time = time.time()
+    received_at = received_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
     job_id = ctx.get("job_id")
 
     extra_dict = {
@@ -1651,6 +1893,12 @@ def process_event(
                 event = [event]
                 raw_event = [raw_event]
 
+            # Provider parsing is complete. Preserve supplied firing times,
+            # including invalid values for existing validation to handle.
+            for alert in event:
+                if alert.time_created is None:
+                    alert.time_created = received_at
+
             with tracer.start_as_current_span("process_event_internal_preparation"):
                 logger.debug(
                     "Running internal preparation",
@@ -1719,6 +1967,22 @@ def process_event(
             )
             return []
     except Exception as e:
+        # Standalone Kafka uses an empty context: the consumer owns retries and
+        # the terminal record (DLQ or alertraw), so every failure must reach it
+        # instead of being swallowed. ARQ keeps the error recording and Retry
+        # behavior below.
+        if not ctx:
+            if not isinstance(e, (MatchedPublishError, AutomationStampError)):
+                logger.exception(
+                    "Error processing event",
+                    extra={
+                        **extra_dict,
+                        "processing_time": time.time() - start_time,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    },
+                )
+            raise
         error_type = type(e).__name__
         error_message = str(e)
         stacktrace = traceback.format_exc()
@@ -1789,27 +2053,18 @@ def process_event(
 
         events_error_counter.inc()
 
-        # Retrying only if context is present (running the job in arq worker)
-        if bool(ctx):
-            retry_defer = ctx["job_try"] * TIMES_TO_RETRY_JOB
-            logger.warning(
-                "Retrying job",
-                extra={
-                    **extra_dict,
-                    "job_try": ctx.get("job_try", 0),
-                    "retry_defer": retry_defer,
-                    "error_type": error_type,
-                },
-            )
-            raise Retry(defer=retry_defer)
-        else:
-            logger.warning(
-                "Not retrying job (no context)",
-                extra={
-                    **extra_dict,
-                    "error_type": error_type,
-                },
-            )
+        # Only the arq worker reaches here (Kafka mode re-raised above).
+        retry_defer = ctx["job_try"] * TIMES_TO_RETRY_JOB
+        logger.warning(
+            "Retrying job",
+            extra={
+                **extra_dict,
+                "job_try": ctx.get("job_try", 0),
+                "retry_defer": retry_defer,
+                "error_type": error_type,
+            },
+        )
+        raise Retry(defer=retry_defer)
     finally:
         alert_enrichment_duration_seconds.labels(
             source=provider_type or "unknown"

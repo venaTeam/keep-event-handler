@@ -1,4 +1,4 @@
-"""AUTOMATION_INDEX_ENABLED — the deployment gate for this whole surface.
+"""AUTOMATION_MATCHING_ENABLED — the deployment gate for this whole surface.
 
 The automations feature spans several stories and repos, so the code has to be
 mergeable and deployable while the feature is not ready to run. Off must mean
@@ -17,12 +17,12 @@ from tests.automations.conftest import metric_value
 
 @pytest.fixture
 def gate_off(monkeypatch):
-    monkeypatch.setattr(settings, "AUTOMATION_INDEX_ENABLED", False)
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", False)
 
 
 @pytest.fixture
 def gate_on(monkeypatch):
-    monkeypatch.setattr(settings, "AUTOMATION_INDEX_ENABLED", True)
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", True)
 
 
 # -- the setting itself ----------------------------------------------------
@@ -32,7 +32,20 @@ def test_default_is_off():
     """Unset must mean off — the safe side of a deployment gate."""
     from src.config import consts
 
-    assert consts.AUTOMATION_INDEX_ENABLED is False
+    assert consts.AUTOMATION_MATCHING_ENABLED is False
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_single_flag_controls_index_and_producer(monkeypatch, enabled):
+    from unittest.mock import Mock
+    from src.bl.automations.producer import MatchedProducer
+
+    monkeypatch.setattr(settings, "AUTOMATION_MATCHING_ENABLED", enabled)
+    service = TriggerIndexService()
+    producer = MatchedProducer(client=Mock())
+
+    assert service._enabled is enabled
+    assert producer.enabled is enabled
 
 
 @pytest.mark.parametrize(
@@ -55,8 +68,8 @@ def test_default_is_off():
 def test_environment_values_parse_to_the_safe_side(raw, expected, monkeypatch):
     from src.config.config import config
 
-    monkeypatch.setenv("AUTOMATION_INDEX_ENABLED", raw)
-    assert config("AUTOMATION_INDEX_ENABLED", default=False, cast=bool) is expected
+    monkeypatch.setenv("AUTOMATION_MATCHING_ENABLED", raw)
+    assert config("AUTOMATION_MATCHING_ENABLED", default=False, cast=bool) is expected
 
 
 # -- off means nothing runs -------------------------------------------------

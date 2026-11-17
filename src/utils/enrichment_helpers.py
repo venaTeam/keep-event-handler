@@ -104,6 +104,10 @@ def _last_alert_to_dto_payload(last_alert) -> dict:
     """Build the DTO payload contribution (user enrichment + relocated tracking
     fields) from a LastAlert row's typed columns."""
     payload: dict = {}
+    for field in ("automation_matched", "grace_seconds"):
+        value = getattr(last_alert, field, None)
+        if value is not None:
+            payload[field] = value
     # user enrichment state. Status is DERIVED: a live dismissal reads as
     # suppressed, and when a time-boxed one lapses the stored override takes over
     # again (or nothing, leaving the provider's own status in place — hence the
