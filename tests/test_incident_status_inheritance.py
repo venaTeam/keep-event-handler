@@ -130,6 +130,55 @@ def test_linking_inherits_the_incidents_deadline(db_session):
     assert state["dismissed_until"] is not None
 
 
+def test_a_status_suppressed_alert_lapses_with_the_incident(db_session):
+    """The status dropdown stores 'suppressed' as a plain status. Inheriting the
+    incident's dismissal must drop it, or the alert reads suppressed forever
+    after the incident's deadline instead of returning to firing."""
+    incident = _incident(
+        db_session,
+        dismiss_mode=IncidentDismissMode.DISMISS_UNTIL.value,
+        dismissed_until=_future(90),
+    )
+    fp = _alert(db_session, "inh-status-sup")
+    last_alert = (
+        db_session.query(LastAlert).filter(LastAlert.fingerprint == fp).one()
+    )
+    last_alert.status = "suppressed"
+    db_session.commit()
+
+    add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+
+    state = _state(db_session, fp)
+    assert state["effective"] == "suppressed"
+    assert state["override"] is None
+    assert state["dismiss_mode"] == IncidentDismissMode.DISMISS_UNTIL.value
+
+    last_alert = (
+        db_session.query(LastAlert).filter(LastAlert.fingerprint == fp).one()
+    )
+    last_alert.dismissed_until = _past(5)
+    db_session.commit()
+    assert _state(db_session, fp)["effective"] == "firing"
+
+
+def test_an_acknowledged_alert_keeps_its_override_under_the_dismissal(db_session):
+    incident = _incident(
+        db_session,
+        dismiss_mode=IncidentDismissMode.DISMISS_UNTIL.value,
+        dismissed_until=_future(90),
+    )
+    fp = _alert(db_session, "inh-ack-override")
+    last_alert = (
+        db_session.query(LastAlert).filter(LastAlert.fingerprint == fp).one()
+    )
+    last_alert.status = "acknowledged"
+    db_session.commit()
+
+    add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+
+    assert _state(db_session, fp)["override"] == "acknowledged"
+
+
 def test_an_expired_incident_dismissal_is_not_inherited(db_session):
     """An incident whose deadline has passed is firing again, so it imposes
     nothing — and must not hand out a dismissal that is already over."""
