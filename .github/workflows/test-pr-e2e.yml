@@ -70,10 +70,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -85,7 +85,7 @@ jobs:
 
       - name: Cache dependencies
         id: cache-deps
-        uses: actions/cache@v4.2.0
+        uses: actions/cache@v6
         with:
           path: .venv
           key: pydeps-${{ hashFiles('**/poetry.lock') }}
