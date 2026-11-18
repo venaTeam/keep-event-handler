@@ -107,7 +107,13 @@ def test_translate_dismissed_false_clears():
 def test_dismiss_mode_forwarded_directly():
     out = normalize_enrichments({"status": "suppressed", "dismiss_mode": "until_resolved"})
     assert out["dismiss_mode"] == "until_resolved"
-    assert out["status"] == "suppressed"
+    # 'suppressed' is never stored as a status; the dismissal carries it.
+    assert "status" not in out
+
+
+def test_status_suppressed_alone_becomes_a_permanent_dismissal():
+    out = normalize_enrichments({"status": "suppressed", "note": "n"})
+    assert out == {"dismiss_mode": "permanent", "dismissed_until": None, "note": "n"}
 
 
 def test_unknown_key_rejected_strict():
@@ -357,7 +363,8 @@ def test_permanent_dismiss_stays_dismissed_on_firing_refire(db_session):
     )
     _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=1))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status == "suppressed"
+    assert la.get_effective_status() == "suppressed"
+    assert la.status is None
     assert la.dismiss_mode == "permanent"
 
 
@@ -540,7 +547,8 @@ def test_dedup_path_keeps_permanent_dismiss_on_firing_full_duplicate(db_session)
     )
     _save_dedup(db_session, _dedup_dto(fp, AlertStatus.FIRING.value))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status == "suppressed"
+    assert la.get_effective_status() == "suppressed"
+    assert la.status is None
     assert la.dismiss_mode == "permanent"
 
 

@@ -17,8 +17,9 @@ Mirrors `tests/test_incident_status_propagation.py` in keep-api-gateway.
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from src.core.db.db import add_alerts_to_incident, set_last_alert
+from src.core.db.db import add_alerts_to_incident, enrich_entity, set_last_alert
 from src.core.dependencies import SINGLE_TENANT_UUID
+from src.models.action_type import ActionType
 from src.models.alert import AlertStatus
 from src.models.db.alert import Alert, LastAlert
 from src.models.db.incident import Incident, IncidentDismissMode, IncidentStatus
@@ -131,20 +132,26 @@ def test_linking_inherits_the_incidents_deadline(db_session):
 
 
 def test_a_status_suppressed_alert_lapses_with_the_incident(db_session):
-    """The status dropdown stores 'suppressed' as a plain status. Inheriting the
-    incident's dismissal must drop it, or the alert reads suppressed forever
-    after the incident's deadline instead of returning to firing."""
+    """The status dropdown's "suppressed" is saved as a permanent dismissal, not
+    as the alert's status, so inheriting the incident's dismissal replaces it and
+    the alert comes back firing on the incident's clock."""
     incident = _incident(
         db_session,
         dismiss_mode=IncidentDismissMode.DISMISS_UNTIL.value,
         dismissed_until=_future(90),
     )
     fp = _alert(db_session, "inh-status-sup")
-    last_alert = (
-        db_session.query(LastAlert).filter(LastAlert.fingerprint == fp).one()
+    enrich_entity(
+        SINGLE_TENANT_UUID,
+        fp,
+        {"status": "suppressed"},
+        action_type=ActionType.GENERIC_ENRICH,
+        action_callee="tester@keep",
+        action_description="status dropdown",
+        session=db_session,
     )
-    last_alert.status = "suppressed"
-    db_session.commit()
+    assert _state(db_session, fp)["dismiss_mode"] == IncidentDismissMode.PERMANENT.value
+    assert _state(db_session, fp)["override"] is None
 
     add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
 

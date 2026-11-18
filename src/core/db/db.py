@@ -358,7 +358,8 @@ def normalize_enrichments(enrichments: dict, strict: bool = True) -> dict:
     (`LastAlert.get_effective_status`), so `status` is left holding the override
     the alert reverts to when the dismissal lapses. An explicit `status` in the
     same payload is still honoured — it is a status change that happens to travel
-    with a dismissal, not part of the dismissal.
+    with a dismissal, not part of the dismissal — except `status='suppressed'`,
+    which is saved as a permanent dismissal so it is never stored as a status.
 
     Kept identical to keep-api-gateway's copy: both services write these columns
     in the same database, so a divergence here means the two disagree about which
@@ -398,6 +399,16 @@ def normalize_enrichments(enrichments: dict, strict: bool = True) -> dict:
         # Clearing dismiss_mode directly also clears the deadline, so a stale
         # timestamp can't outlive the dismissal it belonged to.
         normalized.setdefault("dismissed_until", None)
+
+    # The status dropdown's "suppressed" is a dismissal, not a status. Stored as a
+    # status it never lapses and becomes what the alert "reverts" to, so save it as
+    # a permanent dismissal (or let a dismissal sent with it carry it). `status`
+    # then only ever holds something the alert can come back as.
+    if normalized.get("status") == AlertStatus.SUPPRESSED.value:
+        normalized.pop("status")
+        if not normalized.get("dismiss_mode"):
+            normalized["dismiss_mode"] = DismissMode.PERMANENT.value
+            normalized["dismissed_until"] = None
 
     unknown = set(normalized) - LASTALERT_ENRICHMENT_COLUMNS
     if unknown:
@@ -2421,14 +2432,6 @@ def inherit_incident_status(
         if last_alert.get_effective_status(provider_status) == "resolved":
             continue
         _apply_enrichments_to_last_alert(last_alert, enrichments)
-        if (
-            effective == IncidentStatus.SUPPRESSED.value
-            and last_alert.status == IncidentStatus.SUPPRESSED.value
-        ):
-            # A stored 'suppressed' (the status dropdown still writes one) is not
-            # an override to revert to: left in place, the alert would stay
-            # suppressed after the incident's dismissal lapses.
-            last_alert.status = None
         session.add(last_alert)
         session.add(
             AlertAudit(
