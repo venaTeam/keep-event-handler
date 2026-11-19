@@ -21,7 +21,7 @@ from src.core.db.db import add_alerts_to_incident, enrich_entity, set_last_alert
 from src.core.dependencies import SINGLE_TENANT_UUID
 from src.models.action_type import ActionType
 from src.models.alert import AlertStatus
-from src.models.db.alert import Alert, LastAlert
+from src.models.db.alert import Alert, AlertAudit, LastAlert
 from src.models.db.incident import Incident, IncidentDismissMode, IncidentStatus
 
 
@@ -253,6 +253,54 @@ def test_a_suppressed_incidents_assignee_is_inherited_with_the_dismissal(
     state = _state(db_session, fp)
     assert state["effective"] == "suppressed"
     assert state["assignee"] == "owner@keep"
+
+
+def test_a_candidate_incident_hands_over_nothing(db_session):
+    """A "require approval" rule's candidate: nobody has approved the grouping."""
+    incident = _incident(
+        db_session,
+        status=IncidentStatus.ACKNOWLEDGED,
+        assignee="rule-owner@keep",
+        is_candidate=True,
+    )
+    fp = _alert(db_session, "inh-candidate")
+
+    add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+
+    state = _state(db_session, fp)
+    assert state["effective"] == "firing"
+    assert state["assignee"] is None
+
+
+def _audit_actions(db_session, fingerprint):
+    return [
+        audit.action
+        for audit in db_session.query(AlertAudit)
+        .filter(AlertAudit.fingerprint == fingerprint)
+        .all()
+    ]
+
+
+def test_an_assignee_only_inheritance_is_not_logged_as_a_status_change(db_session):
+    incident = _incident(db_session, assignee="owner@keep")
+    fp = _alert(db_session, "inh-audit-assignee")
+
+    add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+
+    actions = _audit_actions(db_session, fp)
+    assert ActionType.GENERIC_ENRICH.value in actions
+    assert ActionType.MANUAL_STATUS_CHANGE.value not in actions
+
+
+def test_an_acknowledging_inheritance_is_logged_as_a_status_change(db_session):
+    incident = _incident(
+        db_session, status=IncidentStatus.ACKNOWLEDGED, assignee="owner@keep"
+    )
+    fp = _alert(db_session, "inh-audit-ack")
+
+    add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+
+    assert ActionType.MANUAL_STATUS_CHANGE.value in _audit_actions(db_session, fp)
 
 
 def test_a_resolved_alert_is_never_dragged_out_of_resolved(db_session):
