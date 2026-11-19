@@ -3,7 +3,7 @@ import logging
 import os
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
@@ -11,7 +11,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import Session
 
-from src.bl.enrichments_bl import EnrichmentsBl
 from src.core.db.db import (
     add_alerts_to_incident,
     add_audit,
@@ -37,7 +36,6 @@ from src.models.db.rule import ResolveOn
 from src.models.incident import IncidentDto, IncidentDtoIn, IncidentSorting
 from src.utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
 from src.utils.pagination import IncidentsPaginatedResultsDto
-from src.identitymanager.authenticatedidentity import AuthenticatedEntity
 
 MIN_INCIDENT_ALERTS_FOR_SUMMARY_GENERATION = int(
     os.environ.get("MIN_INCIDENT_ALERTS_FOR_SUMMARY_GENERATION", 5)
@@ -376,79 +374,3 @@ class IncidentBl:
                         continue
 
         return incident
-
-    def change_status(
-        self,
-        incident_id: UUID | str,
-        new_status: IncidentStatus,
-        change_by: AuthenticatedEntity,
-        dispose_on_new_alert: bool = False,
-    ) -> IncidentDto:
-        self.logger.info(
-            "Fetching incident",
-            extra={
-                "incident_id": incident_id,
-                "tenant_id": self.tenant_id,
-            },
-        )
-
-        with_alerts = new_status in [
-            IncidentStatus.RESOLVED,
-            IncidentStatus.ACKNOWLEDGED,
-        ]
-        incident = get_incident_by_id(
-            self.tenant_id, incident_id, with_alerts=with_alerts, session=self.session
-        )
-
-        if not incident:
-            raise HTTPException(status_code=404, detail="Incident not found")
-
-        if new_status in [IncidentStatus.RESOLVED, IncidentStatus.ACKNOWLEDGED]:
-            enrichments = {"status": new_status.value}
-            fingerprints = [alert.fingerprint for alert in incident.alerts]
-            enrichments_bl = EnrichmentsBl(self.tenant_id, db=self.session)
-            (
-                action_type,
-                action_description,
-                should_run_workflow,
-                should_check_incidents_resolution,
-            ) = enrichments_bl.get_enrichment_metadata(enrichments, change_by)
-            enrichments_bl.batch_enrich(
-                fingerprints,
-                enrichments,
-                action_type,
-                change_by.email,
-                action_description,
-                dispose_on_new_alert=dispose_on_new_alert,
-            )
-
-        if new_status == IncidentStatus.RESOLVED:
-            end_time = datetime.now(tz=timezone.utc)
-            incident.end_time = end_time
-
-        if incident.assignee != change_by.email:
-            incident.assignee = change_by.email
-            add_audit(
-                self.tenant_id,
-                str(incident_id),
-                change_by.email,
-                ActionType.INCIDENT_ASSIGN,
-                f"Incident self-assigned to {change_by.email}",
-                session=self.session,
-                commit=False,
-            )
-
-        add_audit(
-            self.tenant_id,
-            str(incident_id),
-            change_by.email,
-            ActionType.INCIDENT_STATUS_CHANGE,
-            f"Incident status changed from {incident.status} to {new_status.value}",
-            session=self.session,
-            commit=False,
-        )
-        incident.status = new_status.value
-        self.session.add(incident)
-        self.session.commit()
-
-        return self.__postprocess_incident_change(incident)
