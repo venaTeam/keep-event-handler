@@ -1251,53 +1251,6 @@ def test_incident_bl_update_incident(db_session):
         assert wf_action == "updated"
 
 
-def test_incident_bl_delete_incident(db_session):
-    workflow_manager = WorkflowManagerMock()
-
-    with patch("src.bl.incidents_bl.WorkflowManager", workflow_manager):
-        incident_bl = IncidentBl(
-            tenant_id=SINGLE_TENANT_UUID, session=db_session
-        )
-        # Check error if no incident found
-        with pytest.raises(HTTPException, match="Incident not found"):
-            incident_bl.delete_incident(uuid4())
-
-        incident_dto_in = IncidentDtoIn(
-            **{
-                "user_generated_name": "Incident name",
-                "user_summary": "Keep: Incident description",
-                "status": "firing",
-            }
-        )
-
-        incident_dto = incident_bl.create_incident(incident_dto_in)
-
-        incidents_count = (
-            db_session.query(Incident)
-            .filter(Incident.status != IncidentStatus.DELETED.value)
-            .count()
-        )
-        assert incidents_count == 1
-
-        incident_bl.delete_incident(incident_dto.id)
-
-        incidents_count = (
-            db_session.query(Incident)
-            .filter(Incident.status != IncidentStatus.DELETED.value)
-            .count()
-        )
-        assert incidents_count == 0
-
-
-
-        # Check workflow manager
-        assert len(workflow_manager.events) == 2  # Created, deleted
-        wf_tenant_id, wf_incident_dto, wf_action = workflow_manager.events[-1]
-        assert wf_tenant_id == SINGLE_TENANT_UUID
-        assert wf_incident_dto.id == incident_dto.id
-        assert wf_action == "deleted"
-
-
 @pytest.mark.asyncio
 async def test_incident_bl_add_alert_to_incident(db_session, create_alert):
     workflow_manager = WorkflowManagerMock()

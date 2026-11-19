@@ -1,5 +1,7 @@
+import enum
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy.dialects.mssql import DATETIME2 as MSSQL_DATETIME2
 from sqlalchemy.dialects.mysql import DATETIME as MySQL_DATETIME
@@ -13,6 +15,55 @@ logger = logging.getLogger(__name__)
 # We want to include the deleted_at field in the primary key,
 # but we also want to allow it to be nullable. MySQL doesn't allow nullable fields in primary keys, so:
 NULL_FOR_DELETED_AT = datetime(1000, 1, 1, 0, 0)
+
+
+class DismissMode(enum.Enum):
+    """How a dismissal ends. Shared by alerts (LastAlert) and incidents, which
+    model dismissal identically.
+
+    Mirrors keep-api-gateway's `src/models/db/helpers.py`. The two services read
+    and write the same columns in the same database, so these values and the
+    predicate below must agree exactly — a divergence shows up as one service
+    considering an alert suppressed while the other does not.
+    """
+
+    # Only an explicit status change lifts it
+    PERMANENT = "permanent"
+    # Lifts on its own once `dismissed_until` passes
+    DISMISS_UNTIL = "dismiss_until"
+
+
+def is_dismiss_active(
+    dismiss_mode: Optional[str],
+    dismissed_until: Optional[datetime],
+    now: Optional[datetime] = None,
+) -> bool:
+    """Whether a dismissal is in force right now.
+
+    The one definition of "dismissed", for both alerts and incidents.
+    Suppression is DERIVED from these two columns rather than stored as a status,
+    so a time-boxed dismissal lapses on its own clock — nothing sweeps the tables,
+    which means no reader may trust a stored status to tell it this.
+
+    keep-api-gateway and keep-workflows also carry a SQL twin of this predicate
+    (`suppressed_if_dismiss_active_sql`) for their CEL field mappings. This
+    service compiles no CEL against these columns, so it has none.
+    """
+    if dismiss_mode == DismissMode.PERMANENT.value:
+        return True
+
+    if dismiss_mode == DismissMode.DISMISS_UNTIL.value:
+        if dismissed_until is None:
+            return False
+        # The column is timezone-aware, but SQLite round-trips it naive; assume
+        # UTC there so the comparison below cannot raise.
+        deadline = dismissed_until
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        return deadline > (now or datetime.now(timezone.utc))
+
+    return False
+
 
 # managed (mysql)
 if RUNNING_IN_CLOUD_RUN or DB_CONNECTION_STRING == "impersonate":

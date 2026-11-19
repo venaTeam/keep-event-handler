@@ -80,29 +80,40 @@ def test_tracking_columns_match_model():
 # --------------------------------------------------------------------------- #
 def test_translate_dismissed_true_permanent():
     out = normalize_enrichments({"dismissed": True})
-    assert out["status"] == "suppressed"
     assert out["dismiss_mode"] == "permanent"
     assert "dismissed" not in out
+    # Dismiss no longer writes `status`: suppression is derived from the dismiss
+    # columns on read, so `status` keeps the override the alert reverts to. Storing
+    # 'suppressed' is what used to leave an expired dismiss_until stuck suppressed.
+    assert "status" not in out
 
 
 def test_translate_dismissed_true_with_timestamp_is_dismiss_until():
     out = normalize_enrichments({"dismissed": True, "dismiss_until": "2026-06-01T00:00:00Z"})
-    assert out["status"] == "suppressed"
     assert out["dismiss_mode"] == "dismiss_until"
     assert out["dismissed_until"] == "2026-06-01T00:00:00Z"
+    assert "status" not in out
 
 
 def test_translate_dismissed_false_clears():
     out = normalize_enrichments({"dismissed": False})
-    assert out["status"] is None
     assert out["dismiss_mode"] is None
     assert out["dismissed_until"] is None
+    # Clearing the dismissal is what un-suppresses; an unrelated status override
+    # survives an undismiss.
+    assert "status" not in out
 
 
 def test_dismiss_mode_forwarded_directly():
     out = normalize_enrichments({"status": "suppressed", "dismiss_mode": "until_resolved"})
     assert out["dismiss_mode"] == "until_resolved"
-    assert out["status"] == "suppressed"
+    # 'suppressed' is never stored as a status; the dismissal carries it.
+    assert "status" not in out
+
+
+def test_status_suppressed_alone_becomes_a_permanent_dismissal():
+    out = normalize_enrichments({"status": "suppressed", "note": "n"})
+    assert out == {"dismiss_mode": "permanent", "dismissed_until": None, "note": "n"}
 
 
 def test_unknown_key_rejected_strict():
@@ -162,7 +173,7 @@ def test_enrich_writes_typed_columns(db_session):
     assert la.note == "hello"
 
 
-def test_enrich_dismissed_true_sets_suppressed_permanent(db_session):
+def test_enrich_dismissed_true_sets_dismiss_mode_not_status(db_session):
     _insert_alert_and_lastalert(db_session, "fp-dismiss", AlertStatus.FIRING.value)
     enrich_entity(
         SINGLE_TENANT_UUID,
@@ -174,8 +185,32 @@ def test_enrich_dismissed_true_sets_suppressed_permanent(db_session):
         session=db_session,
     )
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, "fp-dismiss", session=db_session)
-    assert la.status == "suppressed"
     assert la.dismiss_mode == "permanent"
+    # Not stored as a status — that is what lets a time-boxed dismissal expire.
+    assert la.status is None
+    # ...but it still reads as suppressed while the dismissal is in force.
+    assert la.get_effective_status(AlertStatus.FIRING.value) == "suppressed"
+
+
+def test_enrich_dismiss_until_expires_without_a_write(db_session):
+    """The bug this model replaced: an expired dismissal stayed suppressed."""
+    _insert_alert_and_lastalert(db_session, "fp-dismiss-exp", AlertStatus.FIRING.value)
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    enrich_entity(
+        SINGLE_TENANT_UUID,
+        "fp-dismiss-exp",
+        {"dismiss_mode": "dismiss_until", "dismissed_until": past},
+        action_type=ActionType.GENERIC_ENRICH,
+        action_callee="bob",
+        action_description="test",
+        session=db_session,
+    )
+    la = get_last_alert_by_fingerprint(
+        SINGLE_TENANT_UUID, "fp-dismiss-exp", session=db_session
+    )
+    assert la.dismiss_mode == "dismiss_until"
+    assert la.is_dismiss_active() is False
+    assert la.get_effective_status(AlertStatus.FIRING.value) == "firing"
 
 
 def test_note_guard_does_not_erase(db_session):
@@ -328,7 +363,8 @@ def test_permanent_dismiss_stays_dismissed_on_firing_refire(db_session):
     )
     _occurrence(db_session, fp, AlertStatus.FIRING.value, _T0 + timedelta(minutes=1))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status == "suppressed"
+    assert la.get_effective_status() == "suppressed"
+    assert la.status is None
     assert la.dismiss_mode == "permanent"
 
 
@@ -511,7 +547,8 @@ def test_dedup_path_keeps_permanent_dismiss_on_firing_full_duplicate(db_session)
     )
     _save_dedup(db_session, _dedup_dto(fp, AlertStatus.FIRING.value))
     la = get_last_alert_by_fingerprint(SINGLE_TENANT_UUID, fp, session=db_session)
-    assert la.status == "suppressed"
+    assert la.get_effective_status() == "suppressed"
+    assert la.status is None
     assert la.dismiss_mode == "permanent"
 
 
