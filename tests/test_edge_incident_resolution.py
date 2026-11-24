@@ -7,9 +7,10 @@ SQLite accepts and Postgres rejects, so these cases run against both engines.
 
 Edge semantics (live links only, `deleted_at == NULL_FOR_DELETED_AT`):
 
-* first = the linked alert with the earliest `LastAlert.first_timestamp`,
-  ties broken by `fingerprint` ascending.
-* last  = the latest `LastAlert.first_timestamp`, ties broken by `fingerprint`
+* first = the alert that joined the incident earliest
+  (`LastAlertToIncident.timestamp`), ties broken by `fingerprint` ascending.
+  When the fingerprint was first seen does not matter.
+* last  = the alert that joined latest, ties broken by `fingerprint`
   descending.
 * That alert is resolved when `LastAlert.status` (the enriched status), or, if
   that is NULL, the `Alert.status` of `LastAlert.alert_id`, is "resolved".
@@ -50,6 +51,8 @@ class SeedAlert(NamedTuple):
     first_timestamp: datetime
     status: str
     enriched_status: str | None = None
+    # When the alert joined the incident; defaults to `first_timestamp`.
+    linked_at: datetime | None = None
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -141,6 +144,7 @@ def seed_incident(
                 tenant_id=tenant.id,
                 fingerprint=seed.fingerprint,
                 incident_id=incident.id,
+                timestamp=seed.linked_at or seed.first_timestamp,
                 deleted_at=(
                     datetime.utcnow()
                     if seed.fingerprint in unlinked
@@ -155,7 +159,7 @@ def seed_incident(
 @pytest.mark.parametrize(
     "a_status,b_status,first,last", [(F, R, False, True), (R, F, True, False)]
 )
-def test_edge_follows_first_timestamp(edge_session, a_status, b_status, first, last):
+def test_edge_follows_link_order(edge_session, a_status, b_status, first, last):
     inc = seed_incident(
         edge_session,
         [
@@ -165,6 +169,25 @@ def test_edge_follows_first_timestamp(edge_session, a_status, b_status, first, l
     )
     assert is_first_incident_alert_resolved(inc, session=edge_session) is first
     assert is_last_incident_alert_resolved(inc, session=edge_session) is last
+
+
+def test_edge_ignores_when_an_alert_was_first_seen(edge_session):
+    # "old" was first seen a week ago but joined after "new", which opened the
+    # incident: "new" is first and "old" is last.
+    inc = seed_incident(
+        edge_session,
+        [
+            SeedAlert("new", T0, F),
+            SeedAlert(
+                "old",
+                T0 - timedelta(days=7),
+                R,
+                linked_at=T0 + timedelta(minutes=10),
+            ),
+        ],
+    )
+    assert is_first_incident_alert_resolved(inc, session=edge_session) is False
+    assert is_last_incident_alert_resolved(inc, session=edge_session) is True
 
 
 def test_enriched_status_overrides_alert_status(edge_session):

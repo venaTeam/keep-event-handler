@@ -2669,18 +2669,29 @@ def is_edge_incident_alert_resolved(
     """Is the incident's first/last linked alert resolved?
 
     Only the incident's live links count. "first" and "last" order the linked
-    alerts by `LastAlert.first_timestamp`, the time the fingerprint was first
-    seen at all. It is set once and never moves, so it is NOT when the alert
-    joined this incident. "first" is the linked alert whose fingerprint was
-    first seen earliest (ties: fingerprint ascending), "last" the one first
-    seen latest (ties: fingerprint descending). Resolved means its
+    alerts by when they joined THIS incident (`LastAlertToIncident.timestamp`),
+    not by when the fingerprint was first seen: a recurring alert that joins
+    later is not the incident's first, however old it is. "first" is the alert
+    that joined earliest (ties: fingerprint ascending), "last" the one that
+    joined latest (ties: fingerprint descending). Resolved means its
     `LastAlert.status` when set, else its latest `Alert.status`, equals
     "resolved".
+
+    Ordering by the link keeps the query on this incident's own links. Ordering
+    by `LastAlert.first_timestamp` let Postgres walk the tenant-wide
+    `idx_lastalert_tenant_timestamp` index instead, which took over a second
+    per call on incidents with a few hundred links.
     """
     if edge == "first":
-        ordering = (LastAlert.first_timestamp.asc(), LastAlert.fingerprint.asc())
+        ordering = (
+            LastAlertToIncident.timestamp.asc(),
+            LastAlertToIncident.fingerprint.asc(),
+        )
     elif edge == "last":
-        ordering = (LastAlert.first_timestamp.desc(), LastAlert.fingerprint.desc())
+        ordering = (
+            LastAlertToIncident.timestamp.desc(),
+            LastAlertToIncident.fingerprint.desc(),
+        )
     else:
         raise ValueError(f"edge must be 'first' or 'last', got {edge!r}")
 
