@@ -15,7 +15,7 @@ from functools import wraps
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import  Callable, Iterator, List, Optional, Tuple
+from typing import Iterator, List, Literal, Optional, Tuple
 import uuid
 from uuid import UUID
 from sqlalchemy.sql import exists, expression
@@ -2658,51 +2658,79 @@ def get_incident_unique_fingerprint_count(
 def is_first_incident_alert_resolved(
     incident: Incident, session: Optional[Session] = None
 ) -> bool:
-    return is_edge_incident_alert_resolved(incident, func.min, session)
+    return is_edge_incident_alert_resolved(incident, "first", session)
 
 
 def is_edge_incident_alert_resolved(
-    incident: Incident, direction: Callable, session: Optional[Session] = None
+    incident: Incident,
+    edge: Literal["first", "last"],
+    session: Optional[Session] = None,
 ) -> bool:
+    """Is the incident's first/last linked alert resolved?
+
+    Only the incident's live links count. "first" and "last" order the linked
+    alerts by when they joined THIS incident (`LastAlertToIncident.timestamp`),
+    not by when the fingerprint was first seen: a recurring alert that joins
+    later is not the incident's first, however old it is. "first" is the alert
+    that joined earliest (ties: fingerprint ascending), "last" the one that
+    joined latest (ties: fingerprint descending). Resolved means its
+    `LastAlert.status` when set, else its latest `Alert.status`, equals
+    "resolved".
+
+    Ordering by the link keeps the query on this incident's own links. Ordering
+    by `LastAlert.first_timestamp` let Postgres walk the tenant-wide
+    `idx_lastalert_tenant_timestamp` index instead, which took over a second
+    per call on incidents with a few hundred links.
+    """
+    if edge == "first":
+        ordering = (
+            LastAlertToIncident.timestamp.asc(),
+            LastAlertToIncident.fingerprint.asc(),
+        )
+    elif edge == "last":
+        ordering = (
+            LastAlertToIncident.timestamp.desc(),
+            LastAlertToIncident.fingerprint.desc(),
+        )
+    else:
+        raise ValueError(f"edge must be 'first' or 'last', got {edge!r}")
+
     if incident.alerts_count == 0:
         return False
 
     with existed_or_new_session(session) as session:
-        # Enriched status override lives on LastAlert.status
-        enriched_status_field = LastAlert.status
-        status_field = Alert.status
-
-        finerprint, enriched_status, status = session.exec(
-            select(Alert.fingerprint, enriched_status_field, status_field)
-            .select_from(Alert)
-            .outerjoin(
+        row = session.exec(
+            select(LastAlert.status, Alert.status)
+            .select_from(LastAlertToIncident)
+            .join(
                 LastAlert,
                 and_(
-                    Alert.tenant_id == LastAlert.tenant_id,
-                    Alert.fingerprint == LastAlert.fingerprint,
+                    LastAlert.tenant_id == LastAlertToIncident.tenant_id,
+                    LastAlert.fingerprint == LastAlertToIncident.fingerprint,
                 ),
             )
-            .join(
-                LastAlertToIncident,
-                and_(
-                    LastAlertToIncident.tenant_id == Alert.tenant_id,
-                    LastAlertToIncident.fingerprint == Alert.fingerprint,
-                ),
+            .join(Alert, Alert.id == LastAlert.alert_id)
+            .where(
+                LastAlertToIncident.tenant_id == incident.tenant_id,
+                LastAlertToIncident.incident_id == incident.id,
+                LastAlertToIncident.deleted_at == NULL_FOR_DELETED_AT,
             )
-            .where(LastAlertToIncident.incident_id == incident.id)
-            .group_by(Alert.fingerprint)
-            .having(func.max(Alert.timestamp))
-            .order_by(direction(Alert.timestamp))
+            .order_by(*ordering)
+            .limit(1)
         ).first()
 
-        return enriched_status == AlertStatus.RESOLVED.value or (
-            enriched_status is None and status == AlertStatus.RESOLVED.value
-        )
+    if row is None:
+        return False
+
+    enriched_status, status = row
+    effective_status = enriched_status if enriched_status is not None else status
+    return effective_status == AlertStatus.RESOLVED.value
+
 
 def is_last_incident_alert_resolved(
     incident: Incident, session: Optional[Session] = None
 ) -> bool:
-    return is_edge_incident_alert_resolved(incident, func.max, session)
+    return is_edge_incident_alert_resolved(incident, "last", session)
 
 def get_int_severity(input_severity: int | str) -> int:
     if isinstance(input_severity, int):

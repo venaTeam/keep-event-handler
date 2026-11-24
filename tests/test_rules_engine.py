@@ -668,7 +668,7 @@ def test_incident_resolution_on_all(db_session, create_alert):
 
 @pytest.mark.parametrize(
     "direction,second_fire_order",
-    [(ResolveOn.FIRST.value, ("fp2", "fp1")), (ResolveOn.LAST.value, ("fp2", "fp1"))],
+    [(ResolveOn.FIRST.value, ("fp2", "fp1")), (ResolveOn.LAST.value, ("fp1", "fp2"))],
 )
 def test_incident_resolution_on_edge(
     db_session, create_alert, direction, second_fire_order
@@ -696,16 +696,17 @@ def test_incident_resolution_on_edge(
     )
     assert total_count == 0
 
+    t0 = datetime.datetime.utcnow()
     create_alert(
         "fp1",
         AlertStatus.FIRING,
-        datetime.datetime.utcnow(),
+        t0,
         {"severity": AlertSeverity.CRITICAL.value},
     )
     create_alert(
         "fp2",
         AlertStatus.FIRING,
-        datetime.datetime.utcnow(),
+        t0 + datetime.timedelta(minutes=1),
         {"severity": AlertSeverity.CRITICAL.value},
     )
 
@@ -734,7 +735,7 @@ def test_incident_resolution_on_edge(
     create_alert(
         fp1,
         AlertStatus.RESOLVED,
-        datetime.datetime.utcnow(),
+        t0 + datetime.timedelta(minutes=2),
         {"severity": AlertSeverity.CRITICAL.value},
     )
 
@@ -761,7 +762,7 @@ def test_incident_resolution_on_edge(
     create_alert(
         fp2,
         AlertStatus.RESOLVED,
-        datetime.datetime.utcnow(),
+        t0 + datetime.timedelta(minutes=3),
         {"severity": AlertSeverity.CRITICAL.value},
     )
 
@@ -784,6 +785,118 @@ def test_incident_resolution_on_edge(
     )
     assert alert_count == 2
     assert incident.status == IncidentStatus.RESOLVED.value
+
+
+@pytest.mark.parametrize(
+    "resolve_on,edge_fp",
+    [(ResolveOn.FIRST.value, "fp1"), (ResolveOn.LAST.value, "fp2")],
+)
+def test_legacy_edge_rule_resolves_on_its_edge_alert(
+    db_session, create_alert, resolve_on, edge_fp
+):
+    # Stored directly (the API no longer accepts these values): a rule that
+    # predates the retired strategies. Its incidents must keep auto-resolving.
+    create_rule_db(
+        tenant_id=SINGLE_TENANT_UUID,
+        name="test-rule",
+        definition={
+            "sql": "N/A",  # we don't use it anymore
+            "params": {},
+        },
+        timeframe=600,
+        timeunit="seconds",
+        definition_cel='(severity == "critical")',
+        created_by="test@keephq.dev",
+        require_approve=False,
+        resolve_on=resolve_on,
+    )
+
+    t0 = datetime.datetime.utcnow()
+    create_alert(
+        "fp1",
+        AlertStatus.FIRING,
+        t0,
+        {"severity": AlertSeverity.CRITICAL.value},
+    )
+    create_alert(
+        "fp2",
+        AlertStatus.FIRING,
+        t0 + datetime.timedelta(minutes=1),
+        {"severity": AlertSeverity.CRITICAL.value},
+    )
+    create_alert(
+        edge_fp,
+        AlertStatus.RESOLVED,
+        t0 + datetime.timedelta(minutes=2),
+        {"severity": AlertSeverity.CRITICAL.value},
+    )
+
+    incidents, count = get_last_incidents(
+        tenant_id=SINGLE_TENANT_UUID,
+        is_candidate=False,
+        limit=10,
+        offset=0,
+    )
+
+    assert count == 1
+    assert incidents[0].resolve_on == resolve_on
+    # resolved although the other alert is still firing
+    assert incidents[0].status == IncidentStatus.RESOLVED.value
+
+
+def test_first_resolved_follows_the_alert_that_opened_the_incident(
+    db_session, create_alert
+):
+    # A recurring alert that joins a later incident is not that incident's
+    # "first": the incident waits for the alert that opened it.
+    create_rule_db(
+        tenant_id=SINGLE_TENANT_UUID,
+        name="test-rule",
+        definition={
+            "sql": "N/A",  # we don't use it anymore
+            "params": {},
+        },
+        timeframe=600,
+        timeunit="seconds",
+        definition_cel='(severity == "critical")',
+        created_by="test@keephq.dev",
+        require_approve=False,
+        resolve_on=ResolveOn.FIRST.value,
+    )
+    t0 = datetime.datetime.utcnow()
+
+    def send(fingerprint, status, minutes):
+        create_alert(
+            fingerprint,
+            status,
+            t0 + datetime.timedelta(minutes=minutes),
+            {"severity": AlertSeverity.CRITICAL.value},
+        )
+
+    def incidents_by_id():
+        incidents, _ = get_last_incidents(
+            tenant_id=SINGLE_TENANT_UUID, is_candidate=False, limit=10, offset=0
+        )
+        return {incident.id: incident for incident in incidents}
+
+    send("fp1", AlertStatus.FIRING, 0)
+    send("fp1", AlertStatus.RESOLVED, 1)
+    (first_id,) = incidents_by_id()
+    assert incidents_by_id()[first_id].status == IncidentStatus.RESOLVED.value
+
+    send("fp2", AlertStatus.FIRING, 2)  # opens a second incident
+    send("fp1", AlertStatus.FIRING, 3)  # fp1 recurs and joins it
+    send("fp1", AlertStatus.RESOLVED, 4)
+
+    (second_id,) = set(incidents_by_id()) - {first_id}
+    _, alert_count = get_incident_alerts_by_incident_id(
+        tenant_id=SINGLE_TENANT_UUID, incident_id=str(second_id), limit=10, offset=0
+    )
+    assert alert_count == 2
+    assert incidents_by_id()[second_id].status == IncidentStatus.FIRING.value
+
+    send("fp2", AlertStatus.RESOLVED, 5)
+    assert incidents_by_id()[second_id].status == IncidentStatus.RESOLVED.value
 
 
 def test_rule_multiple_alerts(db_session, create_alert):
