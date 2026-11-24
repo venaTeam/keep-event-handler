@@ -168,22 +168,58 @@ def test_a_status_suppressed_alert_lapses_with_the_incident(db_session):
     assert _state(db_session, fp)["effective"] == "firing"
 
 
-def test_an_acknowledged_alert_keeps_its_override_under_the_dismissal(db_session):
+def _acknowledge(db_session, fingerprint):
+    last_alert = (
+        db_session.query(LastAlert).filter(LastAlert.fingerprint == fingerprint).one()
+    )
+    last_alert.status = "acknowledged"
+    db_session.commit()
+
+
+def _lapse(db_session, incident, fingerprint):
+    """Move both deadlines into the past, as if the dismissal had run out."""
+    db_session.expire_all()
+    db_session.get(Incident, incident.id).dismissed_until = _past(5)
+    db_session.query(LastAlert).filter(
+        LastAlert.fingerprint == fingerprint
+    ).one().dismissed_until = _past(5)
+    db_session.commit()
+
+
+def test_an_acknowledged_alert_comes_back_firing_with_the_incident(db_session):
+    """The incident's dismissal takes over from the alert's own acknowledgement:
+    when it lapses the alert comes back as the incident does — firing."""
     incident = _incident(
         db_session,
         dismiss_mode=IncidentDismissMode.DISMISS_UNTIL.value,
         dismissed_until=_future(90),
     )
     fp = _alert(db_session, "inh-ack-override")
-    last_alert = (
-        db_session.query(LastAlert).filter(LastAlert.fingerprint == fp).one()
-    )
-    last_alert.status = "acknowledged"
-    db_session.commit()
+    _acknowledge(db_session, fp)
 
     add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+    assert _state(db_session, fp)["effective"] == "suppressed"
 
-    assert _state(db_session, fp)["override"] == "acknowledged"
+    _lapse(db_session, incident, fp)
+    assert _state(db_session, fp)["effective"] == "firing"
+
+
+def test_an_acknowledged_incidents_dismissal_brings_alerts_back_acknowledged(
+    db_session,
+):
+    incident = _incident(
+        db_session,
+        status=IncidentStatus.ACKNOWLEDGED,
+        dismiss_mode=IncidentDismissMode.DISMISS_UNTIL.value,
+        dismissed_until=_future(90),
+    )
+    fp = _alert(db_session, "inh-ack-incident-sup")
+
+    add_alerts_to_incident(SINGLE_TENANT_UUID, incident, [fp], session=db_session)
+    assert _state(db_session, fp)["effective"] == "suppressed"
+
+    _lapse(db_session, incident, fp)
+    assert _state(db_session, fp)["effective"] == "acknowledged"
 
 
 def test_an_expired_incident_dismissal_is_not_inherited(db_session):
