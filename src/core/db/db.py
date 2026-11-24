@@ -2393,9 +2393,18 @@ def inherit_incident_status(
         return []
 
     if effective == IncidentStatus.SUPPRESSED.value:
+        # The alert reverts to what the incident reverts to once the dismissal
+        # lifts: acknowledged under an acknowledged incident, otherwise firing
+        # (NULL, the provider's status). Its own acknowledgement does not
+        # survive underneath — the incident's dismissal took over from it.
         enrichments = {
             "dismiss_mode": incident.dismiss_mode,
             "dismissed_until": incident.dismissed_until,
+            "status": (
+                IncidentStatus.ACKNOWLEDGED.value
+                if incident.status == IncidentStatus.ACKNOWLEDGED.value
+                else None
+            ),
         }
         action = ActionType.MANUAL_STATUS_CHANGE
         description = (
