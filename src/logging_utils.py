@@ -475,11 +475,6 @@ CONFIG = {
             "level": "ERROR",
             "propagate": False,
         },
-        "http.client": {
-            "handlers": ["default"],
-            "level": "DEBUG",
-            "propagate": False,
-        },
     },
 }
 
